@@ -44,10 +44,10 @@
     },
     "extra": {
       "eas": {
-        "projectId": "YOUR_EAS_PROJECT_ID"
+        "projectId": "5fc5406d-e8ab-4ce1-98e6-03fbd34dc1e8"
       }
     },
-    "owner": "YOUR_EXPO_USERNAME",
+    "owner": "hamid.naser",
     "runtimeVersion": {
       "policy": "appVersion"
     },
