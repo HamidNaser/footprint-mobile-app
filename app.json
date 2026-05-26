@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "footprint-mobile-app",
+    "name": "FootPrint",
     "slug": "footprint-mobile-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,20 +10,49 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#2B7DE9"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.footprint.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
+        "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
+        "NSLocationWhenInUseUsageDescription": "FootPrint uses your location to tag where your memories were created."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#2B7DE9"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.footprint.app",
+      "versionCode": 1,
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      }
+    },
+    "owner": "YOUR_EXPO_USERNAME",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/YOUR_EAS_PROJECT_ID"
     }
   }
 }

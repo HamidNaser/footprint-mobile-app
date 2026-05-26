@@ -18,6 +18,10 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# Google/Apple credentials (NEVER commit!)
+google-service-account.json
+*.keystore
+
 # Metro
 .metro-health-check*
 
