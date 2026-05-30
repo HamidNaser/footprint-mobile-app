@@ -29,6 +29,14 @@ This guide covers the setup, testing, and deployment process for the FootPrint R
 | Screen Placeholders | ✅ Done | Home, Journal, Family, Friends, Profile |
 | EAS Configuration | ✅ Done | eas.json configured |
 | GitHub Actions | ✅ Done | Workflow ready (needs secrets) |
+| **Authentication** | | |
+| Email/Password Login | ✅ Done | Registration and login working |
+| Google Sign-In (Web) | ✅ Done | Working on localhost:8081 |
+| Google Sign-In (iOS) | ✅ Done | Client ID configured |
+| Google Sign-In (Android) | ⏳ Pending | Needs client ID and SHA-1 |
+| Apple Sign-In | ⏳ Pending | Placeholder only |
+| Facebook Sign-In | ⏳ Pending | Placeholder only |
+| **Other** | | |
 | App Icons/Splash | ⏳ Pending | Using default Expo assets |
 | Screen Implementation | ⏳ Pending | Placeholder content only |
 | Developer Accounts | ⏳ Pending | Need Apple & Google accounts |
@@ -39,7 +47,40 @@ This guide covers the setup, testing, and deployment process for the FootPrint R
 
 ## What Has Been Done
 
-### 1. Project Initialization
+### 1. Authentication System
+
+The app has a complete authentication system with the following features:
+
+#### Email/Password Authentication
+- User registration with name, email, password
+- User login with email and password
+- Secure token storage using AsyncStorage
+- Auto-login on app restart
+
+#### Google Sign-In ✅
+- Implemented using `expo-auth-session`
+- Works on Web (localhost:8081), iOS, and Android
+- Configured client IDs in `src/config/oauth.config.js`
+
+**Google OAuth Client IDs:**
+| Platform | Status | Client ID |
+|----------|--------|-----------|
+| Web/Expo Go | ✅ Configured | `895398829822-ne770421bk555q45mta1sg97cik90amv` |
+| iOS | ✅ Configured | `895398829822-gujuid48t7d2lsadve1c427f7adekjac` |
+| Android | ⏳ Pending | Needs setup in Google Cloud Console |
+
+**Setup Guide:** See [GOOGLE-OAUTH-SETUP.md](GOOGLE-OAUTH-SETUP.md) for detailed instructions.
+
+#### Apple Sign-In (Planned)
+- Placeholder implemented
+- Required for App Store if using social login
+- Will use `expo-apple-authentication`
+
+#### Facebook Sign-In (Planned)
+- Placeholder implemented
+- Will use Facebook SDK
+
+### 2. Project Initialization
 
 ```
 footprint-mobile-app/
@@ -48,6 +89,10 @@ footprint-mobile-app/
 ├── eas.json                    # EAS Build configuration
 ├── package.json                # Dependencies
 └── src/
+    ├── config/
+    │   └── oauth.config.js     # Google OAuth configuration
+    ├── context/
+    │   └── AuthContext.js      # Authentication state management
     ├── navigation/
     │   └── AppNavigator.js     # Bottom tab navigation
     └── screens/
@@ -55,10 +100,11 @@ footprint-mobile-app/
         ├── JournalScreen.js    # Journal tab
         ├── FamilyScreen.js     # Family tab
         ├── FriendsScreen.js    # Friends tab
+        ├── LoginScreen.js      # Login/Register screen
         └── ProfileScreen.js    # Profile tab
 ```
 
-### 2. Configuration Files
+### 3. Configuration Files
 
 #### `app.json` - Configured with:
 - Bundle identifier: `com.footprint.app` (iOS)

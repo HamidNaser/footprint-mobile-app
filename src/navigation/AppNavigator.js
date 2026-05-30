@@ -3,13 +3,18 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
+import { View, ActivityIndicator, StyleSheet } from 'react-native';
 
-// Screen imports (placeholders for now)
+// Screen imports
 import HomeScreen from '../screens/HomeScreen';
 import JournalScreen from '../screens/JournalScreen';
 import FamilyScreen from '../screens/FamilyScreen';
 import FriendsScreen from '../screens/FriendsScreen';
 import ProfileScreen from '../screens/ProfileScreen';
+import LoginScreen from '../screens/LoginScreen';
+
+// Auth context
+import { useAuth } from '../context/AuthContext';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -58,12 +63,43 @@ function MainTabs() {
 }
 
 export default function AppNavigator() {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  // Show loading screen while checking auth status
+  if (isLoading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#2B7DE9" />
+      </View>
+    );
+  }
+
   return (
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="MainTabs" component={MainTabs} />
-        {/* Add more stack screens here (e.g., Settings, Details) */}
+        {isAuthenticated ? (
+          // Authenticated: Show main app
+          <Stack.Screen name="MainTabs" component={MainTabs} />
+        ) : (
+          // Not authenticated: Show login
+          <Stack.Screen 
+            name="Login" 
+            component={LoginScreen}
+            options={{
+              animationTypeForReplace: 'pop',
+            }}
+          />
+        )}
       </Stack.Navigator>
     </NavigationContainer>
   );
 }
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+});
