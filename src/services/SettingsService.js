@@ -403,6 +403,8 @@ class SettingsServiceClass {
    * @returns {Promise<string>} Journal ID (either stored or newly created)
    */
   async getOrCreateDefaultJournal(userId = null) {
+    console.log('[SettingsService] getOrCreateDefaultJournal called:', { userId });
+    
     // Check if we already have a default journal
     let journalId = await this.getDefaultJournalId();
     

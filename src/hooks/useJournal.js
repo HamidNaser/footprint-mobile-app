@@ -41,7 +41,12 @@ export function useJournal(journalId, options = {}) {
    * Fetch entries (initial load or refresh)
    */
   const fetchEntries = useCallback(async (reset = false) => {
-    if (!journalId) return;
+    if (!journalId) {
+      console.log('[useJournal] fetchEntries skipped - no journalId');
+      return;
+    }
+
+    console.log('[useJournal] fetchEntries called:', { journalId, reset });
 
     try {
       if (reset) {
@@ -55,6 +60,11 @@ export function useJournal(journalId, options = {}) {
       const fetchedEntries = await JournalService.getEntries(journalId, {
         limit,
         offset,
+      });
+
+      console.log('[useJournal] fetchEntries result:', { 
+        count: fetchedEntries.length, 
+        entries: fetchedEntries.map(e => ({ localId: e.localId, date: e.date }))
       });
 
       if (!mountedRef.current) return;
@@ -107,6 +117,8 @@ export function useJournal(journalId, options = {}) {
    * @returns {Promise<object>} Created entry
    */
   const createEntry = useCallback(async (entryData) => {
+    console.log('[useJournal] createEntry called:', { journalId, entryData });
+    
     try {
       setError(null);
 
@@ -114,6 +126,8 @@ export function useJournal(journalId, options = {}) {
         journalId,
         ...entryData,
       });
+
+      console.log('[useJournal] createEntry success:', { localId: entry.localId, date: entry.date });
 
       // Optimistic update - add to beginning of list
       setEntries(prev => [entry, ...prev]);
