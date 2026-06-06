@@ -32,7 +32,7 @@ Welcome! This file is your **navigation hub** and **resume point** for working o
 ## 🔖 Where We Stopped
 
 ### Current Focus
-**Journal System Wiring** — Phase A: Wire JournalScreen to real infrastructure
+**Journal System Wiring** — Phase B: Sync Your Journal to Server
 
 ### Active Implementation Plan
 📋 **[JOURNAL-IMPLEMENTATION-PLAN.md](JOURNAL-IMPLEMENTATION-PLAN.md)** — Complete guide with 5 phases (24 tasks)
@@ -45,26 +45,30 @@ This document contains:
 - Backend dependency mapping
 
 ### Last Completed
+- ✅ **Phase A: Wire JournalScreen** (June 6, 2026)
+  - getOrCreateDefaultJournal() creates/retrieves journal ID
+  - useJournal hook fetches real entries from SQLite/WebDB
+  - Compose modal saves entries via createEntry() to database
+  - Visibility selector (private/family/friends) saves correctly
+  - Entries persist across app restart (localStorage for web)
+  - Mock data now only shows when no real entries exist
 - ✅ Documentation reorganization (START, README, ARCHITECTURE, DEPLOYMENT, TODO)
 - ✅ All 8 implementation phases for Journal infrastructure built
 - ✅ SignalR real-time integration built
 - ✅ Places feature prototype with Interview Mode
 - ✅ Google OAuth for Web and iOS
-- ✅ Deep dive analysis of Journal system (June 4, 2026)
 
-### Currently Starting
-**Phase A: Wire JournalScreen** (no backend required)
-- A1: Verify `SettingsService.getOrCreateDefaultJournal()` works
-- A2: Ensure `useJournal(journalId)` fetches from SQLite correctly
-- A3: Connect Compose Modal → `createEntry()` → SQLite
-- A4: Verify visibility selector saves correctly
-- A5: Test: Create entry, close app, reopen, entry persists
-- A6: Remove `MOCK_ENTRIES` usage in production mode
+### Next Up
+**Phase B: Sync Your Journal to Server** (requires backend)
+- B1: Verify SyncEngine initializes on app start
+- B2: Test: Create entry offline → go online → entry syncs
+- B3: Verify SyncStatus badge updates in UI
+- B4: Test: Server-side entry arrives via SignalR
 
 ### Blockers/Notes
+- Phases B-E require Footprint.Hub backend running (Docker + LocalStack)
 - Android Google OAuth needs SHA-1 fingerprint from EAS build
 - Backend needs to auto-create default journal on user registration
-- Phases B-E require Footprint.Hub backend running
 
 ---
 

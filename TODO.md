@@ -1,6 +1,6 @@
 # FootPrint Mobile App - TODO & Backlog
 
-> **Last Updated:** June 4, 2026
+> **Last Updated:** June 6, 2026
 
 This document tracks **tasks, integration gaps, and the prioritized backlog** for the FootPrint mobile application.
 
@@ -401,9 +401,21 @@ All 8 phases of the Journal feature infrastructure have been built:
 |--------|-------------|--------|
 | Login | Live API | ✅ Working |
 | Profile | Live API (partial) | ⚠️ Missing fetchProfile/updateProfile |
-| Journal | Hardcoded mock data | ❌ **Needs wiring** |
+| Journal | SQLite/WebDB (local) | ✅ **Phase A Complete** - local CRUD working |
 | Home | None | 🔧 Placeholder |
 | Family | Mock data | 🔧 UI only |
 | Friends | Mock data | 🔧 UI only |
 | Settings | SettingsService | ✅ Working |
 | Places | Mock data | ✅ Prototype complete |
+
+### Journal Implementation Progress
+
+See [JOURNAL-IMPLEMENTATION-PLAN.md](JOURNAL-IMPLEMENTATION-PLAN.md) for detailed status.
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **Phase A** | Wire JournalScreen to real infrastructure | ✅ Complete (June 6, 2026) |
+| **Phase B** | Sync Your Journal to Server | ⏳ Next - requires backend |
+| **Phase C** | Reactions & Comments on Your Entries | ⏳ Pending |
+| **Phase D** | View Others' Journals | ⏳ Pending |
+| **Phase E** | React & Comment on Others' Entries | ⏳ Pending |
