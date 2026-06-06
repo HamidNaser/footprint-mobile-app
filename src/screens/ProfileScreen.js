@@ -164,7 +164,7 @@ const AncestryResultCard = ({ result }) => (
 
 // ==================== MAIN COMPONENT ====================
 
-export default function ProfileScreen() {
+export default function ProfileScreen({ navigation }) {
   const { user, logout, fetchProfile, updateProfile, accessToken, isLoading: authLoading } = useAuth();
   
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -444,6 +444,14 @@ export default function ProfileScreen() {
 
         {/* Header with Avatar */}
         <View style={styles.header}>
+          {/* Settings Button */}
+          <TouchableOpacity 
+            style={styles.settingsButton}
+            onPress={() => navigation.navigate('Settings')}
+          >
+            <Ionicons name="settings-outline" size={24} color="#007AFF" />
+          </TouchableOpacity>
+          
           <View style={styles.avatarContainer}>
             {user?.avatarUrl ? (
               <Image source={{ uri: user.avatarUrl }} style={styles.avatar} />
@@ -831,6 +839,19 @@ const styles = StyleSheet.create({
     paddingVertical: 24,
     backgroundColor: '#FFF',
     marginBottom: 16,
+    position: 'relative',
+  },
+  settingsButton: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F2F2F7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
   },
   avatarContainer: {
     position: 'relative',
