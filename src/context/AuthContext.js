@@ -1,12 +1,16 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import { DEV_USER } from '../data/mockData';
 
 const AuthContext = createContext(null);
 
 const AUTH_STORAGE_KEY = '@footprint_auth';
-const AUTH_API_BASE_URL = 'http://localhost:5100'; // Auth service
-const USERS_API_BASE_URL = 'http://localhost:5200'; // Users service
+const API_BASE_URL = 'http://localhost:5100'; // Update this for production
 const API_VERSION = 'v1'; // API version
+
+// DEV MODE: Set to true to bypass authentication on web for testing
+const DEV_BYPASS_AUTH = Platform.OS === 'web' && __DEV__;
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -22,6 +26,22 @@ export function AuthProvider({ children }) {
 
   const loadStoredAuth = async () => {
     try {
+      // DEV MODE: Auto-authenticate on web for testing
+      if (DEV_BYPASS_AUTH) {
+        console.log('[AuthContext] DEV MODE: Auto-authenticating for web testing');
+        setUser({ 
+          id: DEV_USER.id, 
+          email: DEV_USER.email, 
+          name: DEV_USER.name,
+          avatarUrl: DEV_USER.avatarUrl,
+        });
+        setAccessToken('dev-token');
+        setRefreshToken('dev-refresh-token');
+        setIsAuthenticated(true);
+        setIsLoading(false);
+        return;
+      }
+
       const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
       if (storedData) {
         const { user: storedUser, accessToken: storedAccessToken, refreshToken: storedRefreshToken } = JSON.parse(storedData);
@@ -57,7 +77,7 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     try {
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/login`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -92,9 +112,9 @@ export function AuthProvider({ children }) {
 
   const register = async (email, password, name) => {
     try {
-      console.log('Registering with:', { email, name, url: `${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/register` });
+      console.log('Registering with:', { email, name, url: `${API_BASE_URL}/api/${API_VERSION}/auth/register` });
       
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/register`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/register`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -137,14 +157,14 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const loginWithGoogle = async (accessToken) => {
+  const loginWithGoogle = async (idToken) => {
     try {
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/social/google`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/google`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ provider: 'google', token: accessToken }),
+        body: JSON.stringify({ idToken }),
       });
 
       if (!response.ok) {
@@ -163,7 +183,7 @@ export function AuthProvider({ children }) {
 
   const loginWithApple = async (identityToken, authorizationCode) => {
     try {
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/apple`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/apple`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -187,7 +207,7 @@ export function AuthProvider({ children }) {
 
   const loginWithFacebook = async (accessTokenFb) => {
     try {
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/facebook`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/facebook`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -213,7 +233,7 @@ export function AuthProvider({ children }) {
     try {
       // Call logout endpoint if needed
       if (refreshToken) {
-        await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/logout`, {
+        await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/logout`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -234,7 +254,7 @@ export function AuthProvider({ children }) {
 
   const refreshAccessToken = async () => {
     try {
-      const response = await fetch(`${AUTH_API_BASE_URL}/api/${API_VERSION}/auth/refresh`, {
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/refresh`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -258,93 +278,6 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // Fetch current user profile from API
-  const fetchProfile = async () => {
-    try {
-      const response = await fetch(`${USERS_API_BASE_URL}/api/${API_VERSION}/users/me`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-        },
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          // Token expired, try to refresh
-          const newToken = await refreshAccessToken();
-          if (newToken) {
-            return fetchProfile(); // Retry with new token
-          }
-        }
-        throw new Error('Failed to fetch profile');
-      }
-
-      const data = await response.json();
-      // Update local user state
-      setUser(data);
-      // Also update stored auth data
-      const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-      if (storedData) {
-        const authData = JSON.parse(storedData);
-        authData.user = data;
-        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authData));
-      }
-      return data;
-    } catch (error) {
-      console.error('Fetch profile error:', error);
-      throw error;
-    }
-  };
-
-  // Update user profile
-  const updateProfile = async (profileData) => {
-    try {
-      // First get the current profile to get the version (ETag)
-      const currentProfile = await fetchProfile();
-      
-      const response = await fetch(`${USERS_API_BASE_URL}/api/${API_VERSION}/users/me`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'If-Match': `"${currentProfile.version}"`,
-        },
-        body: JSON.stringify(profileData),
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          // Token expired, try to refresh
-          const newToken = await refreshAccessToken();
-          if (newToken) {
-            return updateProfile(profileData); // Retry with new token
-          }
-        }
-        if (response.status === 409) {
-          throw new Error('Profile was modified by another device. Please refresh and try again.');
-        }
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Failed to update profile');
-      }
-
-      const data = await response.json();
-      // Update local user state with the returned profile data
-      setUser(data);
-      // Also update stored auth data
-      const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-      if (storedData) {
-        const authData = JSON.parse(storedData);
-        authData.user = data;
-        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authData));
-      }
-      return data;
-    } catch (error) {
-      console.error('Update profile error:', error);
-      throw error;
-    }
-  };
-
   const value = {
     user,
     accessToken,
@@ -357,8 +290,6 @@ export function AuthProvider({ children }) {
     loginWithFacebook,
     logout,
     refreshAccessToken,
-    fetchProfile,
-    updateProfile,
   };
 
   return (

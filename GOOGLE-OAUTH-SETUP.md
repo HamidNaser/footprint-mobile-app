@@ -10,7 +10,7 @@ This guide explains how to set up Google Sign-In for the FootPrint mobile app.
 | iOS | ✅ Configured | `895398829822-gujuid48t7d2lsadve1c427f7adekjac.apps.googleusercontent.com` |
 | Android | ⏳ Pending | Needs SHA-1 fingerprint |
 
-**Last Updated:** May 29, 2026
+**Last Updated:** June 2, 2026
 
 ---
 

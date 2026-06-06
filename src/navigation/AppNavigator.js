@@ -8,10 +8,14 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native';
 // Screen imports
 import HomeScreen from '../screens/HomeScreen';
 import JournalScreen from '../screens/JournalScreen';
+import PersonJournalScreen from '../screens/PersonJournalScreen';
 import FamilyScreen from '../screens/FamilyScreen';
 import FriendsScreen from '../screens/FriendsScreen';
+import PlacesScreen from '../screens/PlacesScreen';
 import ProfileScreen from '../screens/ProfileScreen';
+import SettingsScreen from '../screens/SettingsScreen';
 import LoginScreen from '../screens/LoginScreen';
+import InterviewModeScreen from '../screens/InterviewModeScreen';
 
 // Auth context
 import { useAuth } from '../context/AuthContext';
@@ -39,8 +43,8 @@ function MainTabs() {
             case 'Friends':
               iconName = focused ? 'person-add' : 'person-add-outline';
               break;
-            case 'Profile':
-              iconName = focused ? 'person-circle' : 'person-circle-outline';
+            case 'Places':
+              iconName = focused ? 'map' : 'map-outline';
               break;
             default:
               iconName = 'ellipse';
@@ -57,7 +61,7 @@ function MainTabs() {
       <Tab.Screen name="Journal" component={JournalScreen} />
       <Tab.Screen name="Family" component={FamilyScreen} />
       <Tab.Screen name="Friends" component={FriendsScreen} />
-      <Tab.Screen name="Profile" component={ProfileScreen} />
+      <Tab.Screen name="Places" component={PlacesScreen} />
     </Tab.Navigator>
   );
 }
@@ -79,7 +83,37 @@ export default function AppNavigator() {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {isAuthenticated ? (
           // Authenticated: Show main app
-          <Stack.Screen name="MainTabs" component={MainTabs} />
+          <>
+            <Stack.Screen name="MainTabs" component={MainTabs} />
+            <Stack.Screen 
+              name="Profile" 
+              component={ProfileScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen 
+              name="Settings" 
+              component={SettingsScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen 
+              name="InterviewMode" 
+              component={InterviewModeScreen}
+              options={{
+                presentation: 'fullScreenModal',
+              }}
+            />
+            <Stack.Screen 
+              name="PersonJournal" 
+              component={PersonJournalScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+          </>
         ) : (
           // Not authenticated: Show login
           <Stack.Screen 
