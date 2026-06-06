@@ -244,15 +244,22 @@ export default function JournalScreen({ navigation }) {
   /**
    * Display entries logic:
    * - Production: only real entries from database
-   * - Dev mode: show real entries + mock entries for rich demo data
+   * - Dev mode: only show mock entries if NO real entries exist (first-run demo)
    * - Filter by selected date
    */
+  
+  // Flag to force mock data display (for demos/screenshots)
+  const SHOW_MOCK_DATA = false;
+  
   /**
-   * All entries (real + mock in dev mode)
+   * All entries (real + mock in dev mode only if no real entries)
    * Used for both display and calendar marking
    */
   const allEntries = useMemo(() => {
-    if (__DEV__) {
+    // In dev mode, show mock data only if:
+    // 1. SHOW_MOCK_DATA is true, OR
+    // 2. No real entries exist (first-run demo experience)
+    if (__DEV__ && (SHOW_MOCK_DATA || entries.length === 0)) {
       return [...entries, ...MOCK_ENTRIES];
     }
     return entries;

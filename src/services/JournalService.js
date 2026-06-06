@@ -134,6 +134,8 @@ class JournalServiceClass {
     location = null,
     visibility = EntryVisibility.PRIVATE,
   }) {
+    console.log('[JournalService] createEntry:', { journalId, userId, visibility, contentBlockCount: contentBlocks.length });
+    
     // Validate inputs
     if (!journalId) throw new Error('journalId is required');
     if (!userId) throw new Error('userId is required');
@@ -151,8 +153,9 @@ class JournalServiceClass {
     // Queue media for upload if there are media blocks
     await this._queueMediaForUpload(entry);
 
-    // Emit event for UI updates
-    this._emit('entryCreated', entry);
+    // NOTE: We don't emit 'entryCreated' here because the caller (useJournal hook)
+    // already handles optimistic updates. The event is reserved for entries
+    // arriving from external sources (e.g., SignalR sync from another device).
 
     return entry;
   }
@@ -344,7 +347,10 @@ class JournalServiceClass {
    * @returns {Promise<Array>} List of entries
    */
   async getEntries(journalId, options = {}) {
-    return this.repository.getByJournalId(journalId, options);
+    console.log('[JournalService] getEntries:', { journalId, options });
+    const entries = await this.repository.getByJournalId(journalId, options);
+    console.log('[JournalService] getEntries result:', { count: entries.length });
+    return entries;
   }
 
   /**
