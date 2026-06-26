@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { DEV_USER } from '../data/mockData';
+import { ApiClient } from '../api/ApiClient';
 
 const AuthContext = createContext(null);
 
@@ -38,6 +39,15 @@ export function AuthProvider({ children }) {
         setAccessToken('dev-token');
         setRefreshToken('dev-refresh-token');
         setIsAuthenticated(true);
+        
+        // Also set tokens in ApiClient so sync API calls work
+        await ApiClient.setTokens({
+          accessToken: 'dev-token',
+          refreshToken: 'dev-refresh-token',
+          expiresIn: 86400 * 365, // 1 year for dev
+        });
+        console.log('[AuthContext] DEV MODE: ApiClient tokens set');
+        
         setIsLoading(false);
         return;
       }

@@ -39,7 +39,13 @@ import {
 // Context
 import { useAuth } from '../context/AuthContext';
 
-// Mock data (dev only)
+// Hooks
+import { useFeed, FeedType } from '../hooks';
+
+// API
+import { ReactionsApi, CommentsApi } from '../api';
+
+// Mock data (dev only - fallback when API unavailable)
 import { FAMILY_JOURNAL_ENTRIES, getFamilyMemberById } from '../data/familyJournalData';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -174,6 +180,24 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, [isGroup, persons, person]);
 
   /**
+   * Use feed hook to fetch entries from API
+   */
+  const {
+    entries: feedEntries,
+    loading,
+    error,
+    hasMore,
+    refreshing: feedRefreshing,
+    refresh: feedRefresh,
+    loadMore,
+  } = useFeed({
+    type: isGroup ? FeedType.GROUP : FeedType.USER,
+    userId: person?.id,
+    userIds: isGroup ? personIds : undefined,
+    autoFetch: personIds.length > 0,
+  });
+
+  /**
    * Check if a timestamp is on the same day as the selected date
    */
   const isSameDay = useCallback((timestamp, date) => {
@@ -201,8 +225,17 @@ export default function PersonJournalScreen({ route, navigation }) {
 
   /**
    * Filter entries for the selected person(s) and date
+   * Uses API data if available, falls back to mock data in dev mode
    */
   const displayEntries = useMemo(() => {
+    // Use feed entries from API if available
+    if (feedEntries.length > 0) {
+      return feedEntries
+        .filter(entry => isEntryVisible(entry))
+        .filter(entry => isSameDay(entry.createdAt, selectedDate));
+    }
+    
+    // Fallback to mock data in dev mode
     if (__DEV__) {
       return FAMILY_JOURNAL_ENTRIES
         .filter(entry => personIds.includes(entry.userId))
@@ -210,19 +243,25 @@ export default function PersonJournalScreen({ route, navigation }) {
         .filter(entry => isSameDay(entry.createdAt, selectedDate));
     }
     return [];
-  }, [personIds, selectedDate, isSameDay, isEntryVisible]);
+  }, [feedEntries, personIds, selectedDate, isSameDay, isEntryVisible]);
 
   /**
    * All entries for calendar marking (not date-filtered)
    */
   const allEntries = useMemo(() => {
+    // Use feed entries from API if available
+    if (feedEntries.length > 0) {
+      return feedEntries.filter(entry => isEntryVisible(entry));
+    }
+    
+    // Fallback to mock data in dev mode
     if (__DEV__) {
       return FAMILY_JOURNAL_ENTRIES
         .filter(entry => personIds.includes(entry.userId))
         .filter(entry => isEntryVisible(entry));
     }
     return [];
-  }, [personIds, isEntryVisible]);
+  }, [feedEntries, personIds, isEntryVisible]);
 
   /**
    * Dates that have journal entries - for calendar marking
@@ -275,10 +314,67 @@ export default function PersonJournalScreen({ route, navigation }) {
    */
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    // In production, this would fetch from API
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await feedRefresh();
     setRefreshing(false);
-  }, []);
+  }, [feedRefresh]);
+
+  /**
+   * Handle reaction on entry (like/unlike)
+   */
+  const handleReact = useCallback(async (entryId, reactionKey) => {
+    console.log('[PersonJournalScreen] React:', entryId, reactionKey);
+    
+    // Find the entry
+    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+    if (!entry) return;
+    
+    const serverId = entry.serverId || entry.id;
+    if (!serverId || serverId.startsWith('local_')) {
+      console.log('[PersonJournalScreen] Local-only entry, skipping API');
+      return;
+    }
+    
+    try {
+      const isLiked = entry.reactions?.likedByMe || 
+        (entry.reactions?.heart && Array.isArray(entry.reactions.heart) && 
+         entry.reactions.heart.some(u => u.id === authUser?.id));
+      
+      if (reactionKey === null || (reactionKey === 'heart' && isLiked)) {
+        await ReactionsApi.unlikeEntry(serverId);
+      } else {
+        await ReactionsApi.likeEntry(serverId);
+      }
+      
+      await feedRefresh();
+    } catch (error) {
+      console.error('[PersonJournalScreen] Failed to react:', error);
+    }
+  }, [allEntries, authUser?.id, feedRefresh]);
+
+  /**
+   * Handle adding a comment/response to an entry
+   */
+  const handleAddResponse = useCallback(async (entryId, text) => {
+    console.log('[PersonJournalScreen] Add response:', entryId, text);
+    
+    if (!text?.trim()) return;
+    
+    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+    if (!entry) return;
+    
+    const serverId = entry.serverId || entry.id;
+    if (!serverId || serverId.startsWith('local_')) {
+      console.log('[PersonJournalScreen] Local-only entry, skipping API');
+      return;
+    }
+    
+    try {
+      await CommentsApi.addComment(serverId, text.trim());
+      await feedRefresh();
+    } catch (error) {
+      console.error('[PersonJournalScreen] Failed to add comment:', error);
+    }
+  }, [allEntries, feedRefresh]);
 
   /**
    * Handle gallery icon press on entry card
@@ -323,10 +419,12 @@ export default function PersonJournalScreen({ route, navigation }) {
         onGalleryPress={handleEntryGalleryPress}
         onPhotoPress={handleGalleryPhotoPress}
         onVideoPress={handleGalleryVideoPress}
+        onReact={handleReact}
+        onAddResponse={handleAddResponse}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress]);
+  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
 
   /**
    * Key extractor

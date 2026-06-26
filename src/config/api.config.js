@@ -14,20 +14,21 @@ const ENV = {
   development: {
     // Local development - use your machine's IP for physical devices
     // For emulators: Android uses 10.0.2.2, iOS uses localhost
+    // Hub API runs on port 50001 when using Aspire localstack
     authApiUrl: Platform.select({
       android: 'http://10.0.2.2:5100',
       ios: 'http://localhost:5100',
       default: 'http://localhost:5100',
     }),
     hubApiUrl: Platform.select({
-      android: 'http://10.0.2.2:5200',
-      ios: 'http://localhost:5200',
-      default: 'http://localhost:5200',
+      android: 'http://10.0.2.2:50001',
+      ios: 'http://localhost:50001',
+      default: 'http://localhost:50001',
     }),
     signalRUrl: Platform.select({
-      android: 'http://10.0.2.2:5200/hubs/journal',
-      ios: 'http://localhost:5200/hubs/journal',
-      default: 'http://localhost:5200/hubs/journal',
+      android: 'http://10.0.2.2:50001/hubs/footprint',
+      ios: 'http://localhost:50001/hubs/footprint',
+      default: 'http://localhost:50001/hubs/footprint',
     }),
   },
   staging: {
@@ -117,6 +118,13 @@ export const JOURNAL_ENDPOINTS = {
   UPDATE_ENTRY: '/journals/entries/:id',
   DELETE_ENTRY: '/journals/entries/:id',
   
+  // Reactions
+  LIKE_ENTRY: '/journals/entries/:id/like',
+  UNLIKE_ENTRY: '/journals/entries/:id/like',
+  
+  // Comments
+  ADD_COMMENT: '/journals/entries/:id/comments',
+  
   // Batch operations for sync
   BATCH_SYNC: '/journals/sync',
   GET_CHANGES: '/journals/changes',  // Get changes since last sync
@@ -139,6 +147,7 @@ export const FEED_ENDPOINTS = {
   GET_FEED: '/feed',
   GET_FAMILY_FEED: '/feed/family',
   GET_FRIENDS_FEED: '/feed/friends',
+  GET_USER_FEED: '/feed/user/:userId',
 };
 
 /**

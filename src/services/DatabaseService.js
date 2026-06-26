@@ -636,6 +636,68 @@ class DatabaseServiceClass {
     const db = await this.getDb();
     return db.getAllAsync(sql, params);
   }
+
+  // ============================================================
+  // SyncEngine Adapter Methods
+  // (Maps SyncEngine's expected interface to existing methods)
+  // ============================================================
+
+  /**
+   * Get all media in the upload queue (for SyncEngine)
+   * @returns {Promise<Array>} Media queue items with SyncEngine-expected field names
+   */
+  async getMediaQueue() {
+    const db = await this.getDb();
+    const rows = await db.getAllAsync(
+      `SELECT * FROM media_queue ORDER BY created_at ASC`
+    );
+    
+    // Map to SyncEngine's expected format
+    return rows.map(row => ({
+      id: row.local_id,
+      local_uri: row.file_path,
+      media_type: row.media_type,
+      entry_id: row.entry_local_id,
+      filename: row.file_path?.split('/').pop() || 'unknown',
+      status: row.upload_status,
+      server_url: row.server_url,
+      error: row.error_message,
+    }));
+  }
+
+  /**
+   * Update media queue item (for SyncEngine)
+   * @param {string} id - Local ID of the media
+   * @param {object} updates - Updates with SyncEngine field names
+   */
+  async updateMediaQueueItem(id, updates) {
+    const db = await this.getDb();
+    
+    const fields = [];
+    const values = [];
+
+    if (updates.status !== undefined) {
+      fields.push('upload_status = ?');
+      values.push(updates.status);
+    }
+    if (updates.server_url !== undefined) {
+      fields.push('server_url = ?');
+      values.push(updates.server_url);
+    }
+    // Note: server_id not in schema, storing in server_url is sufficient
+    if (updates.error !== undefined) {
+      fields.push('error_message = ?');
+      values.push(updates.error);
+    }
+
+    if (fields.length === 0) return;
+
+    values.push(id);
+    await db.runAsync(
+      `UPDATE media_queue SET ${fields.join(', ')} WHERE local_id = ?`,
+      values
+    );
+  }
 }
 
 // Export singleton instance
