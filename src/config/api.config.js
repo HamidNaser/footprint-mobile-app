@@ -7,6 +7,10 @@
 
 import { Platform } from 'react-native';
 
+// Optional build-time override of the backend URL.
+// Expo inlines EXPO_PUBLIC_* variables at build time.
+const BACKEND_OVERRIDE = process.env.EXPO_PUBLIC_BACKEND_API_URL;
+
 /**
  * Environment configuration
  */
@@ -36,9 +40,10 @@ const ENV = {
     signalRUrl: 'https://staging-api.footprint.app/hubs/journal',
   },
   production: {
-    authApiUrl: 'https://auth.footprint.app',
-    hubApiUrl: 'https://api.footprint.app',
-    signalRUrl: 'https://api.footprint.app/hubs/journal',
+    // Single backend behind the Application Load Balancer (routes by path).
+    authApiUrl: BACKEND_OVERRIDE || 'https://api.aqrava.com',
+    hubApiUrl: BACKEND_OVERRIDE || 'https://api.aqrava.com',
+    signalRUrl: `${BACKEND_OVERRIDE || 'https://api.aqrava.com'}/hubs/footprint`,
   },
 };
 
