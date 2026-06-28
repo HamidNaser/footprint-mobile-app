@@ -18,21 +18,26 @@ const ENV = {
   development: {
     // Local development - use your machine's IP for physical devices
     // For emulators: Android uses 10.0.2.2, iOS uses localhost
-    authApiUrl: Platform.select({
+    // Hub API runs on port 50001 when using Aspire localstack
+    // Set EXPO_PUBLIC_BACKEND_API_URL (e.g. https://api.aqrava.com) to point a
+    // local Expo dev build at the deployed AWS backend instead of localhost.
+    authApiUrl: BACKEND_OVERRIDE || Platform.select({
       android: 'http://10.0.2.2:5100',
       ios: 'http://localhost:5100',
       default: 'http://localhost:5100',
     }),
-    hubApiUrl: Platform.select({
-      android: 'http://10.0.2.2:5200',
-      ios: 'http://localhost:5200',
-      default: 'http://localhost:5200',
+    hubApiUrl: BACKEND_OVERRIDE || Platform.select({
+      android: 'http://10.0.2.2:50001',
+      ios: 'http://localhost:50001',
+      default: 'http://localhost:50001',
     }),
-    signalRUrl: Platform.select({
-      android: 'http://10.0.2.2:5200/hubs/journal',
-      ios: 'http://localhost:5200/hubs/journal',
-      default: 'http://localhost:5200/hubs/journal',
-    }),
+    signalRUrl: BACKEND_OVERRIDE
+      ? `${BACKEND_OVERRIDE}/hubs/footprint`
+      : Platform.select({
+          android: 'http://10.0.2.2:50001/hubs/footprint',
+          ios: 'http://localhost:50001/hubs/footprint',
+          default: 'http://localhost:50001/hubs/footprint',
+        }),
   },
   staging: {
     authApiUrl: 'https://staging-auth.footprint.app',
