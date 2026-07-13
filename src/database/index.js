@@ -186,6 +186,12 @@ export const resetDatabase = async () => {
 };
 
 /**
+ * Unified local-store wipe. Aliased to resetDatabase so callers can use the
+ * same name across the native and web implementations.
+ */
+export const clearDatabase = resetDatabase;
+
+/**
  * Get database statistics (for debugging)
  */
 export const getDatabaseStats = async () => {

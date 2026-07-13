@@ -16,9 +16,10 @@
  */
 
 import * as signalR from '@microsoft/signalr';
+import { API_CONFIG } from '../config/api.config';
 
-// Hub URL - matches Footprint.Hub.Api endpoint
-const HUB_BASE_URL = 'http://localhost:5200'; // Update for production
+// Hub URL - matches Footprint.Hub.Api endpoint (live AWS backend, see api.config.js)
+const HUB_BASE_URL = API_CONFIG.HUB_BASE_URL;
 const HUB_PATH = '/hubs/footprint';
 
 /**

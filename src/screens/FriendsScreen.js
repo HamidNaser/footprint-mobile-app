@@ -8,7 +8,7 @@
  * Matches web app (footprint-web-app) functionality.
  */
 
-import React, { useState, memo, useCallback } from 'react';
+import React, { useState, memo, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,11 +16,14 @@ import {
   ScrollView,
   TouchableOpacity,
   Image,
+  ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { FRIENDS_LIST_DATA, FRIENDS_TREE_DATA } from '../data/friendsData';
 import { useAuth } from '../context/AuthContext';
+import { getFriends } from '../services/SocialService';
 
 // Theme colors
 const PRIMARY_COLOR = '#4361ee';
@@ -127,9 +130,23 @@ const FriendListCard = memo(({ friend, isSelected, onPress }) => {
 /**
  * List View - Detailed friend cards
  */
-const ListView = memo(({ data, selectedFriend, onFriendPress }) => {
+const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshing, onRefresh }) => {
+  if (loading && (!data || data.length === 0)) {
+    return (
+      <View style={styles.centerFill}>
+        <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={styles.listScrollView} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      style={styles.listScrollView}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={PRIMARY_COLOR} />
+      }
+    >
       <View style={styles.listContainer}>
         {data.map((friend) => (
           <FriendListCard
@@ -312,9 +329,42 @@ const LocationFAB = memo(({ onPress }) => {
  * Main FriendsScreen Component
  */
 export default function FriendsScreen({ navigation }) {
-  const { user } = useAuth();
+  const { user, accessToken } = useAuth();
   const [activeView, setActiveView] = useState('list');
-  const [selectedFriend, setSelectedFriend] = useState(FRIENDS_LIST_DATA[0]);
+  const [selectedFriend, setSelectedFriend] = useState(null);
+
+  // Live friends (network-first). Falls back to bundled mock data when there's
+  // no token or the account has no friends yet.
+  const [friends, setFriends] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadFriends = useCallback(async () => {
+    if (!accessToken) {
+      setFriends(FRIENDS_LIST_DATA);
+      setLoading(false);
+      return;
+    }
+    try {
+      const live = await getFriends(accessToken);
+      setFriends(live.length > 0 ? live : FRIENDS_LIST_DATA);
+    } catch (err) {
+      console.warn('[FriendsScreen] Failed to load friends:', err.message);
+      setFriends((prev) => (prev.length > 0 ? prev : FRIENDS_LIST_DATA));
+    } finally {
+      setLoading(false);
+    }
+  }, [accessToken]);
+
+  useEffect(() => {
+    loadFriends();
+  }, [loadFriends]);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadFriends();
+    setRefreshing(false);
+  }, [loadFriends]);
 
   // Handle tapping organization - opens group journal of all friends from that org
   const handleOrgPress = useCallback((org) => {
@@ -340,10 +390,11 @@ export default function FriendsScreen({ navigation }) {
   const handleFriendPress = useCallback((friend) => {
     setSelectedFriend(friend);
     console.log('Selected friend:', friend.name);
-    // Navigate to PersonJournalScreen to view their individual journal
+    // Navigate to PersonJournalScreen to view their individual journal. `id` is
+    // the friend's real user account so PersonJournal can fetch live entries.
     navigation.navigate('PersonJournal', {
       person: {
-        id: `friend_${friend.id}`,
+        id: friend.id,
         name: friend.name,
         avatar: friend.avatar,
       },
@@ -381,9 +432,12 @@ export default function FriendsScreen({ navigation }) {
       {/* Content */}
       {activeView === 'list' ? (
         <ListView
-          data={FRIENDS_LIST_DATA}
+          data={friends}
           selectedFriend={selectedFriend}
           onFriendPress={handleFriendPress}
+          loading={loading}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
         />
       ) : (
         <TreeView 
@@ -469,6 +523,11 @@ const styles = StyleSheet.create({
   // List View
   listScrollView: {
     flex: 1,
+  },
+  centerFill: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   listContainer: {
     padding: 16,

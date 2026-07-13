@@ -2,7 +2,9 @@
  * Profile Service - handles all profile-related API calls to Footprint.Users service
  */
 
-const USERS_API_BASE_URL = 'http://localhost:5200';
+import { API_CONFIG } from '../config/api.config';
+
+const USERS_API_BASE_URL = API_CONFIG.HUB_BASE_URL; // Live AWS backend (see api.config.js)
 const API_VERSION = 'v1';
 
 /**

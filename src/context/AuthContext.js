@@ -1,16 +1,50 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
-import { DEV_USER } from '../data/mockData';
+import { API_CONFIG } from '../config/api.config';
+import { ApiClient } from '../api/ApiClient';
+import { startSync, teardownLocalData } from '../sync/SyncBootstrap';
 
 const AuthContext = createContext(null);
 
 const AUTH_STORAGE_KEY = '@footprint_auth';
-const API_BASE_URL = 'http://localhost:5100'; // Update this for production
+const API_BASE_URL = API_CONFIG.AUTH_BASE_URL; // Live AWS backend (see api.config.js)
 const API_VERSION = 'v1'; // API version
 
-// DEV MODE: Set to true to bypass authentication on web for testing
-const DEV_BYPASS_AUTH = Platform.OS === 'web' && __DEV__;
+/**
+ * Derive seconds-until-expiry from a JWT's `exp` claim so ApiClient can manage
+ * proactive token refresh. Falls back to 1 hour if the token can't be decoded.
+ */
+function getExpiresInSeconds(accessToken) {
+  try {
+    const payload = accessToken.split('.')[1];
+    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+    const decoded = JSON.parse(json);
+    if (decoded?.exp) {
+      return Math.max(60, decoded.exp - Math.floor(Date.now() / 1000));
+    }
+  } catch {
+    // ignore — fall through to default
+  }
+  return 3600;
+}
+
+/**
+ * Bridge the auth tokens into ApiClient so the Hub API layer (journals, media,
+ * places) is authenticated. AuthContext and ApiClient use different storage
+ * keys, so this must be called whenever tokens change.
+ */
+async function bridgeTokensToApiClient(accessToken, refreshToken) {
+  if (!accessToken) return;
+  try {
+    await ApiClient.setTokens({
+      accessToken,
+      refreshToken,
+      expiresIn: getExpiresInSeconds(accessToken),
+    });
+  } catch (error) {
+    console.warn('[AuthContext] Failed to bridge tokens to ApiClient:', error?.message);
+  }
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -24,24 +58,17 @@ export function AuthProvider({ children }) {
     loadStoredAuth();
   }, []);
 
+  // Activate the offline-first sync stack once authenticated (idempotent).
+  // Pass the user id so the sync stack can detect an account switch and wipe
+  // any local data left behind by a previous user before pulling.
+  useEffect(() => {
+    if (isAuthenticated && accessToken) {
+      startSync(user?.id);
+    }
+  }, [isAuthenticated, accessToken, user?.id]);
+
   const loadStoredAuth = async () => {
     try {
-      // DEV MODE: Auto-authenticate on web for testing
-      if (DEV_BYPASS_AUTH) {
-        console.log('[AuthContext] DEV MODE: Auto-authenticating for web testing');
-        setUser({ 
-          id: DEV_USER.id, 
-          email: DEV_USER.email, 
-          name: DEV_USER.name,
-          avatarUrl: DEV_USER.avatarUrl,
-        });
-        setAccessToken('dev-token');
-        setRefreshToken('dev-refresh-token');
-        setIsAuthenticated(true);
-        setIsLoading(false);
-        return;
-      }
-
       const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
       if (storedData) {
         const { user: storedUser, accessToken: storedAccessToken, refreshToken: storedRefreshToken } = JSON.parse(storedData);
@@ -49,6 +76,7 @@ export function AuthProvider({ children }) {
         setAccessToken(storedAccessToken);
         setRefreshToken(storedRefreshToken);
         setIsAuthenticated(true);
+        await bridgeTokensToApiClient(storedAccessToken, storedRefreshToken);
       }
     } catch (error) {
       console.error('Error loading stored auth:', error);
@@ -69,6 +97,7 @@ export function AuthProvider({ children }) {
       setAccessToken(tokens.accessToken);
       setRefreshToken(tokens.refreshToken);
       setIsAuthenticated(true);
+      await bridgeTokensToApiClient(tokens.accessToken, tokens.refreshToken);
     } catch (error) {
       console.error('Error saving auth:', error);
       throw error;
@@ -157,22 +186,34 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const loginWithGoogle = async (idToken) => {
+  const loginWithGoogle = async (googleToken) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/google`, {
+      // Backend contract: POST /api/v1/auth/social/{provider} with
+      // { provider, token } (both required), returning a TokenResponse.
+      const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/social/google`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ idToken }),
+        body: JSON.stringify({ provider: 'google', token: googleToken }),
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || 'Google login failed');
+      // Parse defensively: an empty body would otherwise throw
+      // "Unexpected end of JSON input" on response.json().
+      const text = await response.text();
+      let data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(`Invalid server response: ${text.substring(0, 100)}`);
+        }
       }
 
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || data.error || `Google login failed (${response.status})`);
+      }
+
       await saveAuth(data.user, { accessToken: data.accessToken, refreshToken: data.refreshToken });
       return data;
     } catch (error) {
@@ -243,6 +284,10 @@ export function AuthProvider({ children }) {
         }).catch(() => {}); // Ignore errors on logout
       }
     } finally {
+      // Stop background sync, clear the Hub API client's tokens, and wipe the
+      // local offline store so no journal data bleeds into the next session.
+      await teardownLocalData();
+      await ApiClient.clearTokens().catch(() => {});
       // Clear local storage
       await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
       setUser(null);

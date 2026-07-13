@@ -7,9 +7,11 @@
 
 import { Platform } from 'react-native';
 
-// Optional build-time override of the backend URL.
+// Backend URL. Defaults to the deployed AWS backend for ALL environments
+// (web, mobile, browser-run). Set EXPO_PUBLIC_BACKEND_API_URL to override
+// (e.g. http://localhost:5100) only when running a local backend.
 // Expo inlines EXPO_PUBLIC_* variables at build time.
-const BACKEND_OVERRIDE = process.env.EXPO_PUBLIC_BACKEND_API_URL;
+const BACKEND_OVERRIDE = process.env.EXPO_PUBLIC_BACKEND_API_URL || 'https://api.aqrava.com';
 
 /**
  * Environment configuration
@@ -161,6 +163,14 @@ export const USER_ENDPOINTS = {
   GET_USER: '/users/:id',
   GET_FAMILY: '/users/family',
   GET_FRIENDS: '/users/friends',
+};
+
+/**
+ * Settings endpoints
+ */
+export const SETTINGS_ENDPOINTS = {
+  GET_LOCATION: '/settings/location',
+  UPDATE_LOCATION: '/settings/location',
 };
 
 /**

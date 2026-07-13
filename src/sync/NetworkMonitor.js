@@ -105,7 +105,10 @@ class NetworkMonitorClass {
    */
   isOnline() {
     if (!this._currentState) return false;
-    return this._currentState.isConnected && this._currentState.isInternetReachable;
+    // `isInternetReachable` is often null ("unknown") on web and briefly at
+    // startup. Treat unknown as online; only an explicit `false` means offline.
+    return this._currentState.isConnected === true &&
+      this._currentState.isInternetReachable !== false;
   }
 
   /**

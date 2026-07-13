@@ -152,11 +152,42 @@ export const JournalMapView = ({
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [region, setRegion] = useState(initialRegion || DEFAULT_REGION);
 
-  // Filter entries with valid locations
-  const entriesWithLocation = useMemo(
-    () => entries.filter(e => e.location?.lat && e.location?.lng),
-    [entries]
-  );
+  // Filter entries with valid locations, then expand each entry into individual
+  // map markers: one for the entry coordinate plus one for every content block /
+  // media item that carries its own coordinate. Coordinates are de-duplicated so
+  // an entry and a block sharing the same spot don't stack. This mirrors the web
+  // app, where every text/photo/video/audio block can drop its own pin.
+  const entriesWithLocation = useMemo(() => {
+    const markers = [];
+
+    entries.forEach((entry) => {
+      const seen = new Set();
+      const addMarker = (loc, suffix) => {
+        if (!loc?.lat || !loc?.lng) return;
+        const key = `${loc.lat.toFixed(5)},${loc.lng.toFixed(5)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        markers.push({
+          ...entry,
+          id: suffix ? `${entry.id}:${suffix}` : entry.id,
+          entryId: entry.id,
+          location: { lat: loc.lat, lng: loc.lng, name: loc.name },
+        });
+      };
+
+      addMarker(entry.location, null);
+
+      const blocks = entry.contentBlocks || entry.content_blocks || [];
+      blocks.forEach((block, bi) => {
+        addMarker(block.location, `b${bi}`);
+        (block.media || []).forEach((media, mi) => {
+          addMarker(media.location, `b${bi}m${mi}`);
+        });
+      });
+    });
+
+    return markers;
+  }, [entries]);
 
   // Cluster entries if enabled
   const clusters = useMemo(() => {

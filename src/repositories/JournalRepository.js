@@ -9,6 +9,8 @@
 import { BaseRepository } from './BaseRepository';
 import { DatabaseService } from '../services/DatabaseService';
 import { SyncStatus, ContentBlockType } from '../database/schema';
+// Direct import (not '../sync') to avoid pulling SyncEngine and creating a cycle.
+import { SyncQueue, SyncOperationType } from '../sync/SyncQueue';
 
 /**
  * Journal Entry visibility options
@@ -68,6 +70,13 @@ class JournalRepositoryClass extends BaseRepository {
     await this.dbService.insertEntry(entry);
 
     this.log('createEntry', { localId, date: entry.date });
+
+    // Queue for push to the server. The local write above is authoritative;
+    // this is best-effort bookkeeping and must never break local journaling.
+    await this._enqueueSync(SyncOperationType.CREATE_ENTRY, localId, {
+      ...entry,
+      local_id: localId,
+    });
 
     return entry;
   }
@@ -293,7 +302,17 @@ class JournalRepositoryClass extends BaseRepository {
 
     this.log('update', { localId, fields: Object.keys(updateData) });
 
-    return this.getByLocalId(localId);
+    const updated = await this.getByLocalId(localId);
+
+    // Queue the update for push (only meaningful once the entry has a serverId).
+    await this._enqueueSync(
+      SyncOperationType.UPDATE_ENTRY,
+      localId,
+      { ...updated, local_id: localId },
+      entry.serverId || null,
+    );
+
+    return updated;
   }
 
   /**
@@ -385,6 +404,28 @@ class JournalRepositoryClass extends BaseRepository {
     await this.dbService.deleteEntry(localId);
 
     this.log('delete', { localId });
+
+    // Queue the delete for push (only meaningful once the entry has a serverId).
+    await this._enqueueSync(
+      SyncOperationType.DELETE_ENTRY,
+      localId,
+      { local_id: localId },
+      entry.serverId || null,
+    );
+  }
+
+  /**
+   * Enqueue a sync operation for the push side. Guarded so failures never break
+   * the local-first write, and a no-op when sync is disabled (Local Only mode).
+   * @private
+   */
+  async _enqueueSync(type, entityId, data, serverId = null) {
+    try {
+      if (!(await this.isSyncEnabled())) return;
+      await SyncQueue.enqueue({ type, entityId, serverId, data });
+    } catch (error) {
+      this.log('enqueueSync failed', { type, entityId, error: error.message });
+    }
   }
 
   /**
