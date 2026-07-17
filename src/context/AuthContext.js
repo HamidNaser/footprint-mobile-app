@@ -8,6 +8,7 @@ const AuthContext = createContext(null);
 
 const AUTH_STORAGE_KEY = '@footprint_auth';
 const API_BASE_URL = API_CONFIG.AUTH_BASE_URL; // Live AWS backend (see api.config.js)
+const USERS_BASE_URL = API_CONFIG.HUB_BASE_URL; // Users service is routed via the Hub gateway base
 const API_VERSION = 'v1'; // API version
 
 /**
@@ -297,6 +298,61 @@ export function AuthProvider({ children }) {
     }
   };
 
+  // Load the full user profile from the Users service and merge it into `user`.
+  // Login only returns a sparse user (id/email), so without this the profile
+  // screen shows "Not set" for every field even though the data exists server-side.
+  const fetchProfile = async () => {
+    if (!accessToken) return null;
+    try {
+      const response = await fetch(`${USERS_BASE_URL}/api/${API_VERSION}/users/me`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.message || `Failed to load profile (${response.status})`);
+      }
+      const mergedUser = { ...(user || {}), ...data };
+      setUser(mergedUser);
+      await AsyncStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify({ user: mergedUser, accessToken, refreshToken }),
+      );
+      return mergedUser;
+    } catch (error) {
+      console.warn('[AuthContext] fetchProfile failed:', error?.message);
+      throw error;
+    }
+  };
+
+  // Update the user profile on the Users service and merge the result back into
+  // `user`. Mirrors the web app's PUT /api/v1/users/me contract.
+  const updateProfile = async (updates) => {
+    if (!accessToken) throw new Error('Not authenticated');
+    const response = await fetch(`${USERS_BASE_URL}/api/${API_VERSION}/users/me`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(updates),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || `Failed to update profile (${response.status})`);
+    }
+    const mergedUser = { ...(user || {}), ...data };
+    setUser(mergedUser);
+    await AsyncStorage.setItem(
+      AUTH_STORAGE_KEY,
+      JSON.stringify({ user: mergedUser, accessToken, refreshToken }),
+    );
+    return mergedUser;
+  };
+
   const refreshAccessToken = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/refresh`, {
@@ -335,6 +391,8 @@ export function AuthProvider({ children }) {
     loginWithFacebook,
     logout,
     refreshAccessToken,
+    fetchProfile,
+    updateProfile,
   };
 
   return (
