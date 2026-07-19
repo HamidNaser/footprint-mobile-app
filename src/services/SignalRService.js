@@ -18,9 +18,8 @@
 import * as signalR from '@microsoft/signalr';
 import { API_CONFIG } from '../config/api.config';
 
-// Hub URL - matches Footprint.Hub.Api endpoint (live AWS backend, see api.config.js)
-const HUB_BASE_URL = API_CONFIG.HUB_BASE_URL;
-const HUB_PATH = '/hubs/footprint';
+// Hub URL - uses API config for consistency (live AWS backend, see api.config.js)
+const HUB_URL = API_CONFIG.SIGNALR_URL;
 
 /**
  * Connection states
@@ -45,6 +44,7 @@ export const SignalREvents = {
   RECEIVE_FRIEND_REQUEST: 'ReceiveFriendRequest',
   MESSAGE_READ: 'MessageRead',
   CONVERSATION_READ: 'ConversationRead',
+  SYNC_AVAILABLE: 'SyncAvailable',
 };
 
 /**
@@ -112,7 +112,7 @@ class SignalRServiceClass {
    * Create SignalR connection with configuration
    */
   _createConnection() {
-    const hubUrl = `${HUB_BASE_URL}${HUB_PATH}`;
+    const hubUrl = HUB_URL;
     
     console.log('[SignalR] Creating connection to:', hubUrl);
 
@@ -230,6 +230,12 @@ class SignalRServiceClass {
     // Conversation read confirmation
     this._connection.on(SignalREvents.CONVERSATION_READ, (conversationId, readByUserId) => {
       this._notifyHandlers(SignalREvents.CONVERSATION_READ, { conversationId, readByUserId });
+    });
+
+    // Sync available notification (journal entries created/updated/deleted)
+    this._connection.on(SignalREvents.SYNC_AVAILABLE, (syncEvent) => {
+      console.log('[SignalR] Sync available:', syncEvent.type, syncEvent.action, syncEvent.entityId);
+      this._notifyHandlers(SignalREvents.SYNC_AVAILABLE, syncEvent);
     });
   }
 

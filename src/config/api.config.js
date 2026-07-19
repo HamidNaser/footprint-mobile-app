@@ -129,6 +129,13 @@ export const JOURNAL_ENDPOINTS = {
   UPDATE_ENTRY: '/journals/entries/:id',
   DELETE_ENTRY: '/journals/entries/:id',
   
+  // Reactions
+  LIKE_ENTRY: '/journals/entries/:id/like',
+  UNLIKE_ENTRY: '/journals/entries/:id/like',
+  
+  // Comments
+  ADD_COMMENT: '/journals/entries/:id/comments',
+  
   // Batch operations for sync
   BATCH_SYNC: '/journals/sync',
   GET_CHANGES: '/journals/changes',  // Get changes since last sync
@@ -151,6 +158,7 @@ export const FEED_ENDPOINTS = {
   GET_FEED: '/feed',
   GET_FAMILY_FEED: '/feed/family',
   GET_FRIENDS_FEED: '/feed/friends',
+  GET_USER_FEED: '/feed/user/:userId',
 };
 
 /**

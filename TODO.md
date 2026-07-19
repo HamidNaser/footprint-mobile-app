@@ -66,17 +66,18 @@ graph LR
     
     subgraph "⚠️ Partially Integrated"
         PS[Profile Screen]
+        JS[Journal Screen]
     end
     
     subgraph "🔧 Infrastructure Ready"
-        JS[Journal Screen]
         HS[Home Screen]
         FaS[Family Screen]
         FrS[Friends Screen]
     end
     
     LS --> |API calls|AUTH[(Auth API<br/>:5100)]
-    PS --> |API calls|USERS[(Users API<br/>:5200)]
+    JS --> |API calls|HUB[(Hub API<br/>:50001)]
+    PS --> |API calls|USERS[(Users API<br/>:50001)]
     PS -.-> |Missing|AC[AuthContext<br/>fetchProfile]
     
     JS -.-> |Not wired|JH[useJournal Hook]
@@ -98,8 +99,8 @@ graph LR
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| Email/Password Auth | ✅ Working | Calls `localhost:5100/api/v1/auth/login` |
-| Registration | ✅ Working | Calls `localhost:5100/api/v1/auth/register` |
+| Email/Password Auth | ✅ Working | Calls `http://localhost:5100/api/v1/auth/login` |
+| Registration | ✅ Working | Calls `http://localhost:5100/api/v1/auth/register` |
 | Google OAuth | ✅ Working | Web + iOS configured, Android pending |
 | Token Storage | ✅ Working | AsyncStorage with auto-restore |
 | Token Refresh | ✅ Working | Automatic refresh on 401 |
@@ -435,7 +436,7 @@ See [JOURNAL-IMPLEMENTATION-PLAN.md](JOURNAL-IMPLEMENTATION-PLAN.md) for detaile
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **Phase A** | Wire JournalScreen to real infrastructure | ✅ Complete (June 6, 2026) |
-| **Phase B** | Sync Your Journal to Server | ⏳ Next - requires backend |
-| **Phase C** | Reactions & Comments on Your Entries | ⏳ Pending |
-| **Phase D** | View Others' Journals | ⏳ Pending |
-| **Phase E** | React & Comment on Others' Entries | ⏳ Pending |
+| **Phase B** | Sync Your Journal to Server | ✅ Complete (June 6, 2026) |
+| **Phase C** | Reactions & Comments on Your Entries | ✅ Complete (June 6, 2026) |
+| **Phase D** | View Others' Journals | ✅ Complete (June 6, 2026) |
+| **Phase E** | React & Comment on Others' Entries | ✅ Complete (June 6, 2026) |

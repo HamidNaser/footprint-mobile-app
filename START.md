@@ -1,9 +1,24 @@
 # FootPrint Mobile App - Start Here
 
-> **Last Updated:** June 4, 2026  
-> **Branch:** feature/google-oauth-authentication
+> **Last Updated:** June 13, 2026  
+> **Branch:** feature/phase-b-sync
 
 Welcome! This file is your **navigation hub** and **resume point** for working on the FootPrint mobile application. When returning to this project after a break, start here to get oriented.
+
+---
+
+## 🔌 Local Development Ports
+
+| Service | Port | URL |
+|---------|------|-----|
+| **Hub API** | 50001 | `http://localhost:50001/api/v0/...` |
+| **Hub SignalR** | 50001 | `http://localhost:50001/hubs/footprint` |
+| **Aspire Dashboard** | 17289 | `https://localhost:17289` |
+| **Auth API** | 5100 | `http://localhost:5100/api/v1/...` |
+| **LocalStack** | 4566 | S3, SQS emulation |
+| **MongoDB** | 27018 | `mongodb://localhost:27018` |
+| **Redis** | 6379 | Cache |
+| **Expo Web** | 8081/8082 | Mobile app in browser |
 
 ---
 
@@ -44,26 +59,37 @@ This document contains:
 - Implementation phases A through E with task checklists
 - Backend dependency mapping
 
-### Last Completed
+### Completed Phases
 - ✅ **Phase A: Wire JournalScreen** (June 6, 2026)
+- ✅ **Phase B: Sync Your Journal to Server** (June 13, 2026)
   - getOrCreateDefaultJournal() creates/retrieves journal ID
   - useJournal hook fetches real entries from SQLite/WebDB
   - Compose modal saves entries via createEntry() to database
   - Visibility selector (private/family/friends) saves correctly
   - Entries persist across app restart (localStorage for web)
   - Mock data now only shows when no real entries exist
+- ✅ **B1: Initialize SyncEngine on app start** (June 13, 2026)
+  - SyncContext created and wired into App.js
+  - SyncEngine initializes on auth, listens for events
+  - API config updated to use correct Hub port (50001)
+  - SignalR URL configured via api.config.js
+  - CORS enabled for Hub API (localhost:8081/8082/19006/3000)
 - ✅ Documentation reorganization (START, README, ARCHITECTURE, DEPLOYMENT, TODO)
 - ✅ All 8 implementation phases for Journal infrastructure built
 - ✅ SignalR real-time integration built
 - ✅ Places feature prototype with Interview Mode
 - ✅ Google OAuth for Web and iOS
 
-### Next Up
-**Phase B: Sync Your Journal to Server** (requires backend)
-- B1: Verify SyncEngine initializes on app start
-- B2: Test: Create entry offline → go online → entry syncs
-- B3: Verify SyncStatus badge updates in UI
-- B4: Test: Server-side entry arrives via SignalR
+### Currently In Progress
+**Phase D: View Others' Journals** — Ready to start
+
+### Last Completed
+**Phase C: Reactions & Comments** ✅ (June 13, 2026)
+- ✅ C1: ReactionsApi created (like/unlike)
+- ✅ C2: CommentsApi created (add comment)
+- ✅ C3: JournalScreen wired to call APIs
+- ✅ C4: Refresh after react/comment updates cache
+- ✅ C5: Tested: likes=2→1, comments work
 
 ### Blockers/Notes
 - Phases B-E require Footprint.Hub backend running (Docker + LocalStack)

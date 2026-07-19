@@ -34,6 +34,7 @@ import { JournalComposeModal } from '../components/journal/JournalComposeModal';
 import { JournalEntryDetail } from './JournalEntryDetail';
 import { ConnectionStatusIndicator } from '../components/common/ConnectionStatusIndicator';
 import { NotificationBadge } from '../components/common/NotificationBadge';
+import { SyncStatusBadge } from '../components/common/SyncStatusBadge';
 import { 
   CalendarCoils,
   DateSwipeContainer,
@@ -54,6 +55,8 @@ import { useAuth } from '../context/AuthContext';
 // Services
 import { SettingsService } from '../services/SettingsService';
 
+// API
+import { ReactionsApi, CommentsApi } from '../api';
 // Sync (adopt reconciled server journal id once the first pull completes)
 import { SyncEngine, SyncEvent } from '../sync/SyncEngine';
 
@@ -546,6 +549,80 @@ export default function JournalScreen({ navigation }) {
   }, [deleteJournalEntry]);
 
   /**
+   * Handle reaction on entry (like/unlike)
+   * For entries with serverId, calls API; for local-only, updates in-memory
+   */
+  const handleReact = useCallback(async (entryId, reactionKey) => {
+    console.log('[JournalScreen] React:', entryId, reactionKey);
+    
+    // Find the entry
+    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+    if (!entry) return;
+    
+    // Get server ID (for synced entries)
+    const serverId = entry.serverId || entry.id;
+    
+    // If no server ID, this is a local-only entry - skip API call
+    if (!serverId || serverId.startsWith('local_')) {
+      console.log('[JournalScreen] Local-only entry, skipping API');
+      return;
+    }
+    
+    try {
+      // Check if user already reacted
+      const isLiked = entry.reactions?.likedByMe || 
+        (entry.reactions?.heart && Array.isArray(entry.reactions.heart) && 
+         entry.reactions.heart.some(u => u.id === authUser?.id));
+      
+      if (reactionKey === null || (reactionKey === 'heart' && isLiked)) {
+        // Remove reaction
+        await ReactionsApi.unlikeEntry(serverId);
+        console.log('[JournalScreen] Unliked entry');
+      } else {
+        // Add reaction
+        await ReactionsApi.likeEntry(serverId);
+        console.log('[JournalScreen] Liked entry');
+      }
+      
+      // Refresh to get updated reaction counts
+      await refresh();
+    } catch (error) {
+      console.error('[JournalScreen] Failed to react:', error);
+    }
+  }, [allEntries, authUser?.id, refresh]);
+
+  /**
+   * Handle adding a comment/response to an entry
+   */
+  const handleAddResponse = useCallback(async (entryId, text) => {
+    console.log('[JournalScreen] Add response:', entryId, text);
+    
+    if (!text?.trim()) return;
+    
+    // Find the entry
+    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+    if (!entry) return;
+    
+    // Get server ID
+    const serverId = entry.serverId || entry.id;
+    
+    if (!serverId || serverId.startsWith('local_')) {
+      console.log('[JournalScreen] Local-only entry, skipping API');
+      return;
+    }
+    
+    try {
+      await CommentsApi.addComment(serverId, text.trim());
+      console.log('[JournalScreen] Comment added');
+      
+      // Refresh to get updated comments
+      await refresh();
+    } catch (error) {
+      console.error('[JournalScreen] Failed to add comment:', error);
+    }
+  }, [allEntries, refresh]);
+
+  /**
    * Render entry card
    */
   const renderEntry = useCallback(({ item }) => {
@@ -564,10 +641,12 @@ export default function JournalScreen({ navigation }) {
         onVideoPress={(videos, index) => {
           handleGalleryVideoPress(videos, index);
         }}
+        onReact={handleReact}
+        onAddResponse={handleAddResponse}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress]);
+  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
 
   /**
    * Key extractor
@@ -626,6 +705,13 @@ export default function JournalScreen({ navigation }) {
       <ConnectionStatusIndicator 
         variant="banner" 
         showReconnectButton 
+      />
+
+      {/* Sync Status Badge - shows syncing/error states */}
+      <SyncStatusBadge 
+        variant="banner" 
+        showLastSync
+        showRetryButton
       />
 
       {/* New Entries Banner */}

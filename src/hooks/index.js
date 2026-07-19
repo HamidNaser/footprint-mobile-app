@@ -18,6 +18,11 @@ export {
   useJournalPresence,
 } from './useJournalRealtime';
 
+export {
+  useFeed,
+  FeedType,
+} from './useFeed';
+
 // Future hooks will be exported here:
 // export { useSync } from './useSync';
 // export { useSettings } from './useSettings';
