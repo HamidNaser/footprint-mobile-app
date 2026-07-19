@@ -10,7 +10,7 @@
  * - FAB for new entries
  */
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -57,9 +57,11 @@ import { SettingsService } from '../services/SettingsService';
 
 // API
 import { ReactionsApi, CommentsApi } from '../api';
+// Sync (adopt reconciled server journal id once the first pull completes)
+import { SyncEngine, SyncEvent } from '../sync/SyncEngine';
 
 // Mock data (dev only)
-import { MOCK_ENTRIES, getMockUserById } from '../data/mockData';
+
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -227,6 +229,29 @@ export default function JournalScreen({ navigation }) {
     autoFetch: !!journalId, // Only fetch when journalId is available
   });
 
+  // The sync bootstrap adopts the user's *server* journal id as the default and
+  // stores it. JournalScreen reads the default once on mount, which can race
+  // ahead of that reconciliation (leaving it pointed at a stale local journal id
+  // with no entries). Once the first pull completes, re-read the default journal
+  // id and adopt it so the screen queries the same journal the pulled entries
+  // were stored under; otherwise just refresh in place.
+  useEffect(() => {
+    const unsubscribe = SyncEngine.addListener(async (event) => {
+      if (event !== SyncEvent.SYNC_COMPLETED) return;
+      try {
+        const latest = await SettingsService.getDefaultJournalId();
+        if (latest && latest !== journalId) {
+          setJournalId(latest);
+        } else if (journalId) {
+          refresh();
+        }
+      } catch (err) {
+        console.warn('[JournalScreen] post-sync journal adoption failed:', err?.message);
+      }
+    });
+    return unsubscribe;
+  }, [journalId, refresh]);
+
   // User display info - uses authUser from context
   const user = useMemo(() => ({
     name: authUser?.name || 'You',
@@ -246,32 +271,18 @@ export default function JournalScreen({ navigation }) {
   }, []);
 
   /**
-   * Display entries logic:
-   * - Production: only real entries from database
-   * - Dev mode: only show mock entries if NO real entries exist (first-run demo)
-   * - Filter by selected date
+   * All entries used for both display and calendar marking. Always the user's
+   * real entries from the local database — no mock/demo fallback, so an empty or
+   * still-loading journal never renders another person's fabricated entries.
    */
-  
-  // Flag to force mock data display (for demos/screenshots)
-  const SHOW_MOCK_DATA = false;
-  
-  /**
-   * All entries (real + mock in dev mode only if no real entries)
-   * Used for both display and calendar marking
-   */
-  const allEntries = useMemo(() => {
-    // In dev mode, show mock data only if:
-    // 1. SHOW_MOCK_DATA is true, OR
-    // 2. No real entries exist (first-run demo experience)
-    if (__DEV__ && (SHOW_MOCK_DATA || entries.length === 0)) {
-      return [...entries, ...MOCK_ENTRIES];
-    }
-    return entries;
-  }, [entries]);
+  const allEntries = entries;
 
   const displayEntries = useMemo(() => {
-    // Filter entries to only show those from the selected date
-    return allEntries.filter(entry => isSameDay(entry.createdAt, selectedDate));
+    // Filter entries to only show those from the selected date. Use the entry's
+    // journal `date` (when the memory happened) rather than `createdAt` (when the
+    // row was written/synced) so entries land on the correct calendar day. Fall
+    // back to createdAt for legacy/mock entries that have no explicit date.
+    return allEntries.filter(entry => isSameDay(entry.date || entry.createdAt, selectedDate));
   }, [allEntries, selectedDate, isSameDay]);
 
   /**
@@ -281,12 +292,39 @@ export default function JournalScreen({ navigation }) {
   const markedDates = useMemo(() => {
     const dates = {};
     allEntries.forEach(entry => {
-      const date = new Date(entry.createdAt);
+      const date = new Date(entry.date || entry.createdAt);
       const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       dates[dateStr] = { marked: true };
     });
     return dates;
   }, [allEntries]);
+
+  // On first load, if the currently selected date (defaults to today) has no
+  // entries but the journal does, jump to the most recent entry's date so the
+  // synced data is visible immediately. Entries are date-stamped for when the
+  // memory happened, which may be well before today. Runs once.
+  const didInitialDateJump = useRef(false);
+  useEffect(() => {
+    if (didInitialDateJump.current) return;
+    if (!entries || entries.length === 0) return;
+
+    const hasEntryOnSelected = entries.some(
+      (e) => isSameDay(e.date || e.createdAt, selectedDate),
+    );
+    if (hasEntryOnSelected) {
+      didInitialDateJump.current = true;
+      return;
+    }
+
+    const newest = entries.reduce((latest, e) => {
+      const t = new Date(e.date || e.createdAt).getTime();
+      return Number.isFinite(t) && t > latest ? t : latest;
+    }, 0);
+    if (newest > 0) {
+      setSelectedDate(new Date(newest));
+    }
+    didInitialDateJump.current = true;
+  }, [entries, selectedDate, isSameDay]);
   
   /**
    * Get user info for an entry (for rendering cards)
@@ -299,17 +337,6 @@ export default function JournalScreen({ navigation }) {
         name: entry.author.name,
         avatarUrl: entry.author.avatarUrl || entry.author.avatar,
       };
-    }
-    
-    // In dev mode, look up mock user by userId
-    if (__DEV__ && entry.userId) {
-      const mockUser = getMockUserById(entry.userId);
-      if (mockUser) {
-        return {
-          name: mockUser.name,
-          avatarUrl: mockUser.avatarUrl,
-        };
-      }
     }
     
     // Default to current auth user

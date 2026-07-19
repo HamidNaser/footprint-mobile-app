@@ -29,9 +29,16 @@ import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
 
 import SettingsService, { StorageMode, Theme } from '../services/SettingsService';
+import { SettingsApi, LOCATION_PRECISION_OPTIONS } from '../api';
 import { useAuth } from '../context/AuthContext';
 
 const PRIMARY_COLOR = '#4361ee';
+
+/** Human label for a precision radius (meters). `null` => Private. */
+const precisionLabel = (meters) => {
+  const opt = LOCATION_PRECISION_OPTIONS.find((o) => o.meters === (meters ?? null));
+  return opt ? opt.label : 'City';
+};
 
 // Storage mode configuration
 const STORAGE_MODE_CONFIG = {
@@ -194,6 +201,57 @@ const StorageModeSelector = memo(({ currentMode, onSelect, onClose }) => (
 StorageModeSelector.displayName = 'StorageModeSelector';
 
 /**
+ * Location-precision selector modal content. Lets the user pick how precisely a
+ * given audience (family or friends) sees the location attached to their entries.
+ */
+const PrecisionSelector = memo(({ title, currentMeters, onSelect, onClose }) => (
+  <View style={styles.modalContent}>
+    <View style={styles.modalHeader}>
+      <Text style={styles.modalTitle}>{title}</Text>
+      <TouchableOpacity onPress={onClose}>
+        <Ionicons name="close" size={24} color="#333" />
+      </TouchableOpacity>
+    </View>
+    <Text style={styles.modalSubtitle}>
+      Choose how precisely they see the location on your entries
+    </Text>
+
+    {LOCATION_PRECISION_OPTIONS.map((opt) => {
+      const selected = (currentMeters ?? null) === opt.meters;
+      return (
+        <TouchableOpacity
+          key={opt.label}
+          style={[styles.modeOption, selected && styles.modeOptionSelected]}
+          onPress={() => onSelect(opt.meters)}
+        >
+          <View style={[
+            styles.modeIcon,
+            { backgroundColor: selected ? PRIMARY_COLOR : '#F2F2F7' },
+          ]}>
+            <Ionicons
+              name={opt.meters === null ? 'lock-closed' : 'location'}
+              size={22}
+              color={selected ? '#FFF' : '#8E8E93'}
+            />
+          </View>
+          <View style={styles.modeContent}>
+            <View style={styles.modeHeader}>
+              <Text style={styles.modeTitle}>{opt.label}</Text>
+              {selected && (
+                <Ionicons name="checkmark-circle" size={20} color={PRIMARY_COLOR} />
+              )}
+            </View>
+            <Text style={styles.modeSubtitle}>{opt.hint}</Text>
+          </View>
+        </TouchableOpacity>
+      );
+    })}
+  </View>
+));
+
+PrecisionSelector.displayName = 'PrecisionSelector';
+
+/**
  * Sync status indicator
  */
 const SyncStatusIndicator = memo(({ pendingCount, lastSyncStatus, isOnline }) => {
@@ -241,6 +299,12 @@ export default function SettingsScreen({ navigation }) {
   const [isExporting, setIsExporting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Location privacy (per-audience precision)
+  const [familyMeters, setFamilyMeters] = useState(100);
+  const [friendsMeters, setFriendsMeters] = useState(5000);
+  const [defaultLocationSharing, setDefaultLocationSharing] = useState('private');
+  const [precisionAudience, setPrecisionAudience] = useState(null); // 'family' | 'friends' | null
+
   /**
    * Load settings on mount
    */
@@ -272,7 +336,47 @@ export default function SettingsScreen({ navigation }) {
     } catch (error) {
       console.error('[SettingsScreen] Error loading settings:', error);
     }
+
+    // Location privacy is served by the Hub API; load it separately so a network
+    // failure here never blocks the rest of the settings screen.
+    try {
+      const location = await SettingsApi.getLocationSettings();
+      if (location) {
+        setFamilyMeters(location.familyLocationPrecisionMeters ?? 100);
+        setFriendsMeters(location.friendsLocationPrecisionMeters ?? null);
+        setDefaultLocationSharing(location.defaultLocationSharing ?? 'private');
+      }
+    } catch (error) {
+      console.warn('[SettingsScreen] Could not load location settings:', error?.message);
+    }
   };
+
+  /**
+   * Persist a change to the per-audience location precision.
+   */
+  const handlePrecisionChange = useCallback(async (audience, meters) => {
+    const nextFamily = audience === 'family' ? meters : familyMeters;
+    const nextFriends = audience === 'friends' ? meters : friendsMeters;
+
+    // Optimistic UI update.
+    if (audience === 'family') setFamilyMeters(meters);
+    else setFriendsMeters(meters);
+    setPrecisionAudience(null);
+
+    try {
+      await SettingsApi.updateLocationSettings({
+        defaultLocationSharing,
+        familyLocationPrecisionMeters: nextFamily ?? 100,
+        friendsLocationPrecisionMeters: nextFriends,
+      });
+    } catch (error) {
+      console.error('[SettingsScreen] Error saving location settings:', error);
+      // Roll back on failure.
+      if (audience === 'family') setFamilyMeters(familyMeters);
+      else setFriendsMeters(friendsMeters);
+      Alert.alert('Could not save', 'Your location privacy change was not saved. Please try again.');
+    }
+  }, [familyMeters, friendsMeters, defaultLocationSharing]);
 
   /**
    * Handle storage mode change
@@ -433,6 +537,29 @@ export default function SettingsScreen({ navigation }) {
    * Handle logout
    */
   const handleLogout = useCallback(() => {
+    const doLogout = async () => {
+      await logout();
+      // Auth state change swaps to the auth stack automatically; reset guarded
+      // in case the 'Login' route isn't reachable from the current navigator.
+      try {
+        navigation.reset({
+          index: 0,
+          routes: [{ name: 'Login' }],
+        });
+      } catch {
+        // ignore — the root navigator will render Login once logged out
+      }
+    };
+
+    // React Native's Alert with buttons is a no-op on web (the onPress
+    // callbacks never fire), so use the browser confirm dialog there.
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm('Log out? You will need to log in again to sync your data.')) {
+        doLogout();
+      }
+      return;
+    }
+
     Alert.alert(
       'Log Out?',
       'You will need to log in again to sync your data.',
@@ -441,13 +568,7 @@ export default function SettingsScreen({ navigation }) {
         {
           text: 'Log Out',
           style: 'destructive',
-          onPress: async () => {
-            await logout();
-            navigation.reset({
-              index: 0,
-              routes: [{ name: 'Login' }],
-            });
-          },
+          onPress: doLogout,
         },
       ]
     );
@@ -530,6 +651,27 @@ export default function SettingsScreen({ navigation }) {
               showChevron={!isDeleting}
             />
           )}
+        </View>
+
+        {/* Location Privacy */}
+        <SectionHeader title="LOCATION PRIVACY" icon="location" />
+        <View style={styles.section}>
+          <SettingsRow
+            icon="people"
+            iconColor="#34C759"
+            title="Family sees"
+            subtitle="How precisely family sees your locations"
+            value={precisionLabel(familyMeters)}
+            onPress={() => setPrecisionAudience('family')}
+          />
+          <SettingsRow
+            icon="person-add"
+            iconColor="#5AC8FA"
+            title="Friends see"
+            subtitle="How precisely friends see your locations"
+            value={precisionLabel(friendsMeters)}
+            onPress={() => setPrecisionAudience('friends')}
+          />
         </View>
 
         {/* Appearance */}
@@ -632,6 +774,23 @@ export default function SettingsScreen({ navigation }) {
             currentMode={storageMode}
             onSelect={handleStorageModeChange}
             onClose={() => setShowStorageModal(false)}
+          />
+        </View>
+      )}
+
+      {/* Location Precision Modal */}
+      {precisionAudience && (
+        <View style={styles.modalOverlay}>
+          <TouchableOpacity
+            style={styles.modalBackdrop}
+            activeOpacity={1}
+            onPress={() => setPrecisionAudience(null)}
+          />
+          <PrecisionSelector
+            title={precisionAudience === 'family' ? 'Family sees' : 'Friends see'}
+            currentMeters={precisionAudience === 'family' ? familyMeters : friendsMeters}
+            onSelect={(meters) => handlePrecisionChange(precisionAudience, meters)}
+            onClose={() => setPrecisionAudience(null)}
           />
         </View>
       )}

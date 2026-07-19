@@ -11,7 +11,7 @@
  * - Shows author info on cards when viewing a group
  */
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -39,14 +39,8 @@ import {
 // Context
 import { useAuth } from '../context/AuthContext';
 
-// Hooks
-import { useFeed, FeedType } from '../hooks';
-
-// API
-import { ReactionsApi, CommentsApi } from '../api';
-
-// Mock data (dev only - fallback when API unavailable)
-import { FAMILY_JOURNAL_ENTRIES, getFamilyMemberById } from '../data/familyJournalData';
+// Live data
+import { getUserEntries } from '../services/SocialService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -133,7 +127,7 @@ const Header = ({ title, subtitle, avatar, onBack, onAvatarPress }) => (
  * Main PersonJournalScreen Component
  */
 export default function PersonJournalScreen({ route, navigation }) {
-  const { user: authUser } = useAuth();
+  const { user: authUser, accessToken } = useAuth();
   
   // Route params
   const { 
@@ -145,6 +139,9 @@ export default function PersonJournalScreen({ route, navigation }) {
   
   // State
   const [selectedDate, setSelectedDate] = useState(new Date());
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [swipeGesturesEnabled, setSwipeGesturesEnabled] = useState(true);
   
@@ -161,41 +158,82 @@ export default function PersonJournalScreen({ route, navigation }) {
   // Calendar picker state
   const [showCalendarPicker, setShowCalendarPicker] = useState(false);
 
+  // Once entries load, jump to the person's most recent entry date (instead of
+  // "today", which is almost always empty). Only auto-jumps once per person so
+  // it never fights the user's manual date navigation or a pull-to-refresh.
+  const didInitDateRef = useRef(false);
+
   // Display info
   const displayName = isGroup ? groupName : person?.name || 'Journal';
   const displayAvatar = isGroup ? null : person?.avatar;
   const displaySubtitle = isGroup ? `${persons?.length || 0} members` : null;
 
   /**
-   * Get person IDs to filter entries by
+   * Get person IDs to fetch entries for
    */
   const personIds = useMemo(() => {
     if (isGroup && persons) {
-      return persons.map(p => p.id);
+      return persons.map(p => p.id).filter(Boolean);
     }
-    if (person) {
+    if (person?.id) {
       return [person.id];
     }
     return [];
   }, [isGroup, persons, person]);
 
   /**
-   * Use feed hook to fetch entries from API
+   * Lookup of person id -> { name, avatar } for author display in group views
    */
-  const {
-    entries: feedEntries,
-    loading,
-    error,
-    hasMore,
-    refreshing: feedRefreshing,
-    refresh: feedRefresh,
-    loadMore,
-  } = useFeed({
-    type: isGroup ? FeedType.GROUP : FeedType.USER,
-    userId: person?.id,
-    userIds: isGroup ? personIds : undefined,
-    autoFetch: personIds.length > 0,
-  });
+  const personById = useMemo(() => {
+    const map = {};
+    if (isGroup && persons) {
+      persons.forEach(p => { if (p?.id) map[p.id] = p; });
+    } else if (person?.id) {
+      map[person.id] = person;
+    }
+    return map;
+  }, [isGroup, persons, person]);
+
+  /**
+   * Fetch entries for the target person(s). The backend enforces per-entry
+   * visibility, so no client-side filtering is required.
+   */
+  const loadEntries = useCallback(async () => {
+    if (!accessToken || personIds.length === 0) {
+      setEntries([]);
+      setLoading(false);
+      return;
+    }
+    try {
+      setError(null);
+      const results = await Promise.all(
+        personIds.map(id => getUserEntries(accessToken, id))
+      );
+      const merged = results.flat().sort((a, b) => b.createdAt - a.createdAt);
+      setEntries(merged);
+      // On first successful load for this person, open on their latest entry so
+      // the journal isn't stuck on an empty "today".
+      if (!didInitDateRef.current && merged.length > 0) {
+        didInitDateRef.current = true;
+        setSelectedDate(new Date(merged[0].createdAt));
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to load journal');
+      setEntries([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [accessToken, personIds]);
+
+  useEffect(() => {
+    // New person selected: allow the next load to auto-jump to their latest entry.
+    didInitDateRef.current = false;
+  }, [personIds]);
+
+  useEffect(() => {
+    setLoading(true);
+    loadEntries();
+  }, [loadEntries]);
 
   /**
    * Check if a timestamp is on the same day as the selected date
@@ -210,90 +248,38 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, []);
 
   /**
-   * Check if entry is visible to the current user
-   * - 'family' entries are visible to family members
-   * - 'family_friends' entries are visible to family and friends
-   * - 'friends' entries are visible to friends only
-   * - 'private' entries are NOT visible to others
-   */
-  const isEntryVisible = useCallback((entry) => {
-    // For now, show entries with family, family_friends visibility
-    // In production, this would check actual relationship
-    const visibility = entry.visibility;
-    return visibility === 'family' || visibility === 'family_friends';
-  }, []);
-
-  /**
-   * Filter entries for the selected person(s) and date
-   * Uses API data if available, falls back to mock data in dev mode
+   * Filter entries for the selected date
    */
   const displayEntries = useMemo(() => {
-    // Use feed entries from API if available
-    if (feedEntries.length > 0) {
-      return feedEntries
-        .filter(entry => isEntryVisible(entry))
-        .filter(entry => isSameDay(entry.createdAt, selectedDate));
-    }
-    
-    // Fallback to mock data in dev mode
-    if (__DEV__) {
-      return FAMILY_JOURNAL_ENTRIES
-        .filter(entry => personIds.includes(entry.userId))
-        .filter(entry => isEntryVisible(entry))
-        .filter(entry => isSameDay(entry.createdAt, selectedDate));
-    }
-    return [];
-  }, [feedEntries, personIds, selectedDate, isSameDay, isEntryVisible]);
-
-  /**
-   * All entries for calendar marking (not date-filtered)
-   */
-  const allEntries = useMemo(() => {
-    // Use feed entries from API if available
-    if (feedEntries.length > 0) {
-      return feedEntries.filter(entry => isEntryVisible(entry));
-    }
-    
-    // Fallback to mock data in dev mode
-    if (__DEV__) {
-      return FAMILY_JOURNAL_ENTRIES
-        .filter(entry => personIds.includes(entry.userId))
-        .filter(entry => isEntryVisible(entry));
-    }
-    return [];
-  }, [feedEntries, personIds, isEntryVisible]);
+    return entries.filter(entry => isSameDay(entry.createdAt, selectedDate));
+  }, [entries, selectedDate, isSameDay]);
 
   /**
    * Dates that have journal entries - for calendar marking
    */
   const markedDates = useMemo(() => {
     const dates = {};
-    allEntries.forEach(entry => {
+    entries.forEach(entry => {
       const date = new Date(entry.createdAt);
       const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
       dates[dateStr] = { marked: true };
     });
     return dates;
-  }, [allEntries]);
+  }, [entries]);
 
   /**
-   * Get user info for an entry
+   * Get user info for an entry (for author display in group views)
    */
   const getUserForEntry = useCallback((entry) => {
-    // Look up from family data
-    const member = getFamilyMemberById(entry.userId);
-    if (member) {
-      return {
-        name: member.name,
-        avatarUrl: member.avatar,
-      };
+    const p = personById[entry.userId];
+    if (p) {
+      return { name: p.name, avatarUrl: p.avatar };
     }
-    // Fallback
-    return {
-      name: 'Unknown',
-      avatarUrl: 'https://randomuser.me/api/portraits/lego/1.jpg',
-    };
-  }, []);
+    if (entry.author?.name) {
+      return { name: entry.author.name, avatarUrl: entry.author.avatarUrl };
+    }
+    return { name: 'Unknown', avatarUrl: null };
+  }, [personById]);
 
   /**
    * Navigate date
@@ -314,67 +300,9 @@ export default function PersonJournalScreen({ route, navigation }) {
    */
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    await feedRefresh();
+    await loadEntries();
     setRefreshing(false);
-  }, [feedRefresh]);
-
-  /**
-   * Handle reaction on entry (like/unlike)
-   */
-  const handleReact = useCallback(async (entryId, reactionKey) => {
-    console.log('[PersonJournalScreen] React:', entryId, reactionKey);
-    
-    // Find the entry
-    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
-    if (!entry) return;
-    
-    const serverId = entry.serverId || entry.id;
-    if (!serverId || serverId.startsWith('local_')) {
-      console.log('[PersonJournalScreen] Local-only entry, skipping API');
-      return;
-    }
-    
-    try {
-      const isLiked = entry.reactions?.likedByMe || 
-        (entry.reactions?.heart && Array.isArray(entry.reactions.heart) && 
-         entry.reactions.heart.some(u => u.id === authUser?.id));
-      
-      if (reactionKey === null || (reactionKey === 'heart' && isLiked)) {
-        await ReactionsApi.unlikeEntry(serverId);
-      } else {
-        await ReactionsApi.likeEntry(serverId);
-      }
-      
-      await feedRefresh();
-    } catch (error) {
-      console.error('[PersonJournalScreen] Failed to react:', error);
-    }
-  }, [allEntries, authUser?.id, feedRefresh]);
-
-  /**
-   * Handle adding a comment/response to an entry
-   */
-  const handleAddResponse = useCallback(async (entryId, text) => {
-    console.log('[PersonJournalScreen] Add response:', entryId, text);
-    
-    if (!text?.trim()) return;
-    
-    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
-    if (!entry) return;
-    
-    const serverId = entry.serverId || entry.id;
-    if (!serverId || serverId.startsWith('local_')) {
-      console.log('[PersonJournalScreen] Local-only entry, skipping API');
-      return;
-    }
-    
-    try {
-      await CommentsApi.addComment(serverId, text.trim());
-      await feedRefresh();
-    } catch (error) {
-      console.error('[PersonJournalScreen] Failed to add comment:', error);
-    }
-  }, [allEntries, feedRefresh]);
+  }, [loadEntries]);
 
   /**
    * Handle gallery icon press on entry card
@@ -419,12 +347,10 @@ export default function PersonJournalScreen({ route, navigation }) {
         onGalleryPress={handleEntryGalleryPress}
         onPhotoPress={handleGalleryPhotoPress}
         onVideoPress={handleGalleryVideoPress}
-        onReact={handleReact}
-        onAddResponse={handleAddResponse}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
+  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress]);
 
   /**
    * Key extractor
@@ -473,10 +399,24 @@ export default function PersonJournalScreen({ route, navigation }) {
             />
           }
           ListEmptyComponent={
-            <EmptyState 
-              personName={displayName} 
-              isGroup={isGroup} 
-            />
+            loading ? (
+              <View style={styles.emptyState}>
+                <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+              </View>
+            ) : error ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIcon}>
+                  <Ionicons name="cloud-offline-outline" size={48} color={PRIMARY_COLOR} />
+                </View>
+                <Text style={styles.emptyTitle}>Couldn't load journal</Text>
+                <Text style={styles.emptySubtitle}>{error}</Text>
+              </View>
+            ) : (
+              <EmptyState 
+                personName={displayName} 
+                isGroup={isGroup} 
+              />
+            )
           }
         />
       </DateSwipeContainer>

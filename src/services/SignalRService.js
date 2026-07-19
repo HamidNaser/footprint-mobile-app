@@ -18,7 +18,7 @@
 import * as signalR from '@microsoft/signalr';
 import { API_CONFIG } from '../config/api.config';
 
-// Hub URL - uses API config for consistency
+// Hub URL - uses API config for consistency (live AWS backend, see api.config.js)
 const HUB_URL = API_CONFIG.SIGNALR_URL;
 
 /**

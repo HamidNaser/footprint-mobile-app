@@ -523,13 +523,26 @@ class SyncEngineClass {
    * Process a server entry during pull
    */
   async _processServerEntry(serverEntry) {
+    // The /journals/changes payload is already camelCase and matches what the
+    // repository expects (id, userId, date, contentBlocks[], location, ...).
+    // Do NOT route it through JournalApi.formatEntryFromApi() — that produces
+    // snake_case keys (server_id, journal_id, content_blocks) the repository
+    // does not read, which would store malformed entries.
+    const defaultJournalId = await SettingsService.getDefaultJournalId();
+    const mapped = {
+      ...serverEntry,
+      // The mobile app shows a single default journal. Force pulled entries onto
+      // it so they always match what JournalScreen queries (the bootstrap adopts
+      // the server journal id as the default, so these usually coincide).
+      journalId: defaultJournalId || serverEntry.journalId,
+    };
+
     // Check if we have this entry locally
     const localEntry = await JournalRepository.getByServerId(serverEntry.id);
 
     if (!localEntry) {
       // New entry from server - create locally
-      const formatted = JournalApi.formatEntryFromApi(serverEntry);
-      await JournalRepository.createFromServer(formatted);
+      await JournalRepository.createFromServer(mapped);
       return;
     }
 
@@ -547,8 +560,11 @@ class SyncEngineClass {
 
     // Update local entry with server data
     if (localEntry.sync_status === SyncStatus.SYNCED || !conflict) {
-      const formatted = JournalApi.formatEntryFromApi(serverEntry);
-      await JournalRepository.update(localEntry.local_id, formatted);
+      await JournalRepository.update(localEntry.local_id, {
+        contentBlocks: mapped.contentBlocks,
+        location: mapped.location,
+        visibility: mapped.visibility,
+      });
     }
   }
 

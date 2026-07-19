@@ -20,8 +20,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { FAMILY_BRANCH_DATA, FAMILY_LIST_DATA } from '../data/familyData';
 import { useAuth } from '../context/AuthContext';
+import { useFamilyTree } from '../hooks/useFamilyTree';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -304,22 +304,25 @@ const LocationFAB = memo(({ onPress }) => {
  */
 export default function FamilyScreen({ navigation }) {
   const { user } = useAuth();
+  const { branchData, listData } = useFamilyTree();
   const [activeView, setActiveView] = useState('me');
 
   // Handle tapping head card - opens family journal (group)
   const handleFamilyPress = useCallback((head) => {
     console.log('Selected family:', head.name);
     
-    // Collect all family members for this family unit
+    // Collect all family members for this family unit. `id` is the linked user
+    // account (falls back to the tree-node id) so PersonJournal can fetch their
+    // live entries.
     const familyMembers = [
-      { id: head.id, name: head.name, avatar: head.avatar },
+      { id: head.linkedUserId || head.id, name: head.name, avatar: head.avatar },
     ];
     if (head.spouse) {
-      familyMembers.push({ id: head.spouse.id, name: head.spouse.name, avatar: head.spouse.avatar });
+      familyMembers.push({ id: head.spouse.linkedUserId || head.spouse.id, name: head.spouse.name, avatar: head.spouse.avatar });
     }
     if (head.children) {
       head.children.forEach(child => {
-        familyMembers.push({ id: child.id, name: child.name, avatar: child.avatar });
+        familyMembers.push({ id: child.linkedUserId || child.id, name: child.name, avatar: child.avatar });
       });
     }
     
@@ -337,7 +340,7 @@ export default function FamilyScreen({ navigation }) {
     // Navigate to PersonJournalScreen to view their individual journal
     navigation.navigate('PersonJournal', {
       person: {
-        id: member.id,
+        id: member.linkedUserId || member.id,
         name: member.name,
         avatar: member.avatar,
       },
@@ -374,13 +377,13 @@ export default function FamilyScreen({ navigation }) {
       {/* Content */}
       {activeView === 'me' ? (
         <BranchView 
-          data={FAMILY_BRANCH_DATA} 
+          data={branchData} 
           onFamilyPress={handleFamilyPress}
           onMemberPress={handleMemberPress} 
         />
       ) : (
         <ListView 
-          data={FAMILY_LIST_DATA} 
+          data={listData} 
           onFamilyPress={handleFamilyPress}
           onMemberPress={handleMemberPress} 
         />

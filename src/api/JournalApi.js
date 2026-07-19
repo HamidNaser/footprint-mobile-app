@@ -270,6 +270,15 @@ class JournalApiClass {
    * @param {object} entry - Local entry object
    */
   _formatEntryForApi(entry) {
+    // Build the nested location the Hub expects ({ lat, lng, name }), from either
+    // an already-nested entry.location or legacy flat latitude/longitude fields.
+    const lat = entry.location?.lat ?? entry.latitude;
+    const lng = entry.location?.lng ?? entry.longitude;
+    const location =
+      lat != null && lng != null
+        ? { lat, lng, name: entry.location?.name || entry.location_name || entry.locationName }
+        : undefined;
+
     return {
       localId: entry.local_id || entry.localId,
       journalId: entry.journal_id || entry.journalId,
@@ -278,9 +287,8 @@ class JournalApiClass {
       visibility: entry.visibility,
       mood: entry.mood,
       weather: entry.weather,
-      latitude: entry.latitude,
-      longitude: entry.longitude,
-      locationName: entry.location_name || entry.locationName,
+      location,
+      locationSharing: entry.locationSharing || entry.location_sharing || undefined,
       tags: this._parseTags(entry.tags),
       createdAt: entry.created_at || entry.createdAt,
       updatedAt: entry.updated_at || entry.updatedAt,

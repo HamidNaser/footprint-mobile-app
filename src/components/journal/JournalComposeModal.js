@@ -52,6 +52,23 @@ export const VISIBILITY_CONFIG = {
 };
 
 /**
+ * Location sharing options — controls who sees the EXACT coordinates.
+ * Mirrors the backend LocationSharingLevels (private | family | everyone).
+ * Non-owners below the chosen level see a coarsened (~1km) location instead.
+ */
+export const LocationSharingOptions = {
+  PRIVATE: 'private',
+  FAMILY: 'family',
+  EVERYONE: 'everyone',
+};
+
+export const LOCATION_SHARING_CONFIG = {
+  [LocationSharingOptions.PRIVATE]: { icon: 'lock-closed', label: 'Only Me' },
+  [LocationSharingOptions.FAMILY]: { icon: 'people', label: 'Family' },
+  [LocationSharingOptions.EVERYONE]: { icon: 'globe-outline', label: 'Everyone' },
+};
+
+/**
  * Attached media preview
  */
 const AttachedMediaPreview = ({ media, onRemove }) => {
@@ -196,6 +213,7 @@ export const JournalComposeModal = ({
   const [showAudioRecorder, setShowAudioRecorder] = useState(initialMode === 'audio');
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [locationSharing, setLocationSharing] = useState(LocationSharingOptions.PRIVATE);
 
   const textInputRef = useRef(null);
 
@@ -211,6 +229,7 @@ export const JournalComposeModal = ({
         setText(textContent);
         setVisibility(entry.visibility || VisibilityOptions.PRIVATE);
         setSelectedLocation(entry.location || null);
+        setLocationSharing(entry.locationSharing || LocationSharingOptions.PRIVATE);
         // TODO: Load existing media
       } else {
         // New entry
@@ -219,6 +238,7 @@ export const JournalComposeModal = ({
         setAudioRecording(null);
         setVisibility(VisibilityOptions.PRIVATE);
         setSelectedLocation(null);
+        setLocationSharing(LocationSharingOptions.PRIVATE);
         
         // Set initial mode
         setShowCamera(initialMode === 'camera');
@@ -253,11 +273,19 @@ export const JournalComposeModal = ({
       // Build content blocks
       const contentBlocks = [];
 
+      // The captured/tagged coordinate is stamped onto the entry AND every block
+      // and media item, so each text/photo/video/audio block can render its own
+      // map pin. Normalized to the backend's { lat, lng, name } shape.
+      const blockLocation = selectedLocation
+        ? { lat: selectedLocation.lat, lng: selectedLocation.lng, name: selectedLocation.name }
+        : undefined;
+
       // Text block
       if (text.trim()) {
         contentBlocks.push({
           type: 'text',
           content: text.trim(),
+          location: blockLocation,
         });
       }
 
@@ -268,11 +296,13 @@ export const JournalComposeModal = ({
       if (photos.length > 0) {
         contentBlocks.push({
           type: 'photos',
+          location: blockLocation,
           media: photos.map(p => ({
             localId: p.localId || `photo-${Date.now()}-${Math.random()}`,
             localPath: p.uri,
             width: p.width,
             height: p.height,
+            location: p.location || blockLocation,
           })),
         });
       }
@@ -281,12 +311,14 @@ export const JournalComposeModal = ({
         videos.forEach(v => {
           contentBlocks.push({
             type: 'video',
+            location: blockLocation,
             media: [{
               localId: v.localId || `video-${Date.now()}-${Math.random()}`,
               localPath: v.uri,
               width: v.width,
               height: v.height,
               duration: v.duration,
+              location: v.location || blockLocation,
             }],
             duration: v.duration,
           });
@@ -297,9 +329,11 @@ export const JournalComposeModal = ({
       if (audioRecording) {
         contentBlocks.push({
           type: 'audio',
+          location: blockLocation,
           media: [{
             localId: audioRecording.localId || `audio-${Date.now()}`,
             localPath: audioRecording.uri,
+            location: blockLocation,
           }],
           duration: audioRecording.duration,
           waveform: audioRecording.waveform,
@@ -310,6 +344,7 @@ export const JournalComposeModal = ({
         contentBlocks,
         visibility,
         location: selectedLocation,
+        locationSharing,
         localId: entry?.localId,
       });
 
@@ -503,6 +538,35 @@ export const JournalComposeModal = ({
                   onRemove={() => setSelectedLocation(null)}
                   primaryColor={primaryColor}
                 />
+                {/* Who can see the exact coordinates */}
+                <View style={styles.sharingRow}>
+                  <Text style={styles.sharingLabel}>Share exact location with</Text>
+                  <View style={styles.sharingOptions}>
+                    {Object.values(LocationSharingOptions).map((level) => {
+                      const cfg = LOCATION_SHARING_CONFIG[level];
+                      const active = locationSharing === level;
+                      return (
+                        <TouchableOpacity
+                          key={level}
+                          style={[
+                            styles.sharingChip,
+                            active && { backgroundColor: primaryColor + '20', borderColor: primaryColor },
+                          ]}
+                          onPress={() => setLocationSharing(level)}
+                        >
+                          <Ionicons
+                            name={cfg.icon}
+                            size={14}
+                            color={active ? primaryColor : '#8E8E93'}
+                          />
+                          <Text style={[styles.sharingChipText, active && { color: primaryColor }]}>
+                            {cfg.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
               </View>
             )}
           </ScrollView>
@@ -682,6 +746,36 @@ const styles = StyleSheet.create({
   // Location display
   locationContainer: {
     marginBottom: 16,
+  },
+
+  // Location sharing
+  sharingRow: {
+    marginTop: 8,
+  },
+  sharingLabel: {
+    fontSize: 12,
+    color: '#8E8E93',
+    marginBottom: 6,
+  },
+  sharingOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  sharingChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E5E5EA',
+    marginRight: 8,
+    marginBottom: 6,
+  },
+  sharingChipText: {
+    fontSize: 12,
+    color: '#8E8E93',
+    marginLeft: 4,
   },
 
   // Toolbar

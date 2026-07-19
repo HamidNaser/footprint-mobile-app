@@ -6,7 +6,7 @@
  * and provides a clean API for repositories to use.
  */
 
-import { getDatabase, initializeDatabase, getDatabaseStats } from '../database';
+import { getDatabase, initializeDatabase, getDatabaseStats, clearDatabase } from '../database';
 import { SyncStatus, UploadStatus, EntityType, SyncOperation } from '../database/schema';
 
 class DatabaseServiceClass {
@@ -38,6 +38,19 @@ class DatabaseServiceClass {
       await this.initialize();
     }
     return this.db;
+  }
+
+  /**
+   * Wipe all locally-stored data (journal entries, media queue, sync cursor,
+   * cached users/comments, etc). Used on logout / account switch so no data
+   * bleeds across sessions. Works on both the native and web backends.
+   */
+  async clearLocalData() {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+    await clearDatabase();
+    console.log('[DatabaseService] Local data cleared');
   }
 
   // ============================================================
@@ -238,6 +251,34 @@ class DatabaseServiceClass {
   }
 
   /**
+   * Normalize media fields inside content blocks so the UI has a consistent
+   * shape regardless of origin. Locally-created media use { localPath, serverUrl,
+   * thumbnailUri }; server-pulled media (from /journals/changes) arrive as
+   * { url, thumbnailUrl }. The rendering components read `localPath || serverUrl`
+   * for the source and `thumbnailUri`/`thumbnailUrl` for previews, so mirror the
+   * remote fields onto those keys here.
+   */
+  _normalizeContentBlocks(blocks) {
+    if (!Array.isArray(blocks)) return [];
+    return blocks.map((block) => {
+      if (!block || !Array.isArray(block.media)) return block;
+      const media = block.media.map((m) => {
+        if (!m || typeof m !== 'object') return m;
+        const serverUrl = m.serverUrl || m.url || null;
+        const thumbnail = m.thumbnailUri || m.thumbnailUrl || m.localPath || serverUrl;
+        return {
+          ...m,
+          serverUrl,
+          url: m.url || serverUrl,
+          thumbnailUrl: m.thumbnailUrl || thumbnail,
+          thumbnailUri: thumbnail,
+        };
+      });
+      return { ...block, media };
+    });
+  }
+
+  /**
    * Map a database row to an entry object
    */
   _mapEntryRow(row) {
@@ -247,7 +288,7 @@ class DatabaseServiceClass {
       journalId: row.journal_id,
       userId: row.user_id,
       date: row.date,
-      contentBlocks: JSON.parse(row.content_blocks || '[]'),
+      contentBlocks: this._normalizeContentBlocks(JSON.parse(row.content_blocks || '[]')),
       location: row.location_lat ? {
         lat: row.location_lat,
         lng: row.location_lng,

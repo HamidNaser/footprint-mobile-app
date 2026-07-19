@@ -231,6 +231,26 @@ graph LR
 
 > **Priority Order:** Based on core feature importance and dependency chain.
 
+### Task 1: Deploy Mobile App as a Web Build (Dev/Testing) 🚀
+
+Host the Expo app as a static web build so collaborators can test in a browser
+(e.g. designers uploading & testing journal images) without installing anything.
+
+| Task | Description | Effort |
+|------|-------------|--------|
+| **1.a** | Create `src/api/MediaApi.web.js` — web image upload via `fetch` PUT + Blob (replaces Expo-only `FileSystem.createUploadTask`) | ~30 min |
+| **1.b** | Build static site: `npx expo export --platform web` → `dist/` | Small |
+| **1.c** | Host on S3 + CloudFront (HTTPS via default `*.cloudfront.net` domain) or Netlify/Vercel | Small |
+| **1.d** | Add hosted origin to backend CORS (both `Program.cs`) + redeploy | Small |
+| **1.e** | Add hosted origin to Google Cloud Console (JS origin + redirect URI) — **manual** | Small |
+
+**Notes:** Metro isolates `.web.js` from native, so zero risk to the shipping app.
+Web build uses the localStorage DB shim → UI/flow/upload testing only, NOT a real
+offline-sync test. Requires `hub`/`auth`/`users` ECS services running (currently 0).
+Cost: free (Netlify/Vercel) or ~$1–5/mo (S3+CloudFront).
+
+---
+
 ### Priority 1: Wire Up Journal Screen (Core Feature) 🔴
 
 The Journal is the core feature of the app. The infrastructure is 90% complete - we just need to connect it.

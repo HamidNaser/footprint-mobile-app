@@ -7,6 +7,12 @@
 
 import { Platform } from 'react-native';
 
+// Backend URL. Defaults to the deployed AWS backend for ALL environments
+// (web, mobile, browser-run). Set EXPO_PUBLIC_BACKEND_API_URL to override
+// (e.g. http://localhost:5100) only when running a local backend.
+// Expo inlines EXPO_PUBLIC_* variables at build time.
+const BACKEND_OVERRIDE = process.env.EXPO_PUBLIC_BACKEND_API_URL || 'https://api.aqrava.com';
+
 /**
  * Environment configuration
  */
@@ -15,21 +21,25 @@ const ENV = {
     // Local development - use your machine's IP for physical devices
     // For emulators: Android uses 10.0.2.2, iOS uses localhost
     // Hub API runs on port 50001 when using Aspire localstack
-    authApiUrl: Platform.select({
+    // Set EXPO_PUBLIC_BACKEND_API_URL (e.g. https://api.aqrava.com) to point a
+    // local Expo dev build at the deployed AWS backend instead of localhost.
+    authApiUrl: BACKEND_OVERRIDE || Platform.select({
       android: 'http://10.0.2.2:5100',
       ios: 'http://localhost:5100',
       default: 'http://localhost:5100',
     }),
-    hubApiUrl: Platform.select({
+    hubApiUrl: BACKEND_OVERRIDE || Platform.select({
       android: 'http://10.0.2.2:50001',
       ios: 'http://localhost:50001',
       default: 'http://localhost:50001',
     }),
-    signalRUrl: Platform.select({
-      android: 'http://10.0.2.2:50001/hubs/footprint',
-      ios: 'http://localhost:50001/hubs/footprint',
-      default: 'http://localhost:50001/hubs/footprint',
-    }),
+    signalRUrl: BACKEND_OVERRIDE
+      ? `${BACKEND_OVERRIDE}/hubs/footprint`
+      : Platform.select({
+          android: 'http://10.0.2.2:50001/hubs/footprint',
+          ios: 'http://localhost:50001/hubs/footprint',
+          default: 'http://localhost:50001/hubs/footprint',
+        }),
   },
   staging: {
     authApiUrl: 'https://staging-auth.footprint.app',
@@ -37,9 +47,10 @@ const ENV = {
     signalRUrl: 'https://staging-api.footprint.app/hubs/journal',
   },
   production: {
-    authApiUrl: 'https://auth.footprint.app',
-    hubApiUrl: 'https://api.footprint.app',
-    signalRUrl: 'https://api.footprint.app/hubs/journal',
+    // Single backend behind the Application Load Balancer (routes by path).
+    authApiUrl: BACKEND_OVERRIDE || 'https://api.aqrava.com',
+    hubApiUrl: BACKEND_OVERRIDE || 'https://api.aqrava.com',
+    signalRUrl: `${BACKEND_OVERRIDE || 'https://api.aqrava.com'}/hubs/footprint`,
   },
 };
 
@@ -160,6 +171,14 @@ export const USER_ENDPOINTS = {
   GET_USER: '/users/:id',
   GET_FAMILY: '/users/family',
   GET_FRIENDS: '/users/friends',
+};
+
+/**
+ * Settings endpoints
+ */
+export const SETTINGS_ENDPOINTS = {
+  GET_LOCATION: '/settings/location',
+  UPDATE_LOCATION: '/settings/location',
 };
 
 /**
