@@ -11,7 +11,7 @@
  * - Memory request functionality
  */
 
-import React, { useState, memo, useCallback, useMemo } from 'react';
+import React, { useState, memo, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -24,12 +24,14 @@ import {
   Modal,
   FlatList,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
-import { PLACES_DATA, PLACE_FILTERS, PEOPLE, getStoryPrompts } from '../data/placesData';
+import { PLACE_FILTERS, PEOPLE, getStoryPrompts } from '../data/placesData';
+import { getPlaces } from '../api/PlacesApi';
 import { YearMemoriesModal, IWasHereIndicator, ShareMemorySheet } from '../components/places';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 
@@ -312,13 +314,15 @@ const PlaceDetailModal = memo(({ place, visible, onClose }) => {
               </View>
             </View>
 
-            {/* Map Preview */}
-            <View style={styles.mapPreview}>
-              <Ionicons name="map" size={40} color={TEXT_MUTED} />
-              <Text style={styles.mapPreviewText}>
-                {place.location.lat.toFixed(4)}, {place.location.lng.toFixed(4)}
-              </Text>
-            </View>
+            {/* Map Preview (only when we have coordinates) */}
+            {place.location?.lat != null && place.location?.lng != null && (
+              <View style={styles.mapPreview}>
+                <Ionicons name="map" size={40} color={TEXT_MUTED} />
+                <Text style={styles.mapPreviewText}>
+                  {place.location.lat.toFixed(4)}, {place.location.lng.toFixed(4)}
+                </Text>
+              </View>
+            )}
 
             {/* Years Timeline */}
             <Text style={styles.sectionTitle}>Timeline</Text>
@@ -360,26 +364,49 @@ export default function PlacesScreen() {
   const [showShareSheet, setShowShareSheet] = useState(false);
   const [shareMemory, setShareMemory] = useState(null);
 
+  // Live places from the Hub API (no mock fallback)
+  const [places, setPlaces] = useState([]);
+  const [isLoadingPlaces, setIsLoadingPlaces] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        setIsLoadingPlaces(true);
+        const data = await getPlaces();
+        if (mounted) setPlaces(data);
+      } catch (err) {
+        console.warn('Failed to load places:', err?.message);
+        if (mounted) setPlaces([]);
+      } finally {
+        if (mounted) setIsLoadingPlaces(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   // Filter places based on active filter and search
   const filteredPlaces = useMemo(() => {
-    let places = PLACES_DATA;
+    let result = places;
 
     // Filter by category
     if (activeFilter !== 'everyone') {
-      places = places.filter(p => p.category === activeFilter || p.category === 'everyone');
+      result = result.filter(p => p.category === activeFilter || p.category === 'everyone');
     }
 
     // Filter by search
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
-      places = places.filter(p => 
+      result = result.filter(p =>
         p.name.toLowerCase().includes(query) ||
-        p.subtitle.toLowerCase().includes(query)
+        (p.subtitle || '').toLowerCase().includes(query)
       );
     }
 
-    return places;
-  }, [activeFilter, searchQuery]);
+    return result;
+  }, [places, activeFilter, searchQuery]);
 
   const handleAvatarPress = useCallback(() => {
     navigation.navigate('Profile');
@@ -470,7 +497,11 @@ export default function PlacesScreen() {
         contentContainerStyle={styles.placesListContent}
         showsVerticalScrollIndicator={false}
       >
-        {filteredPlaces.length > 0 ? (
+        {isLoadingPlaces ? (
+          <View style={styles.emptyState}>
+            <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+          </View>
+        ) : filteredPlaces.length > 0 ? (
           filteredPlaces.map((place, index) => (
             <PlaceCard
               key={place.id}

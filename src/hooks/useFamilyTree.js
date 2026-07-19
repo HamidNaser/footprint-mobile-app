@@ -4,15 +4,14 @@
  * Pattern 2 (Cached + background refresh) for the Family screen:
  *   1. Show cached family (from AsyncStorage) instantly if present.
  *   2. Fetch fresh data from the Hub API in the background, update UI + cache.
- *   3. If offline / request fails: keep showing cache.
- *   4. If no token and no cache: fall back to bundled mock data.
+ *   3. If offline / request fails: keep showing cache (if any); otherwise show
+ *      the real (possibly empty) state — no bundled mock fallback.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../context/AuthContext';
 import { getFamilyTree } from '../services/FamilyService';
-import { FAMILY_BRANCH_DATA, FAMILY_LIST_DATA } from '../data/familyData';
 
 const CACHE_KEY = '@footprint/family_tree';
 
@@ -49,11 +48,9 @@ export function useFamilyTree() {
       // ignore cache read errors
     }
 
-    // 2. No token → fall back to mock (unless we already have cache)
+    // 2. No token → nothing to show (real empty state, no mock)
     if (!accessToken) {
       if (mounted.current) {
-        setBranchData((prev) => prev ?? FAMILY_BRANCH_DATA);
-        setListData((prev) => prev ?? FAMILY_LIST_DATA);
         setIsLive(false);
         setIsLoading(false);
       }
@@ -66,24 +63,21 @@ export function useFamilyTree() {
       const hasData = (branch?.branches?.length || 0) > 0 || (list?.families?.length || 0) > 0;
 
       if (mounted.current) {
+        setBranchData(branch);
+        setListData(list);
+        setIsLive(true);
         if (hasData) {
-          setBranchData(branch);
-          setListData(list);
-          setIsLive(true);
           AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ branch, list })).catch(() => {});
         } else {
-          // Account has no family yet → show mock as a friendly placeholder
-          setBranchData((prev) => prev ?? FAMILY_BRANCH_DATA);
-          setListData((prev) => prev ?? FAMILY_LIST_DATA);
-          setIsLive(false);
+          // Account genuinely has no family yet → show the real empty state and
+          // drop any stale cache so we don't keep showing removed members.
+          AsyncStorage.removeItem(CACHE_KEY).catch(() => {});
         }
       }
     } catch (err) {
       if (mounted.current) {
         setError(err.message);
-        // Keep cache if we had it; otherwise fall back to mock
-        setBranchData((prev) => prev ?? FAMILY_BRANCH_DATA);
-        setListData((prev) => prev ?? FAMILY_LIST_DATA);
+        // Keep whatever cache we already showed; do not substitute mock data.
       }
     } finally {
       if (mounted.current) setIsLoading(false);

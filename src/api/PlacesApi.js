@@ -1,12 +1,47 @@
 /**
  * PlacesApi - API service for Places feature
- * 
- * Handles fetching places, memories by year, interviews, and memory requests.
- * Currently uses mock data, designed to easily swap to real API.
+ *
+ * The places LIST is served live from the Hub API (GET /api/v1/places),
+ * derived from the user's journal entries + family locations — the same source
+ * the web app uses. Rich detail features that the backend does not yet provide
+ * (per-year memories, interviews, memory requests) still use local data.
  */
 
 import { ApiClient } from './ApiClient';
+import { API_CONFIG, buildUrl } from '../config/api.config';
 import { PLACES_DATA, PLACE_MEMORIES } from '../data/placesData';
+
+// Shown when a place has no associated photo yet.
+const PLACEHOLDER_IMAGE =
+  'https://images.unsplash.com/photo-1502082553048-f009c37129b9?w=400&h=300&fit=crop';
+
+/**
+ * Adapt a backend PlaceResponse to the shape the Places screen renders.
+ * Fields the backend doesn't provide yet (photos carousel, map coords, memory
+ * counts, "untold story") get safe defaults so the UI never crashes.
+ */
+const adaptPlace = (place) => {
+  const years = (place.years || []).map((y) => ({
+    year: y.year,
+    avatars: y.avatars || [],
+    memoryCount: (y.avatars || []).length,
+    hasUntoldStory: false,
+  }));
+
+  return {
+    id: place.id,
+    name: place.name,
+    subtitle: place.subtitle || '',
+    image: place.image || PLACEHOLDER_IMAGE,
+    // Backend has no category concept; everything is visible under "everyone".
+    category: 'everyone',
+    iWasHere: false,
+    // Detail-view fields with no backend source yet — safe defaults.
+    photos: place.image ? [place.image] : [],
+    location: null,
+    years,
+  };
+};
 
 /**
  * Get all places with memories
@@ -16,25 +51,20 @@ import { PLACES_DATA, PLACE_MEMORIES } from '../data/placesData';
  * @returns {Promise<Place[]>}
  */
 export const getPlaces = async ({ filter = 'everyone', search = '' } = {}) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get('/api/places', { filter, search });
-  
-  let places = [...PLACES_DATA];
-  
-  // Filter by category
-  if (filter !== 'everyone') {
-    places = places.filter(p => p.category === filter || p.category === 'everyone');
-  }
-  
-  // Filter by search
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/places');
+  const data = await ApiClient.get(url);
+  let places = (data?.places || []).map(adaptPlace);
+
+  // Backend returns the full list; apply search client-side to match the UI.
   if (search.trim()) {
     const query = search.toLowerCase();
-    places = places.filter(p => 
-      p.name.toLowerCase().includes(query) ||
-      p.subtitle.toLowerCase().includes(query)
+    places = places.filter(
+      (p) =>
+        p.name.toLowerCase().includes(query) ||
+        (p.subtitle || '').toLowerCase().includes(query)
     );
   }
-  
+
   return places;
 };
 
