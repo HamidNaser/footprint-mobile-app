@@ -315,7 +315,9 @@ export function AuthProvider({ children }) {
       if (!response.ok) {
         throw new Error(data.message || `Failed to load profile (${response.status})`);
       }
-      const mergedUser = { ...(user || {}), ...data };
+      // Capture the ETag for optimistic concurrency on the next update.
+      const etag = response.headers.get('ETag');
+      const mergedUser = { ...(user || {}), ...data, ...(etag ? { _etag: etag } : {}) };
       setUser(mergedUser);
       await AsyncStorage.setItem(
         AUTH_STORAGE_KEY,
@@ -329,22 +331,29 @@ export function AuthProvider({ children }) {
   };
 
   // Update the user profile on the Users service and merge the result back into
-  // `user`. Mirrors the web app's PUT /api/v1/users/me contract.
+  // `user`. Mirrors the web app's PATCH /api/v1/users/me contract, using the
+  // ETag captured by fetchProfile for optimistic concurrency (If-Match).
   const updateProfile = async (updates) => {
     if (!accessToken) throw new Error('Not authenticated');
+    const etag = user?._etag || '"1"';
     const response = await fetch(`${USERS_BASE_URL}/api/${API_VERSION}/users/me`, {
-      method: 'PUT',
+      method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${accessToken}`,
+        'If-Match': etag,
       },
       body: JSON.stringify(updates),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      if (response.status === 409) {
+        throw new Error('Profile was modified elsewhere. Please refresh and try again.');
+      }
       throw new Error(data.message || `Failed to update profile (${response.status})`);
     }
-    const mergedUser = { ...(user || {}), ...data };
+    const newEtag = response.headers.get('ETag');
+    const mergedUser = { ...(user || {}), ...data, ...(newEtag ? { _etag: newEtag } : {}) };
     setUser(mergedUser);
     await AsyncStorage.setItem(
       AUTH_STORAGE_KEY,
