@@ -274,6 +274,10 @@ class JournalRepositoryClass extends BaseRepository {
    * @returns {Promise<object>} Updated entry
    */
   async update(localId, updates) {
+    if (!localId) {
+      throw new Error('JournalRepository.update requires a localId');
+    }
+
     const entry = await this.getByLocalId(localId);
     if (!entry) {
       throw new Error(`Entry not found: ${localId}`);
@@ -358,6 +362,30 @@ class JournalRepositoryClass extends BaseRepository {
   }
 
   /**
+   * Apply an update that originated from the server (pull/merge). Writes the
+   * fields directly and marks the entry SYNCED WITHOUT re-enqueuing a push,
+   * so reconciliation never triggers a sync feedback loop.
+   * @param {string} localId - Local ID
+   * @param {object} updates - Server fields { contentBlocks, location, visibility }
+   */
+  async applyServerUpdate(localId, updates = {}) {
+    if (!localId) {
+      throw new Error('JournalRepository.applyServerUpdate requires a localId');
+    }
+
+    const updateData = {};
+    if (updates.contentBlocks !== undefined) updateData.contentBlocks = updates.contentBlocks;
+    if (updates.location !== undefined) updateData.location = updates.location;
+    if (updates.visibility !== undefined) updateData.visibility = updates.visibility;
+    updateData.syncStatus = SyncStatus.SYNCED;
+    updateData.syncedAt = this.now();
+
+    await this.dbService.updateEntry(localId, updateData);
+
+    this.log('applyServerUpdate', { localId, fields: Object.keys(updateData) });
+  }
+
+  /**
    * Mark sync as failed
    * @param {string} localId - Local ID
    */
@@ -421,6 +449,10 @@ class JournalRepositoryClass extends BaseRepository {
    */
   async _enqueueSync(type, entityId, data, serverId = null) {
     try {
+      if (!entityId) {
+        this.log('enqueueSync skipped (missing entityId)', { type });
+        return;
+      }
       if (!(await this.isSyncEnabled())) return;
       await SyncQueue.enqueue({ type, entityId, serverId, data });
     } catch (error) {

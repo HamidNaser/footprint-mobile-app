@@ -209,7 +209,7 @@ const MemoryRequestCard = ({
           </Text>
           <Text style={styles.headerSubtitle}>
             {memory 
-              ? `Ask ${memory.author.firstName} about their ${year || ''} memory`
+              ? `Ask ${memory.author?.firstName || memory.author?.name || 'them'} about their ${year || ''} memory`
               : `Ask family about their memories of ${place?.name || 'this place'}`
             }
           </Text>
@@ -220,7 +220,7 @@ const MemoryRequestCard = ({
       {memory && memory.media?.[0] && (
         <View style={styles.memoryPreview}>
           <Image 
-            source={{ uri: memory.media[0] }} 
+            source={{ uri: typeof memory.media[0] === 'string' ? memory.media[0] : memory.media[0]?.uri }} 
             style={styles.memoryPreviewImage} 
           />
           {memory.caption && (

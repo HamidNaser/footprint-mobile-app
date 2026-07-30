@@ -36,7 +36,6 @@ import { ConnectionStatusIndicator } from '../components/common/ConnectionStatus
 import { NotificationBadge } from '../components/common/NotificationBadge';
 import { SyncStatusBadge } from '../components/common/SyncStatusBadge';
 import { 
-  CalendarCoils,
   DateSwipeContainer,
   QuickCaptureBar,
   EntryGalleryModal,
@@ -726,9 +725,6 @@ export default function JournalScreen({ navigation }) {
           </Text>
         </TouchableOpacity>
       )}
-
-      {/* Calendar Coils (decorative spiral binding) */}
-      <CalendarCoils coilCount={7} color={PRIMARY_COLOR} />
 
       {/* Date Selector */}
       <DateSelector

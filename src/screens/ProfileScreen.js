@@ -444,6 +444,14 @@ export default function ProfileScreen({ navigation }) {
 
         {/* Header with Avatar */}
         <View style={styles.header}>
+          {/* Back Button */}
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => (navigation.canGoBack() ? navigation.goBack() : navigation.navigate('MainTabs'))}
+          >
+            <Ionicons name="chevron-back" size={24} color="#007AFF" />
+          </TouchableOpacity>
+
           {/* Settings Button */}
           <TouchableOpacity 
             style={styles.settingsButton}
@@ -845,6 +853,18 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 16,
     right: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F2F2F7',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  backButton: {
+    position: 'absolute',
+    top: 16,
+    left: 16,
     width: 40,
     height: 40,
     borderRadius: 20,

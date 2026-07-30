@@ -23,6 +23,8 @@ export {
   FeedType,
 } from './useFeed';
 
+export { useEvents } from './useEvents';
+
 // Future hooks will be exported here:
 // export { useSync } from './useSync';
 // export { useSettings } from './useSettings';

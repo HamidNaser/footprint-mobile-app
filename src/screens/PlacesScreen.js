@@ -31,9 +31,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { PLACE_FILTERS, PEOPLE, getStoryPrompts } from '../data/placesData';
-import { getPlaces } from '../api/PlacesApi';
+import { getPlaces, getPlace } from '../api/PlacesApi';
 import { YearMemoriesModal, IWasHereIndicator, ShareMemorySheet } from '../components/places';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
+import PlaceMapPreview from '../components/map/PlaceMapPreview';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -316,12 +317,10 @@ const PlaceDetailModal = memo(({ place, visible, onClose }) => {
 
             {/* Map Preview (only when we have coordinates) */}
             {place.location?.lat != null && place.location?.lng != null && (
-              <View style={styles.mapPreview}>
-                <Ionicons name="map" size={40} color={TEXT_MUTED} />
-                <Text style={styles.mapPreviewText}>
-                  {place.location.lat.toFixed(4)}, {place.location.lng.toFixed(4)}
-                </Text>
-              </View>
+              <PlaceMapPreview
+                lat={place.location.lat}
+                lng={place.location.lng}
+              />
             )}
 
             {/* Years Timeline */}
@@ -412,16 +411,31 @@ export default function PlacesScreen() {
     navigation.navigate('Profile');
   }, [navigation]);
 
+  // Fetch the full detail (photos, coordinates, per-year memories) for a place
+  // and merge it into the selected place so both modals show live data.
+  const enrichSelectedPlace = useCallback(async (place) => {
+    try {
+      const detail = await getPlace(place.id);
+      setSelectedPlace((current) =>
+        current?.id === place.id ? { ...place, ...detail } : current
+      );
+    } catch (err) {
+      console.warn('Failed to load place detail:', err?.message);
+    }
+  }, []);
+
   const handlePlacePress = useCallback((place) => {
     setSelectedPlace(place);
     setShowDetail(true);
-  }, []);
+    enrichSelectedPlace(place);
+  }, [enrichSelectedPlace]);
 
   const handleYearPress = useCallback((place, year) => {
     setSelectedPlace(place);
     setSelectedYear(year);
     setShowYearMemories(true);
-  }, []);
+    enrichSelectedPlace(place);
+  }, [enrichSelectedPlace]);
 
   const handleCloseDetail = useCallback(() => {
     setShowDetail(false);

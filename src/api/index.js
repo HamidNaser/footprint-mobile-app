@@ -9,3 +9,4 @@ export { SettingsApi, LOCATION_PRECISION_OPTIONS } from './SettingsApi';
 export { ReactionsApi } from './ReactionsApi';
 export { CommentsApi } from './CommentsApi';
 export { FeedApi } from './FeedApi';
+export { EventsApi } from './EventsApi';

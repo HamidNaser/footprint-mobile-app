@@ -30,7 +30,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import MemoryCard from './MemoryCard';
-import { MemoryRequestCard } from './MemoryRequestCard';
+import MemoryRequestCard from './MemoryRequestCard';
+import MemoryDetailModal from './MemoryDetailModal';
 import { getMemoriesForPlaceYear, PEOPLE, INTERVIEW_QUESTIONS } from '../../data/placesData';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -211,12 +212,28 @@ const YearMemoriesModal = ({
   onStartInterview,
 }) => {
   const [viewMode, setViewMode] = useState('grid');
-  const [showRequestModal, setShowRequestModal] = useState(false);
-  const [selectedMemoryForRequest, setSelectedMemoryForRequest] = useState(null);
+  // Internal navigation stack for this modal host. Each entry is a view we
+  // layer over the year list (e.g. { type: 'memory' } or { type: 'ask' }).
+  // Using one modal + swapped inline overlays avoids the blank-screen bug
+  // caused by presenting/dismissing nested native <Modal>s at the same time.
+  const [viewStack, setViewStack] = useState([]);
+  const topView = viewStack[viewStack.length - 1] || null;
 
-  // Get memories for this place/year
+  const pushView = useCallback((view) => {
+    setViewStack((s) => [...s, view]);
+  }, []);
+  const popView = useCallback(() => {
+    setViewStack((s) => s.slice(0, -1));
+  }, []);
+
+  // Get memories for this place/year. Prefer memories embedded in the live
+  // place detail; fall back to local mock data when they aren't present.
   const memories = useMemo(() => {
     if (!place || !year) return [];
+    const yearData = (place.years || []).find((y) => y.year === year);
+    if (yearData?.memories?.length) {
+      return yearData.memories;
+    }
     return getMemoriesForPlaceYear(place.id, year);
   }, [place, year]);
 
@@ -241,15 +258,20 @@ const YearMemoriesModal = ({
     console.log('Person pressed:', person.name);
   }, []);
 
+  // Open the full memory reader when a card is tapped.
+  const handleMemoryPress = useCallback((memory) => {
+    pushView({ type: 'memory', memory });
+    onMemoryPress?.(memory);
+  }, [pushView, onMemoryPress]);
+
   const handleStoryPromptPress = useCallback((memory) => {
     onStartInterview?.(memory);
   }, [onStartInterview]);
 
-  // Handle "Ask about this" - opens request modal with pre-selected recipient
+  // Handle "Ask about this" - layers the request sheet over the current view.
   const handleAskAbout = useCallback((memory) => {
-    setSelectedMemoryForRequest(memory);
-    setShowRequestModal(true);
-  }, []);
+    pushView({ type: 'ask', memory });
+  }, [pushView]);
 
   // Handle answering questions on YOUR OWN memory
   const handleAnswerQuestion = useCallback((memory, pendingQuestions) => {
@@ -280,9 +302,8 @@ const YearMemoriesModal = ({
       `Your question has been sent to ${requestData.recipient.firstName}. They'll be notified to share their story.`,
       [{ text: 'OK' }]
     );
-    setShowRequestModal(false);
-    setSelectedMemoryForRequest(null);
-  }, []);
+    popView();
+  }, [popView]);
 
   // Available recipients (people at this place excluding current user)
   const potentialRecipients = useMemo(() => {
@@ -340,12 +361,12 @@ const YearMemoriesModal = ({
             {viewMode === 'grid' ? (
               <MemoriesGrid 
                 memories={memories} 
-                onMemoryPress={onMemoryPress} 
+                onMemoryPress={handleMemoryPress} 
               />
             ) : (
               <MemoriesFeed 
                 memories={memories} 
-                onMemoryPress={onMemoryPress}
+                onMemoryPress={handleMemoryPress}
                 onStoryPromptPress={handleStoryPromptPress}
                 onAskAbout={handleAskAbout}
                 onAnswerQuestion={handleAnswerQuestion}
@@ -357,42 +378,42 @@ const YearMemoriesModal = ({
           <View style={{ height: 40 }} />
         </ScrollView>
 
-        {/* Memory Request Modal */}
-        {showRequestModal && (
-          <Modal
-            visible={showRequestModal}
-            animationType="slide"
-            presentationStyle="pageSheet"
-            onRequestClose={() => setShowRequestModal(false)}
-          >
+        {/* Memory Detail (full reader) - inline overlay, no nested Modal */}
+        {topView?.type === 'memory' && (
+          <MemoryDetailModal
+            memory={topView.memory}
+            place={place}
+            onClose={popView}
+            onAsk={handleAskAbout}
+            onStartInterview={(memory) => {
+              setViewStack([]);
+              handleStoryPromptPress(memory);
+            }}
+          />
+        )}
+
+        {/* Ask for a Story - inline overlay, no nested Modal */}
+        {topView?.type === 'ask' && (
+          <View style={styles.overlay}>
             <SafeAreaView style={styles.requestModalContainer} edges={['top']}>
               <View style={styles.requestModalHeader}>
-                <TouchableOpacity 
-                  onPress={() => {
-                    setShowRequestModal(false);
-                    setSelectedMemoryForRequest(null);
-                  }}
-                  style={styles.closeButton}
-                >
+                <TouchableOpacity onPress={popView} style={styles.closeButton}>
                   <Ionicons name="close" size={24} color={TEXT_COLOR} />
                 </TouchableOpacity>
                 <Text style={styles.requestModalTitle}>Ask for a Story</Text>
                 <View style={{ width: 32 }} />
               </View>
               <MemoryRequestCard
-                memory={selectedMemoryForRequest}
+                memory={topView.memory}
                 potentialRecipients={potentialRecipients}
-                preSelectedRecipient={selectedMemoryForRequest?.author}
+                preSelectedRecipient={topView.memory?.author}
                 place={place}
                 year={year}
                 onSend={handleSendRequest}
-                onCancel={() => {
-                  setShowRequestModal(false);
-                  setSelectedMemoryForRequest(null);
-                }}
+                onCancel={popView}
               />
             </SafeAreaView>
-          </Modal>
+          </View>
         )}
       </SafeAreaView>
     </Modal>
@@ -613,6 +634,12 @@ const styles = StyleSheet.create({
   requestModalContainer: {
     flex: 1,
     backgroundColor: BACKGROUND_COLOR,
+  },
+  // Inline overlay used for the memory reader / ask sheet (no nested Modal)
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: BACKGROUND_COLOR,
+    zIndex: 20,
   },
   requestModalHeader: {
     flexDirection: 'row',
