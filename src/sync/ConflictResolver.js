@@ -199,20 +199,11 @@ class ConflictResolverClass {
   async _acceptServerVersion(conflict) {
     const { serverEntry, localEntry } = conflict;
 
-    // Update local entry with server data
-    await JournalRepository.update(localEntry.local_id, {
-      title: serverEntry.title,
-      content_blocks: JSON.stringify(serverEntry.contentBlocks || []),
+    // Apply server data locally and mark SYNCED WITHOUT re-enqueuing a push
+    // (we are accepting the server version, not producing a new change).
+    await JournalRepository.applyServerUpdate(localEntry.local_id, {
+      contentBlocks: serverEntry.contentBlocks || [],
       visibility: serverEntry.visibility,
-      mood: serverEntry.mood,
-      weather: serverEntry.weather,
-      latitude: serverEntry.latitude,
-      longitude: serverEntry.longitude,
-      location_name: serverEntry.locationName,
-      tags: JSON.stringify(serverEntry.tags || []),
-      updated_at: serverEntry.updatedAt,
-      synced_at: new Date().toISOString(),
-      sync_status: SyncStatus.SYNCED,
     });
 
     return {

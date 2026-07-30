@@ -111,7 +111,7 @@ jobs:
           echo "**Profile:** ${{ steps.params.outputs.profile }}" >> $GITHUB_STEP_SUMMARY
           echo "**Platform:** ${{ steps.params.outputs.platform }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "View builds at: https://expo.dev/accounts/YOUR_EXPO_USERNAME/projects/footprint-mobile-app/builds" >> $GITHUB_STEP_SUMMARY
+          echo "View builds at: https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds" >> $GITHUB_STEP_SUMMARY
 
   # Submit to stores (only for production builds, manual trigger)
   submit:

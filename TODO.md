@@ -1,6 +1,6 @@
 # FootPrint Mobile App - TODO & Backlog
 
-> **Last Updated:** June 6, 2026
+> **Last Updated:** July 27, 2026
 
 This document tracks **tasks, integration gaps, and the prioritized backlog** for the FootPrint mobile application.
 
@@ -319,6 +319,53 @@ These can be done incrementally after core features work.
 | **4.1** | Home Screen - aggregated feed | Large |
 | **4.2** | Family Screen - family list & entries | Large |
 | **4.3** | Friends Screen - friend list & requests | Large |
+
+---
+
+### Priority 5: Deploy Backend Events Endpoints to AWS 🚀 (blocker for real testing)
+
+The **Events** feature is fully built on web (UI + Hub API + Mongo) but the Hub
+`Events` endpoints (`/api/v1/events`) are **only local** — not on staging/AWS. Until
+they're deployed, both web and mobile fall back to mock data and can't be tested
+end-to-end from a device.
+
+| Task | Description | Effort |
+|------|-------------|--------|
+| **5.1** | Deploy updated `Footprint.Hub` (with Events slice) to AWS ECS | Medium |
+| **5.2** | Verify `events` Mongo collection + indexes are created on startup | Small |
+| **5.3** | Smoke test `/api/v1/events` (list/create/rsvp/delete) against staging | Small |
+| **5.4** | Confirm CORS + auth work for web and mobile origins | Small |
+
+**Note:** Do NOT push/deploy without explicit go-ahead (personal identity + costs).
+
+---
+
+### Priority 6: Events Feature on Mobile 📅 (mirror web) — ✅ DONE
+
+Bring the Events / invitations feature to mobile. **Full design in [EVENTS.md](EVENTS.md).**
+Implemented consistent with existing screens (Places/Journal conventions). Uses the
+same Hub API as web when authenticated, with mock-data fallback otherwise (Priority 5
+deploy still needed for live end-to-end testing).
+
+| Task | Description | Status |
+|------|-------------|--------|
+| **6.1** | `src/data/eventsData.js` — mock data + shapes (tabs, templates, mock events, helpers) | ✅ |
+| **6.2** | `src/api/EventsApi.js` — Bearer + 401 refresh (via ApiClient), CRUD + RSVP, adapt API→UI | ✅ |
+| **6.3** | `src/hooks/useEvents.js` — `useEvents(tab)` with mock fallback when no token | ✅ |
+| **6.4** | `EventsScreen` — list + segmented tabs (My/Invites/Drafts) + FAB + pull-to-refresh | ✅ |
+| **6.5** | `EventDetailScreen` — hero header + details + map + guests + role-aware action bar | ✅ |
+| **6.6** | `EventFormScreen` — template carousel + form (create/edit) + date & location pickers | ✅ |
+| **6.7** | `components/events/*` — EventCard, TemplateCard, GuestAvatarRow, RsvpBar, RsvpPill, DateTimeField + barrel | ✅ |
+| **6.8** | Register screens in `AppNavigator` (stack) + add Home entry point | ✅ |
+| **6.9** | Optimistic RSVP (revert on error); guest RSVP vs host Edit/Delete/Share gating | ✅ |
+| **6.10** | Manual smoke test on device/simulator (mock + real API) | ⏳ needs device/backend |
+
+**Design highlights (see EVENTS.md):**
+- Web "book spread" → mobile **stacked, one-thing-at-a-time** flow.
+- List uses a **segmented control**; detail uses a **themed hero + sticky action bar**;
+  create uses a **horizontal template carousel** + full-screen form modal.
+- Reuse `PlaceMapPreview`/location picker, avatars, theme colors, `Ionicons`, FAB style.
+- Role-aware actions match backend authz (host can't RSVP; only host edits/deletes).
 
 ---
 

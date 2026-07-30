@@ -8,8 +8,7 @@
  */
 
 import { ApiClient } from './ApiClient';
-import { API_CONFIG, buildUrl } from '../config/api.config';
-import { PLACES_DATA, PLACE_MEMORIES } from '../data/placesData';
+import { API_CONFIG, buildUrl, buildUrlWithQuery } from '../config/api.config';
 
 // Shown when a place has no associated photo yet.
 const PLACEHOLDER_IMAGE =
@@ -69,67 +68,134 @@ export const getPlaces = async ({ filter = 'everyone', search = '' } = {}) => {
 };
 
 /**
- * Get place details with all years
- * @param {string} placeId 
+ * Adapt a backend PlaceMemoryResponse to the shape the memory cards render.
+ */
+const adaptMemory = (m, placeId, year) => {
+  const name = m.authorName || 'Someone';
+  const photos = m.photos || [];
+  return {
+    id: m.entryId,
+    placeId,
+    journalId: m.journalId,
+    entryId: m.entryId,
+    year,
+    date: m.date,
+    author: {
+      id: m.authorId,
+      name,
+      firstName: name.split(' ')[0],
+      avatar: m.authorAvatar || null,
+    },
+    type: 'photo',
+    media: photos.map((uri) => ({ uri, type: 'photo' })),
+    caption: m.text || '',
+    isCurrentUser: !!m.isCurrentUser,
+  };
+};
+
+/**
+ * Adapt a backend PlaceDetailResponse to the detail shape the UI renders.
+ * Embeds per-year memories so the modals can read them without extra calls.
+ */
+const adaptPlaceDetail = (detail) => {
+  const years = (detail.years || []).map((y) => {
+    const memories = (y.memories || []).map((m) => adaptMemory(m, detail.id, y.year));
+    const peopleMap = {};
+    memories.forEach((mem) => {
+      if (!peopleMap[mem.author.id]) peopleMap[mem.author.id] = mem.author;
+    });
+    return {
+      year: y.year,
+      avatars: y.avatars || [],
+      people: Object.values(peopleMap),
+      memoryCount: memories.length,
+      memories,
+      hasUntoldStory: false,
+    };
+  });
+
+  // Collect a photo carousel from all memories, falling back to the header image.
+  const allPhotos = [];
+  years.forEach((y) =>
+    y.memories.forEach((m) => m.media.forEach((mm) => allPhotos.push(mm.uri)))
+  );
+  const photos = [...new Set(allPhotos)];
+
+  return {
+    id: detail.id,
+    name: detail.name,
+    subtitle: detail.subtitle || '',
+    image: detail.image || PLACEHOLDER_IMAGE,
+    category: 'everyone',
+    location:
+      detail.lat || detail.lng ? { lat: detail.lat, lng: detail.lng } : null,
+    photos: photos.length ? photos : detail.image ? [detail.image] : [],
+    iWasHere: !!detail.iWasHere,
+    myYears: detail.myYears || [],
+    years,
+  };
+};
+
+/**
+ * Fetch the raw backend detail for a place.
+ * @param {string} placeId
+ * @returns {Promise<Object>} PlaceDetailResponse
+ */
+const fetchPlaceDetail = async (placeId) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, `/places/${placeId}`);
+  return ApiClient.get(url);
+};
+
+/**
+ * Get place details with all years and per-year memories.
+ * @param {string} placeId
  * @returns {Promise<Place>}
  */
 export const getPlace = async (placeId) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get(`/api/places/${placeId}`);
-  
-  const place = PLACES_DATA.find(p => p.id === placeId);
-  if (!place) {
+  const detail = await fetchPlaceDetail(placeId);
+  if (!detail) {
     throw new Error('Place not found');
   }
-  return place;
+  return adaptPlaceDetail(detail);
 };
 
 /**
  * Get memories for a specific year at a place
- * @param {string} placeId 
- * @param {number} year 
+ * @param {string} placeId
+ * @param {number} year
  * @returns {Promise<PlaceMemory[]>}
  */
 export const getPlaceYearMemories = async (placeId, year) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get(`/api/places/${placeId}/years/${year}`);
-  
-  const placeMemories = PLACE_MEMORIES[placeId];
-  if (!placeMemories) {
-    return [];
-  }
-  
-  return placeMemories.filter(m => m.year === year);
+  const detail = await fetchPlaceDetail(placeId);
+  const yearEntry = (detail?.years || []).find((y) => y.year === year);
+  if (!yearEntry) return [];
+  return (yearEntry.memories || []).map((m) => adaptMemory(m, placeId, year));
 };
 
 /**
  * Get all memories for a place (all years)
- * @param {string} placeId 
+ * @param {string} placeId
  * @returns {Promise<PlaceMemory[]>}
  */
 export const getPlaceMemories = async (placeId) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get(`/api/places/${placeId}/memories`);
-  
-  return PLACE_MEMORIES[placeId] || [];
+  const detail = await fetchPlaceDetail(placeId);
+  const memories = [];
+  (detail?.years || []).forEach((y) =>
+    (y.memories || []).forEach((m) => memories.push(adaptMemory(m, placeId, y.year)))
+  );
+  return memories;
 };
 
 /**
  * Check if current user has been to a place
- * @param {string} placeId 
+ * @param {string} placeId
  * @returns {Promise<{iWasHere: boolean, myYears: number[]}>}
  */
 export const checkIWasHere = async (placeId) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get(`/api/places/${placeId}/i-was-here`);
-  
-  const memories = PLACE_MEMORIES[placeId] || [];
-  const myMemories = memories.filter(m => m.isCurrentUser);
-  const myYears = [...new Set(myMemories.map(m => m.year))];
-  
+  const detail = await fetchPlaceDetail(placeId);
   return {
-    iWasHere: myMemories.length > 0,
-    myYears,
+    iWasHere: !!detail?.iWasHere,
+    myYears: detail?.myYears || [],
   };
 };
 
@@ -139,58 +205,53 @@ export const checkIWasHere = async (placeId) => {
 
 /**
  * Start a new interview session
- * @param {Object} data 
- * @param {string} data.placeId
+ * @param {Object} data
  * @param {string} data.intervieweeId
+ * @param {string} [data.intervieweeName]
+ * @param {string} [data.intervieweeAvatar]
+ * @param {string} [data.placeId]
+ * @param {string} [data.placeName]
  * @returns {Promise<InterviewSession>}
  */
-export const startInterview = async ({ placeId, intervieweeId }) => {
-  // TODO: Replace with real API call
-  // return ApiClient.post('/api/interviews', { placeId, intervieweeId });
-  
-  return {
-    id: `interview_${Date.now()}`,
-    placeId,
+export const startInterview = async ({
+  intervieweeId,
+  intervieweeName,
+  intervieweeAvatar,
+  placeId,
+  placeName,
+} = {}) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/interviews');
+  return ApiClient.post(url, {
     intervieweeId,
-    date: new Date().toISOString(),
-    questions: [],
-    status: 'draft',
-  };
+    intervieweeName,
+    intervieweeAvatar,
+    placeId,
+    placeName,
+  });
 };
 
 /**
  * Update interview with answers
- * @param {string} interviewId 
- * @param {Object} data 
+ * @param {string} interviewId
+ * @param {Object} data - { status?, answers? }
  * @returns {Promise<InterviewSession>}
  */
-export const updateInterview = async (interviewId, data) => {
-  // TODO: Replace with real API call
-  // return ApiClient.put(`/api/interviews/${interviewId}`, data);
-  
-  return {
-    id: interviewId,
-    ...data,
-    updatedAt: new Date().toISOString(),
-  };
+export const updateInterview = async (interviewId, data = {}) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, `/interviews/${interviewId}`);
+  return ApiClient.put(url, data);
 };
 
 /**
- * Complete and save interview as journal entry
- * @param {string} interviewId 
- * @returns {Promise<{interview: InterviewSession, journalEntry: JournalEntry}>}
+ * Complete and save interview as a journal entry
+ * @param {string} interviewId
+ * @returns {Promise<{interview: InterviewSession, journalEntryId: string|null}>}
  */
 export const completeInterview = async (interviewId) => {
-  // TODO: Replace with real API call
-  // return ApiClient.post(`/api/interviews/${interviewId}/complete`);
-  
-  return {
-    interview: {
-      id: interviewId,
-      status: 'complete',
-    },
-    journalEntryId: `entry_${Date.now()}`,
-  };
+  const url = buildUrl(
+    API_CONFIG.HUB_BASE_URL,
+    `/interviews/${interviewId}/complete`
+  );
+  return ApiClient.post(url);
 };
 
 // ============================================
@@ -199,75 +260,58 @@ export const completeInterview = async (interviewId) => {
 
 /**
  * Create a memory request (ask someone about a place)
- * @param {Object} data 
+ * @param {Object} data
  * @param {string} data.placeId
  * @param {string} data.requestedFromId
- * @param {string} data.message
+ * @param {string} [data.placeName]
+ * @param {string} [data.message]
  * @returns {Promise<MemoryRequest>}
  */
-export const createMemoryRequest = async ({ placeId, requestedFromId, message }) => {
-  // TODO: Replace with real API call
-  // return ApiClient.post('/api/memory-requests', { placeId, requestedFromId, message });
-  
-  const place = PLACES_DATA.find(p => p.id === placeId);
-  
-  return {
-    id: `request_${Date.now()}`,
-    placeId,
-    placeName: place?.name || 'Unknown Place',
-    requestedFromId,
-    message,
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-  };
+export const createMemoryRequest = async ({
+  placeId,
+  requestedFromId,
+  placeName,
+  message,
+}) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/memory-requests');
+  return ApiClient.post(url, { placeId, requestedFromId, placeName, message });
 };
 
 /**
  * Get memory requests (sent or received)
  * @param {Object} options
  * @param {'sent' | 'received'} options.type
+ * @param {number} [options.limit]
+ * @param {number} [options.offset]
  * @returns {Promise<MemoryRequest[]>}
  */
-export const getMemoryRequests = async ({ type = 'received' } = {}) => {
-  // TODO: Replace with real API call
-  // return ApiClient.get('/api/memory-requests', { type });
-  
-  // Mock data
-  return [
-    {
-      id: 'request_1',
-      placeId: 1,
-      placeName: 'Manhattan',
-      requestedBy: {
-        id: 'user_1',
-        name: 'Sarah',
-        avatar: 'https://randomuser.me/api/portraits/women/44.jpg',
-      },
-      message: 'Grandpa, can you tell me about your trip to Manhattan?',
-      status: 'pending',
-      createdAt: '2024-01-15T10:00:00Z',
-    },
-  ];
+export const getMemoryRequests = async ({
+  type = 'received',
+  limit,
+  offset,
+} = {}) => {
+  const url = buildUrlWithQuery(
+    buildUrl(API_CONFIG.HUB_BASE_URL, '/memory-requests'),
+    { type, limit, offset }
+  );
+  const data = await ApiClient.get(url);
+  return data?.requests || [];
 };
 
 /**
  * Update memory request status
- * @param {string} requestId 
+ * @param {string} requestId
  * @param {Object} data
  * @param {'fulfilled' | 'declined'} data.status
- * @param {string} data.memoryId - If fulfilled, the memory that was created
+ * @param {string} [data.memoryId] - If fulfilled, the memory that was created
  * @returns {Promise<MemoryRequest>}
  */
 export const updateMemoryRequest = async (requestId, { status, memoryId }) => {
-  // TODO: Replace with real API call
-  // return ApiClient.put(`/api/memory-requests/${requestId}`, { status, memoryId });
-  
-  return {
-    id: requestId,
-    status,
-    fulfilledMemoryId: memoryId,
-    updatedAt: new Date().toISOString(),
-  };
+  const url = buildUrl(
+    API_CONFIG.HUB_BASE_URL,
+    `/memory-requests/${requestId}`
+  );
+  return ApiClient.put(url, { status, memoryId });
 };
 
 // ============================================

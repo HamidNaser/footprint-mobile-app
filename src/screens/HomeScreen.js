@@ -31,6 +31,21 @@ export default function HomeScreen({ navigation }) {
       <View style={styles.content}>
         <Text style={styles.title}>Welcome to FootPrint</Text>
         <Text style={styles.subtitle}>Your personal journal awaits</Text>
+
+        <TouchableOpacity
+          style={styles.quickAction}
+          onPress={() => navigation.navigate('Events')}
+          activeOpacity={0.85}
+        >
+          <View style={styles.quickActionIcon}>
+            <Ionicons name="calendar" size={22} color="#fff" />
+          </View>
+          <View style={styles.quickActionText}>
+            <Text style={styles.quickActionTitle}>Events</Text>
+            <Text style={styles.quickActionSubtitle}>Create & manage invitations</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
+        </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
@@ -74,6 +89,42 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
+  },
+  quickAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 32,
+    alignSelf: 'stretch',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  quickActionIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: PRIMARY_COLOR,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  quickActionText: {
+    flex: 1,
+  },
+  quickActionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  quickActionSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+    marginTop: 2,
   },
   title: {
     fontSize: 28,

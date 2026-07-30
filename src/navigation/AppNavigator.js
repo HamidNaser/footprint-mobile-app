@@ -12,10 +12,14 @@ import PersonJournalScreen from '../screens/PersonJournalScreen';
 import FamilyScreen from '../screens/FamilyScreen';
 import FriendsScreen from '../screens/FriendsScreen';
 import PlacesScreen from '../screens/PlacesScreen';
+import TimelineScreen from '../screens/TimelineScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import LoginScreen from '../screens/LoginScreen';
 import InterviewModeScreen from '../screens/InterviewModeScreen';
+import EventsScreen from '../screens/EventsScreen';
+import EventDetailScreen from '../screens/EventDetailScreen';
+import EventFormScreen from '../screens/EventFormScreen';
 
 // Auth context
 import { useAuth } from '../context/AuthContext';
@@ -46,6 +50,9 @@ function MainTabs() {
             case 'Places':
               iconName = focused ? 'map' : 'map-outline';
               break;
+            case 'Timeline':
+              iconName = focused ? 'git-branch' : 'git-branch-outline';
+              break;
             default:
               iconName = 'ellipse';
           }
@@ -62,6 +69,7 @@ function MainTabs() {
       <Tab.Screen name="Family" component={FamilyScreen} />
       <Tab.Screen name="Friends" component={FriendsScreen} />
       <Tab.Screen name="Places" component={PlacesScreen} />
+      <Tab.Screen name="Timeline" component={TimelineScreen} />
     </Tab.Navigator>
   );
 }
@@ -111,6 +119,27 @@ export default function AppNavigator() {
               component={PersonJournalScreen}
               options={{
                 presentation: 'card',
+              }}
+            />
+            <Stack.Screen
+              name="Events"
+              component={EventsScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen
+              name="EventDetail"
+              component={EventDetailScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen
+              name="EventForm"
+              component={EventFormScreen}
+              options={{
+                presentation: 'fullScreenModal',
               }}
             />
           </>

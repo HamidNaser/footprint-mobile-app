@@ -1,7 +1,7 @@
 # FootPrint Mobile App - Start Here
 
-> **Last Updated:** June 13, 2026  
-> **Branch:** feature/phase-b-sync
+> **Last Updated:** July 30, 2026  
+> **Branch:** feature/timeline-lifeline
 
 Welcome! This file is your **navigation hub** and **resume point** for working on the FootPrint mobile application. When returning to this project after a break, start here to get oriented.
 
@@ -45,6 +45,18 @@ Welcome! This file is your **navigation hub** and **resume point** for working o
 ---
 
 ## 🔖 Where We Stopped
+
+### 🖥️ Machine Handoff (July 30, 2026)
+Committed all work-in-progress on this laptop so it can be pulled onto the **personal laptop** and continued via cloud. All three repos committed under personal identity (`HamidNaser` / `hamid.naser1106@gmail.com`):
+- **mobile** `feature/timeline-lifeline` (`27f9029`) — Events + Timeline/Lifeline + Places memory improvements + iOS TestFlight config
+- **backend** `feature/lifeline-api` (`86fbdd5`) — Events API (Hub)
+- **web** `feature/timeline-lifeline` (`2e07dc3`) — Events + Timeline/Lifeline + Places explorer
+
+To resume on the personal laptop: `git clone` (or `git pull`) each repo, `npm install`, then `npx expo start`.
+
+### 🍎 iOS TestFlight (blocked on Apple)
+- Apple Developer Program enrollment is **Pending** — ID verification submitted, awaiting Apple approval (~24–48h). Once **Active**: confirm the real Team ID, create the App Store Connect app (bundle `com.footprint.app`), fill `ascAppId` in `eas.json`, then `eas build --platform ios --profile production` + `eas submit --platform ios --latest`.
+- `eas.json` / `app.json` / CI workflow already prepped with Apple ID `hamid.naser1106@gmail.com` + Team ID `SU865YGCS2` (verify after activation).
 
 ### Current Focus
 **Journal System Wiring** — Phase B: Sync Your Journal to Server

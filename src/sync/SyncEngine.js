@@ -369,6 +369,14 @@ class SyncEngineClass {
   async _processSingleOperation(operation) {
     await SyncQueue.markInProgress(operation.id);
 
+    // Defensively drop malformed operations (e.g. missing entityId) so they
+    // cannot loop or wedge the queue.
+    if (!operation.entityId) {
+      console.warn('[SyncEngine] Dropping malformed operation (no entityId):', operation.id, operation.type);
+      await SyncQueue.markCompleted(operation.id);
+      return;
+    }
+
     switch (operation.type) {
       case SyncOperationType.CREATE_ENTRY: {
         const response = await JournalApi.createEntry(operation.data);
@@ -408,12 +416,8 @@ class SyncEngineClass {
    * Handle successful entry creation
    */
   async _handleCreateSuccess(operation, serverId) {
-    // Update local entry with server ID
-    await JournalRepository.update(operation.entityId, {
-      server_id: serverId,
-      sync_status: SyncStatus.SYNCED,
-      synced_at: new Date().toISOString(),
-    });
+    // Update local entry with server ID (direct write, no re-enqueue)
+    await JournalRepository.markSynced(operation.entityId, serverId);
 
     this._emit(SyncEvent.ENTRY_SYNCED, {
       localId: operation.entityId,
@@ -426,10 +430,7 @@ class SyncEngineClass {
    * Handle successful entry update
    */
   async _handleUpdateSuccess(operation) {
-    await JournalRepository.update(operation.entityId, {
-      sync_status: SyncStatus.SYNCED,
-      synced_at: new Date().toISOString(),
-    });
+    await JournalRepository.markSynced(operation.entityId);
 
     this._emit(SyncEvent.ENTRY_SYNCED, {
       localId: operation.entityId,
@@ -558,9 +559,9 @@ class SyncEngineClass {
       }
     }
 
-    // Update local entry with server data
+    // Update local entry with server data (direct write, no re-enqueue)
     if (localEntry.sync_status === SyncStatus.SYNCED || !conflict) {
-      await JournalRepository.update(localEntry.local_id, {
+      await JournalRepository.applyServerUpdate(localEntry.local_id, {
         contentBlocks: mapped.contentBlocks,
         location: mapped.location,
         visibility: mapped.visibility,
