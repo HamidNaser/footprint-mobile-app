@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "scheme": "footprint",
     "splash": {
       "image": "./assets/splash-icon.png",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aqrava.footprint",
-      "buildNumber": "7",
+      "buildNumber": "11",
       "infoPlist": {
         "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
         "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
