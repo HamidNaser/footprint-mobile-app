@@ -375,6 +375,82 @@ class LocationServiceClass {
   }
 
   /**
+   * Extract GPS coordinates from a media asset's EXIF metadata.
+   *
+   * Handles the shapes expo-image-picker returns across platforms:
+   * - iOS: decimal-degree numbers (GPSLatitude/GPSLongitude) with N/S/E/W refs,
+   *   sometimes nested under a `{GPS}` sub-dictionary.
+   * - Android: DMS/rational strings ("40/1,42/1,1751/100") or space-separated triples.
+   *
+   * @param {Object|null|undefined} exif - asset.exif from expo-image-picker
+   * @returns {{lat: number, lng: number} | null} block-location shape, or null if no usable fix
+   */
+  extractLocationFromExif(exif) {
+    if (!exif) return null;
+
+    // Some iOS versions nest GPS data under a "{GPS}" dictionary.
+    const gps = exif['{GPS}'] || exif.GPS || exif;
+
+    let lat = this._parseGpsCoordinate(
+      gps.GPSLatitude ?? gps.Latitude ?? exif.GPSLatitude
+    );
+    let lng = this._parseGpsCoordinate(
+      gps.GPSLongitude ?? gps.Longitude ?? exif.GPSLongitude
+    );
+    if (lat == null || lng == null) return null;
+
+    const latRef = gps.GPSLatitudeRef ?? gps.LatitudeRef ?? exif.GPSLatitudeRef;
+    const lngRef = gps.GPSLongitudeRef ?? gps.LongitudeRef ?? exif.GPSLongitudeRef;
+    if (typeof latRef === 'string' && latRef.trim().toUpperCase().startsWith('S')) {
+      lat = -Math.abs(lat);
+    }
+    if (typeof lngRef === 'string' && lngRef.trim().toUpperCase().startsWith('W')) {
+      lng = -Math.abs(lng);
+    }
+
+    // Reject Null Island and out-of-range values (usually means "no fix").
+    if (lat === 0 && lng === 0) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+    return { lat, lng };
+  }
+
+  /**
+   * Parse a single EXIF GPS coordinate value into decimal degrees.
+   * Accepts a number, a decimal string, a [deg, min, sec] array, or a
+   * DMS/rational string like "40/1,42/1,1751/100".
+   * @returns {number | null}
+   */
+  _parseGpsCoordinate(value) {
+    if (value == null) return null;
+    if (typeof value === 'number') return isFinite(value) ? value : null;
+    if (Array.isArray(value)) return this._dmsToDecimal(value[0], value[1], value[2]);
+    if (typeof value === 'string') {
+      const s = value.trim();
+      const parts = s.split(/[\s,]+/).filter(Boolean).map((p) => {
+        if (p.includes('/')) {
+          const [n, d] = p.split('/').map(Number);
+          return d ? n / d : n;
+        }
+        return parseFloat(p);
+      });
+      if (parts.some((p) => !isFinite(p))) return null;
+      if (parts.length >= 3) return this._dmsToDecimal(parts[0], parts[1], parts[2]);
+      if (parts.length === 1) return parts[0];
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * Convert degrees/minutes/seconds to decimal degrees.
+   * @returns {number}
+   */
+  _dmsToDecimal(d, m, s) {
+    return (Number(d) || 0) + (Number(m) || 0) / 60 + (Number(s) || 0) / 3600;
+  }
+
+  /**
    * Get region for map centered on location
    * @param {number} latitude
    * @param {number} longitude

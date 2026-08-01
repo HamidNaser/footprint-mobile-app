@@ -48,9 +48,11 @@
   "submit": {
     "production": {
       "ios": {
-        "appleId": "hamid.naser1106@gmail.com",
-        "ascAppId": "TODO_ASC_APP_ID",
-        "appleTeamId": "SU865YGCS2"
+        "ascAppId": "6796826616",
+        "ascApiKeyPath": "./AuthKey_687TV37PM6.p8",
+        "ascApiKeyId": "687TV37PM6",
+        "ascApiKeyIssuerId": "6361d008-c795-41c6-907a-d45a919968f9",
+        "appleTeamId": "BRCXR8482B"
       },
       "android": {
         "serviceAccountKeyPath": "./google-service-account.json",

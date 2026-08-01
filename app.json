@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "scheme": "footprint",
     "splash": {
       "image": "./assets/splash-icon.png",
@@ -15,12 +15,15 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.footprint.app",
-      "buildNumber": "1",
+      "bundleIdentifier": "com.aqrava.footprint",
+      "buildNumber": "7",
       "infoPlist": {
         "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
         "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
-        "NSLocationWhenInUseUsageDescription": "FootPrint uses your location to tag where your memories were created."
+        "NSMicrophoneUsageDescription": "FootPrint needs microphone access to record voice notes for your memories.",
+        "NSLocationWhenInUseUsageDescription": "FootPrint uses your location to tag where your memories were created.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "FootPrint uses your location to tag where your memories were created.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -29,7 +32,7 @@
         "backgroundColor": "#2B7DE9"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.footprint.app",
+      "package": "com.aqrava.footprint",
       "versionCode": 1,
       "permissions": [
         "CAMERA",
@@ -53,7 +56,12 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://u.expo.dev/5fc5406d-e8ab-4ce1-98e6-03fbd34dc1e8"
-    }
+      "enabled": false
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-web-browser",
+      "expo-font"
+    ]
   }
 }

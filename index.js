@@ -1,3 +1,7 @@
+// Polyfill crypto.getRandomValues() — required by uuid on Hermes/SDK 54.
+// Must be imported before anything that generates a UUID.
+import 'react-native-get-random-values';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

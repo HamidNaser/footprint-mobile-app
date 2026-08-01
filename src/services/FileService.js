@@ -9,7 +9,7 @@
  * - File path management
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { v4 as uuidv4 } from 'uuid';
 
 // Base directory for all app media files

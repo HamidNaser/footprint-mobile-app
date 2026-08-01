@@ -5,7 +5,7 @@
  * Supports photos, videos, and audio recordings.
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { ApiClient, ApiError } from './ApiClient';
 import {
   API_CONFIG,

@@ -31,6 +31,7 @@ import { CameraCapture } from '../media/CameraCapture';
 import { MediaPicker, pickMedia, MediaPickerType } from '../media/MediaPicker';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import { LocationPicker, LocationDisplay } from '../map/LocationPicker';
+import LocationService from '../../services/LocationService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -251,6 +252,41 @@ export const JournalComposeModal = ({
     }
   }, [visible, entry, initialMode]);
 
+  // Silently seed a NEW entry with the device's current location as the default,
+  // but only when location permission is ALREADY granted (never prompts on open).
+  // This gives text/audio blocks and non-geotagged media a real coordinate; each
+  // photo/video still overrides with its own EXIF coordinate at save time.
+  useEffect(() => {
+    if (!visible || entry) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const { foreground } = await LocationService.checkPermissions();
+        if (cancelled || foreground !== 'granted') return;
+
+        const fix = await LocationService.getCurrentLocation();
+        if (cancelled || !fix) return;
+
+        let name;
+        try {
+          const addr = await LocationService.reverseGeocode(fix.latitude, fix.longitude);
+          name = addr?.formattedAddress;
+        } catch {
+          // Name is best-effort; a coordinate alone still drops a pin.
+        }
+        if (cancelled) return;
+
+        // Never override a location the user has already picked manually.
+        setSelectedLocation(prev => prev || { lat: fix.latitude, lng: fix.longitude, name });
+      } catch (error) {
+        console.log('[JournalCompose] Auto location capture skipped:', error?.message);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [visible, entry]);
+
   /**
    * Check if entry has content
    */
@@ -289,9 +325,17 @@ export const JournalComposeModal = ({
         });
       }
 
-      // Photo/video blocks
-      const photos = attachedMedia.filter(m => m.type === 'image');
+      // Photo/video blocks.
+      // Accept both 'image' (gallery / MediaPicker) and 'photo' (in-modal
+      // CameraCapture) so camera shots aren't silently dropped at save.
+      const photos = attachedMedia.filter(m => m.type === 'image' || m.type === 'photo');
       const videos = attachedMedia.filter(m => m.type === 'video');
+
+      // Prefer a media item's own coordinate: an already-extracted `location`,
+      // else its EXIF (camera captures carry `exif` but no pre-parsed location),
+      // else the entry-level fix.
+      const mediaLocation = (m) =>
+        m.location || LocationService.extractLocationFromExif(m.exif) || blockLocation;
 
       if (photos.length > 0) {
         contentBlocks.push({
@@ -302,7 +346,7 @@ export const JournalComposeModal = ({
             localPath: p.uri,
             width: p.width,
             height: p.height,
-            location: p.location || blockLocation,
+            location: mediaLocation(p),
           })),
         });
       }
@@ -318,7 +362,7 @@ export const JournalComposeModal = ({
               width: v.width,
               height: v.height,
               duration: v.duration,
-              location: v.location || blockLocation,
+              location: mediaLocation(v),
             }],
             duration: v.duration,
           });

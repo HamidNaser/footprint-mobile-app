@@ -18,6 +18,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
+import LocationService from '../../services/LocationService';
 
 /**
  * Media picker types
@@ -136,6 +137,8 @@ export const MediaPicker = ({
           fileName: asset.fileName,
           fileSize: asset.fileSize,
           exif: asset.exif,
+          // Per-photo GPS pulled from the photo's own EXIF (where the shot was taken).
+          location: LocationService.extractLocationFromExif(asset.exif) || undefined,
         }));
 
         console.log('[MediaPicker] Selected:', selectedMedia.length, 'items');
@@ -180,6 +183,7 @@ export const MediaPicker = ({
           fileName: asset.fileName,
           fileSize: asset.fileSize,
           exif: asset.exif,
+          location: LocationService.extractLocationFromExif(asset.exif) || undefined,
         };
 
         console.log('[MediaPicker] Captured:', media.type);
@@ -341,6 +345,7 @@ export const pickMedia = async (options = {}) => {
     fileName: asset.fileName,
     fileSize: asset.fileSize,
     exif: asset.exif,
+    location: LocationService.extractLocationFromExif(asset.exif) || undefined,
   }));
 
   return allowMultiple ? selectedMedia : selectedMedia[0];
@@ -381,6 +386,7 @@ export const takePhoto = async (options = {}) => {
     fileName: asset.fileName,
     fileSize: asset.fileSize,
     exif: asset.exif,
+    location: LocationService.extractLocationFromExif(asset.exif) || undefined,
   };
 };
 
@@ -405,6 +411,7 @@ export const recordVideo = async (options = {}) => {
     allowsEditing: allowsEditing,
     quality: quality,
     videoMaxDuration: maxDuration,
+    exif: true,
   });
 
   if (result.canceled) {
@@ -420,6 +427,8 @@ export const recordVideo = async (options = {}) => {
     duration: asset.duration,
     fileName: asset.fileName,
     fileSize: asset.fileSize,
+    exif: asset.exif,
+    location: LocationService.extractLocationFromExif(asset.exif) || undefined,
   };
 };
 
