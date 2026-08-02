@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aqrava.footprint",
-      "buildNumber": "12",
+      "buildNumber": "13",
       "infoPlist": {
         "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
         "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
