@@ -16,54 +16,60 @@ So there is one release action (build → TestFlight) and one promotion gate
 
 ## One-time setup
 
-These must be done once before the automated release works. Until then, releases
-work only from a machine that has the signing key on disk.
+**All four steps below are COMPLETE as of 2026-08-05.** They are kept here as a
+record of what was configured and how to redo it on a new machine or repo.
 
-### 1. Upload the App Store Connect API key to EAS
+### 1. Upload the App Store Connect API key to EAS — DONE
 
-The distribution certificate and provisioning profile already live on EAS
-servers. The ASC API key (`AuthKey_687TV37PM6.p8`) does **not** — it exists only
-on one local disk, which makes it both a CI blocker and a single point of loss.
+The distribution certificate and provisioning profile were already on EAS
+servers. The ASC API key (`AuthKey_687TV37PM6.p8`) was not — it existed only on
+one local disk, making it both a CI blocker and a single point of loss.
+
+Uploaded to EAS as **FootPrint ASC Key** (Key ID `687TV37PM6`). To redo it:
 
 ```bash
 eas credentials --platform ios
 # -> production -> App Store Connect API Key -> upload the .p8
 ```
 
-`eas.json` no longer references `ascApiKeyPath`, so `eas submit` will use the
-EAS-hosted key once uploaded. After that, keep a copy of the `.p8` somewhere
-durable (password manager) and it no longer needs to sit in the repo folder.
+`eas.json` no longer references `ascApiKeyPath`, so `eas submit` uses the
+EAS-hosted key. The local `.p8` is kept as a fallback — store a copy somewhere
+durable (password manager); it no longer needs to sit in the repo folder.
 
-### 2. Initialize remote build numbers
+### 2. Initialize remote build numbers — DONE
 
-`appVersionSource` is now `remote`: EAS tracks `buildNumber` server-side and
+`appVersionSource` is `remote`: EAS tracks `buildNumber` server-side and
 increments it per build. Local `app.json` values are ignored.
 
-Apple permanently rejects duplicate build numbers, and build **14** is already
-uploaded. Seed the remote counter above it:
+Apple permanently rejects duplicate build numbers, and build **14** was already
+uploaded, so the remote counter was seeded to 14 — the next production build is
+**15**.
 
 ```bash
-eas build:version:set --platform ios     # set to 14 (next build becomes 15)
+eas build:version:set --platform ios     # seeded to 14
+eas build:version:get --platform ios     # verify -> "iOS buildNumber - 14"
 ```
 
-Verify with `eas build:version:get --platform ios` before the first CI release.
-Once confirmed, `ios.buildNumber` / `android.versionCode` can be deleted from
-`app.json` — they are dead config under remote versioning. (Left in place for
-now to avoid conflicting with in-flight branches.)
+`ios.buildNumber` and `android.versionCode` have been removed from `app.json`;
+they are dead config under remote versioning and nothing in the app reads them.
 
-### 3. Create the `production` GitHub Environment
+### 3. Create the `production` GitHub Environment — DONE
 
-`Settings -> Environments -> New environment -> production`, then enable
-**Required reviewers** and add yourself.
+Created with **required reviewer: HamidNaser** and `prevent_self_review: false`.
+
+That last flag matters on a solo project: with self-review prevented, the only
+reviewer could not approve their own deployment and the release button would
+deadlock.
 
 This is what makes the release button an approved, auditable action rather than
 an anonymous one. It also means a misclick pauses for confirmation instead of
 uploading to Apple.
 
-### 4. Confirm the `EXPO_TOKEN` secret
+### 4. Confirm the `EXPO_TOKEN` secret — DONE
 
-`Settings -> Secrets and variables -> Actions`. It should already exist from the
-previous workflow. It is the only secret CI needs.
+Present in `Settings -> Secrets and variables -> Actions` (added 2026-05-26).
+It is the only secret CI needs. Secret *values* are write-only — if it ever
+needs replacing, mint a new one at expo.dev -> Access Tokens.
 
 ---
 
@@ -140,7 +146,7 @@ Tracked honestly so they are not mistaken for working features.
 - **`expo-updates` is installed but disabled**, from the SDK 54 TestFlight crash
   fix (`b04b8ee`). OTA updates for JS-only hotfixes are valuable but should be
   re-enabled deliberately, with a staged rollout — not casually.
-- **`git` is not installed system-wide on the primary dev machine.** It exists
-  only inside GitHub Desktop (`%LOCALAPPDATA%\GitHubDesktop\app-<version>\...`),
-  and that path changes on every GitHub Desktop update. `eas build` fails without
-  git on PATH. Fix with `winget install Git.Git`.
+- ~~**`git` is not installed system-wide on the primary dev machine.**~~ Fixed
+  2026-08-05: Git for Windows 2.55.0 installed to `C:\Program Files\Git`. Before
+  this, git existed only inside GitHub Desktop and `eas build` failed outright
+  with *"git command not found"*.

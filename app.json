@@ -16,7 +16,6 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aqrava.footprint",
-      "buildNumber": "14",
       "infoPlist": {
         "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
         "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
@@ -33,7 +32,6 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.aqrava.footprint",
-      "versionCode": 1,
       "permissions": [
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
