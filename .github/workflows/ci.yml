@@ -1,0 +1,52 @@
+name: CI
+
+# Quality gates only -- this workflow never builds or ships anything.
+# Releases are deliberate and live in release.yml (manual trigger).
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+
+concurrency:
+  # A newer push to the same ref makes the in-flight run irrelevant.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # WARNING: this step is currently a NO-OP. There is no "lint" script and
+      # eslint is not a dependency, so `--if-present` silently skips it and the
+      # job goes green having checked nothing. Install eslint + add the script
+      # before trusting this gate. See docs/RELEASING.md ("Known gaps").
+      - name: Lint
+        run: npm run lint --if-present
+
+      # Jest is installed, but the suite is minimal -- passing here is a weak
+      # signal today. Same caveat as above.
+      - name: Test
+        run: npm test --if-present
+
+      # Catches dependency/config drift against the installed Expo SDK, which
+      # is the class of problem that caused the SDK 54 TestFlight crash.
+      - name: Expo Doctor
+        run: npx expo-doctor
+        continue-on-error: true
