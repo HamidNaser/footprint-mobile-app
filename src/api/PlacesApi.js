@@ -34,10 +34,13 @@ const adaptPlace = (place) => {
     image: place.image || PLACEHOLDER_IMAGE,
     // Backend has no category concept; everything is visible under "everyone".
     category: 'everyone',
+    // PlaceResponse (list) carries no IWasHere — only PlaceDetailResponse does.
     iWasHere: false,
     // Detail-view fields with no backend source yet — safe defaults.
     photos: place.image ? [place.image] : [],
-    location: null,
+    // Lat/Lng *are* on PlaceResponse; 0/0 means unknown. Same rule as
+    // adaptPlaceDetail, so the list and detail views agree.
+    location: place.lat || place.lng ? { lat: place.lat, lng: place.lng } : null,
     years,
   };
 };
