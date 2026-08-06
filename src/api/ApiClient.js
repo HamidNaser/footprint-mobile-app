@@ -93,6 +93,14 @@ class ApiClientClass {
       this._refreshToken = refreshToken;
       this._tokenExpiry = expiry ? parseInt(expiry, 10) : null;
 
+      // request() rejects outright when NetworkMonitor reports offline, so make
+      // sure it has real state before the first request rather than relying on
+      // startSync having got there first. Idempotent, and non-fatal if it fails
+      // -- isOnline() treats unknown state as online.
+      await NetworkMonitor.initialize().catch((error) =>
+        console.warn('[ApiClient] NetworkMonitor init failed:', error?.message)
+      );
+
       this._initialized = true;
       console.log('[ApiClient] Initialized, hasToken:', !!this._accessToken);
     } catch (error) {

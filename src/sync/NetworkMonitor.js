@@ -104,7 +104,12 @@ class NetworkMonitorClass {
    * @returns {boolean} True if connected and internet is reachable
    */
   isOnline() {
-    if (!this._currentState) return false;
+    // Before initialize() resolves, `_currentState` is null -- state unknown,
+    // NOT offline. Failing closed here made every request throw "No internet
+    // connection" whenever a caller beat NetworkMonitor.initialize() to the
+    // punch (startSync is fire-and-forget and initialises this fourth, behind
+    // SQLite + migrations), which surfaced as a silently empty Places screen.
+    if (!this._currentState) return true;
     // `isInternetReachable` is often null ("unknown") on web and briefly at
     // startup. Treat unknown as online; only an explicit `false` means offline.
     return this._currentState.isConnected === true &&
