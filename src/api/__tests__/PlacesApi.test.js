@@ -7,6 +7,7 @@
 
 import { ApiClient } from '../ApiClient';
 import {
+  getPlaces,
   getPlace,
   getPlaceYearMemories,
   getPlaceMemories,
@@ -78,6 +79,62 @@ const detailFixture = () => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+const listFixture = (overrides = {}) => ({
+  places: [
+    {
+      id: 'paris',
+      name: 'Paris',
+      subtitle: 'France',
+      image: 'https://cdn/paris.jpg',
+      lat: 48.8566,
+      lng: 2.3522,
+      entriesCount: 2,
+      lastVisited: '2023-06-15T00:00:00Z',
+      years: [{ year: 2023, avatars: ['https://cdn/a.jpg'] }],
+      ...overrides,
+    },
+  ],
+  totalCount: 1,
+});
+
+describe('getPlaces', () => {
+  it('keeps the coordinates the list endpoint provides', async () => {
+    // PlaceResponse carries Lat/Lng, and PlacesScreen gates its map preview on
+    // place.location — dropping them here silently hides the map.
+    ApiClient.get.mockResolvedValue(listFixture());
+
+    const [place] = await getPlaces();
+
+    expect(place.location).toEqual({ lat: 48.8566, lng: 2.3522 });
+  });
+
+  it('treats 0/0 coordinates as unknown', async () => {
+    ApiClient.get.mockResolvedValue(listFixture({ lat: 0, lng: 0 }));
+    const [place] = await getPlaces();
+    expect(place.location).toBeNull();
+  });
+
+  it('reports no location when the payload omits coordinates', async () => {
+    ApiClient.get.mockResolvedValue(listFixture({ lat: undefined, lng: undefined }));
+    const [place] = await getPlaces();
+    expect(place.location).toBeNull();
+  });
+
+  it('leaves iWasHere false — the list response has no such field', async () => {
+    ApiClient.get.mockResolvedValue(listFixture());
+    const [place] = await getPlaces();
+    expect(place.iWasHere).toBe(false);
+  });
+
+  it('filters by name and subtitle client-side', async () => {
+    ApiClient.get.mockResolvedValue(listFixture());
+
+    expect(await getPlaces({ search: 'par' })).toHaveLength(1);
+    expect(await getPlaces({ search: 'fran' })).toHaveLength(1);
+    expect(await getPlaces({ search: 'tokyo' })).toHaveLength(0);
+  });
 });
 
 describe('getPlace', () => {
