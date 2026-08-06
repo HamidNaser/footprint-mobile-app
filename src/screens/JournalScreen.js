@@ -513,17 +513,27 @@ export default function JournalScreen({ navigation }) {
     console.log('[JournalScreen] Sending quick message:', text, 'visibility:', visibility);
     
     try {
-      await createEntry({
+      const created = await createEntry({
         userId: authUser?.id || 'local_user',
         contentBlocks: [{ type: 'text', content: text }],
         visibility: visibility,
         date: new Date(),
       });
+      revealEntry(created);
       console.log('[JournalScreen] Quick message saved');
     } catch (error) {
       console.error('[JournalScreen] Failed to save quick message:', error);
     }
-  }, [createEntry, authUser]);
+  }, [createEntry, authUser, revealEntry]);
+
+  /**
+   * Move the screen to the day a just-created entry belongs to, so a save is
+   * always visibly confirmed. No-op when already on that day.
+   */
+  const revealEntry = useCallback((created) => {
+    const key = toDateKey(created?.date || created?.createdAt);
+    if (key) setSelectedDate(parseDateKey(key));
+  }, []);
 
   const handleQuickCamera = useCallback(() => {
     setComposeMode('camera');
@@ -550,21 +560,25 @@ export default function JournalScreen({ navigation }) {
     console.log('[JournalScreen] Saving entry:', entryData);
     
     try {
-      await createEntry({
+      const created = await createEntry({
         userId: authUser?.id || 'local_user',
         contentBlocks: entryData.contentBlocks,
         visibility: entryData.visibility,
         location: entryData.location,
         date: entryData.date,
       });
-      
+
       setShowComposeModal(false);
+      // Land on the day the entry belongs to. Saving while looking at another
+      // date would otherwise drop the user back onto a screen that does not
+      // contain what they just captured.
+      revealEntry(created);
       console.log('[JournalScreen] Entry saved successfully');
     } catch (error) {
       console.error('[JournalScreen] Failed to save entry:', error);
       // Error will be shown via the useJournal hook's error state
     }
-  }, [createEntry, authUser]);
+  }, [createEntry, authUser, revealEntry]);
 
   /**
    * Handle delete entry

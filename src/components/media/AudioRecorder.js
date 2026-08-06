@@ -119,6 +119,10 @@ export const AudioRecorder = ({
   maxDuration = 300000, // 5 minutes default
   showWaveform = true,
   primaryColor = '#007AFF',
+  // Hold the button to record, release to stop -- a walkie-talkie, not a
+  // two-tap transport. Capturing a thought while walking should cost one
+  // gesture, and releasing is a natural full stop.
+  holdToRecord = true,
   style,
 }) => {
   const [recordingState, setRecordingState] = useState(RecordingState.IDLE);
@@ -391,6 +395,32 @@ export const AudioRecorder = ({
     }
   };
 
+  /**
+   * Press-and-hold handlers.
+   *
+   * A very short hold is almost always an accidental brush rather than an
+   * intended recording, so releasing under MIN_HOLD_MS discards instead of
+   * saving a fragment the user has to go and delete.
+   */
+  const MIN_HOLD_MS = 400;
+  const holdStartedAtRef = useRef(0);
+
+  const handleHoldStart = () => {
+    if (recordingState !== RecordingState.IDLE) return;
+    holdStartedAtRef.current = Date.now();
+    startRecording();
+  };
+
+  const handleHoldEnd = () => {
+    if (recordingState !== RecordingState.RECORDING) return;
+    const held = Date.now() - holdStartedAtRef.current;
+    if (held < MIN_HOLD_MS) {
+      cancelRecording();
+      return;
+    }
+    stopRecording();
+  };
+
   // Render waveform visualization
   const renderWaveform = () => {
     if (!showWaveform) return null;
@@ -474,13 +504,22 @@ export const AudioRecorder = ({
                 backgroundColor: primaryColor,
               },
             ]}
-            onPress={handleMainButtonPress}
+            // In hold mode the press/release pair drives recording; onPress is
+            // left unbound so a stray tap cannot start an unattended recording.
+            onPressIn={holdToRecord ? handleHoldStart : undefined}
+            onPressOut={holdToRecord ? handleHoldEnd : undefined}
+            onPress={holdToRecord ? undefined : handleMainButtonPress}
+            delayPressOut={0}
           >
             {recordingState === RecordingState.IDLE && (
               <Ionicons name="mic" size={32} color="#FFF" />
             )}
             {recordingState === RecordingState.RECORDING && (
-              <Ionicons name="stop" size={28} color="#FFF" />
+              <Ionicons
+                name={holdToRecord ? 'mic' : 'stop'}
+                size={holdToRecord ? 32 : 28}
+                color="#FFF"
+              />
             )}
             {recordingState === RecordingState.PAUSED && (
               <Ionicons name="play" size={28} color="#FFF" />
@@ -488,8 +527,9 @@ export const AudioRecorder = ({
           </TouchableOpacity>
         </Animated.View>
 
-        {/* Pause button (when recording) */}
-        {recordingState === RecordingState.RECORDING && (
+        {/* Pause button (when recording). Meaningless while holding -- you
+            cannot pause and keep your finger down -- so hidden in hold mode. */}
+        {recordingState === RecordingState.RECORDING && !holdToRecord && (
           <TouchableOpacity
             style={styles.secondaryButton}
             onPress={pauseRecording}
@@ -511,8 +551,10 @@ export const AudioRecorder = ({
 
       {/* Status text */}
       <Text style={styles.statusText}>
-        {recordingState === RecordingState.IDLE && 'Tap to start recording'}
-        {recordingState === RecordingState.RECORDING && 'Recording...'}
+        {recordingState === RecordingState.IDLE &&
+          (holdToRecord ? 'Hold to record' : 'Tap to start recording')}
+        {recordingState === RecordingState.RECORDING &&
+          (holdToRecord ? 'Recording — release to stop' : 'Recording...')}
         {recordingState === RecordingState.PAUSED && 'Paused - tap to resume'}
       </Text>
     </View>

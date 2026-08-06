@@ -32,6 +32,7 @@ import { MediaPicker, pickMedia, MediaPickerType } from '../media/MediaPicker';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import { LocationPicker, LocationDisplay } from '../map/LocationPicker';
 import LocationService from '../../services/LocationService';
+import { buildContentBlocks } from '../../utils/journalBlocks';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -206,7 +207,14 @@ export const JournalComposeModal = ({
   // State
   const [text, setText] = useState('');
   const [attachedMedia, setAttachedMedia] = useState([]);
-  const [audioRecording, setAudioRecording] = useState(null);
+  // Voice notes and typed notes captured during the session. Each carries a
+  // `capturedAt` sequence number so blocks are emitted in the order they were
+  // actually taken -- photo, then note, then voice, then video -- rather than
+  // grouped by kind. A session can hold several of each.
+  const [audioRecordings, setAudioRecordings] = useState([]);
+  const [textNotes, setTextNotes] = useState([]);
+  const captureSeqRef = useRef(0);
+  const nextSeq = useCallback(() => { captureSeqRef.current += 1; return captureSeqRef.current; }, []);
   const [visibility, setVisibility] = useState(VisibilityOptions.PRIVATE);
   const [isSaving, setIsSaving] = useState(false);
   const [activeMode, setActiveMode] = useState(initialMode);
@@ -214,6 +222,8 @@ export const JournalComposeModal = ({
   const [showAudioRecorder, setShowAudioRecorder] = useState(initialMode === 'audio');
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [showTextNoteInput, setShowTextNoteInput] = useState(initialMode === 'text-note');
+  const [pendingNote, setPendingNote] = useState('');
   const [locationSharing, setLocationSharing] = useState(LocationSharingOptions.PRIVATE);
 
   const textInputRef = useRef(null);
@@ -236,7 +246,9 @@ export const JournalComposeModal = ({
         // New entry
         setText('');
         setAttachedMedia([]);
-        setAudioRecording(null);
+        setAudioRecordings([]);
+        setTextNotes([]);
+        captureSeqRef.current = 0;
         setVisibility(VisibilityOptions.PRIVATE);
         setSelectedLocation(null);
         setLocationSharing(LocationSharingOptions.PRIVATE);
@@ -290,9 +302,10 @@ export const JournalComposeModal = ({
   /**
    * Check if entry has content
    */
-  const hasContent = text.trim().length > 0 || 
-    attachedMedia.length > 0 || 
-    audioRecording !== null;
+  const hasContent = text.trim().length > 0 ||
+    attachedMedia.length > 0 ||
+    audioRecordings.length > 0 ||
+    textNotes.length > 0;
 
   /**
    * Handle save
@@ -316,73 +329,22 @@ export const JournalComposeModal = ({
         ? { lat: selectedLocation.lat, lng: selectedLocation.lng, name: selectedLocation.name }
         : undefined;
 
-      // Text block
-      if (text.trim()) {
-        contentBlocks.push({
-          type: 'text',
-          content: text.trim(),
-          location: blockLocation,
-        });
-      }
-
-      // Photo/video blocks.
-      // Accept both 'image' (gallery / MediaPicker) and 'photo' (in-modal
-      // CameraCapture) so camera shots aren't silently dropped at save.
-      const photos = attachedMedia.filter(m => m.type === 'image' || m.type === 'photo');
-      const videos = attachedMedia.filter(m => m.type === 'video');
-
       // Prefer a media item's own coordinate: an already-extracted `location`,
       // else its EXIF (camera captures carry `exif` but no pre-parsed location),
       // else the entry-level fix.
       const mediaLocation = (m) =>
         m.location || LocationService.extractLocationFromExif(m.exif) || blockLocation;
 
-      if (photos.length > 0) {
-        contentBlocks.push({
-          type: 'photos',
-          location: blockLocation,
-          media: photos.map(p => ({
-            localId: p.localId || `photo-${Date.now()}-${Math.random()}`,
-            localPath: p.uri,
-            width: p.width,
-            height: p.height,
-            location: mediaLocation(p),
-          })),
-        });
-      }
-
-      if (videos.length > 0) {
-        videos.forEach(v => {
-          contentBlocks.push({
-            type: 'video',
-            location: blockLocation,
-            media: [{
-              localId: v.localId || `video-${Date.now()}-${Math.random()}`,
-              localPath: v.uri,
-              width: v.width,
-              height: v.height,
-              duration: v.duration,
-              location: mediaLocation(v),
-            }],
-            duration: v.duration,
-          });
-        });
-      }
-
-      // Audio block
-      if (audioRecording) {
-        contentBlocks.push({
-          type: 'audio',
-          location: blockLocation,
-          media: [{
-            localId: audioRecording.localId || `audio-${Date.now()}`,
-            localPath: audioRecording.uri,
-            location: blockLocation,
-          }],
-          duration: audioRecording.duration,
-          waveform: audioRecording.waveform,
-        });
-      }
+      // Ordering lives in src/utils/journalBlocks.js so it can be tested
+      // without mounting this modal.
+      contentBlocks.push(...buildContentBlocks({
+        text,
+        attachedMedia,
+        audioRecordings,
+        textNotes,
+        blockLocation,
+        mediaLocation,
+      }));
 
       await onSave?.({
         contentBlocks,
@@ -432,7 +394,12 @@ export const JournalComposeModal = ({
 
       if (result) {
         const newMedia = Array.isArray(result) ? result : [result];
-        setAttachedMedia(prev => [...prev, ...newMedia]);
+        // Stamped like camera captures so gallery picks sort into the same
+        // capture timeline rather than always landing first.
+        setAttachedMedia(prev => [
+          ...prev,
+          ...newMedia.map(m => ({ ...m, capturedAt: nextSeq() })),
+        ]);
       }
     } catch (error) {
       console.error('[JournalCompose] Pick media error:', error);
@@ -450,15 +417,28 @@ export const JournalComposeModal = ({
    * Handle camera capture
    */
   const handleCameraCapture = (media) => {
-    setAttachedMedia(prev => [...prev, media]);
-    setShowCamera(false);
+    // Stay in the camera. Closing after every shot was the friction: capturing
+    // three things meant three round trips out to the compose form. The Done
+    // button in the camera header is how you leave.
+    setAttachedMedia(prev => [...prev, { ...media, capturedAt: nextSeq() }]);
   };
+
+  /**
+   * Add a typed note as its own block, in sequence with the other captures.
+   */
+  const handleAddTextNote = useCallback((note) => {
+    const content = (note || '').trim();
+    if (!content) return;
+    setTextNotes(prev => [...prev, { content, capturedAt: nextSeq() }]);
+  }, [nextSeq]);
 
   /**
    * Handle audio recording complete
    */
   const handleAudioComplete = (recording) => {
-    setAudioRecording(recording);
+    // Append rather than replace: recording a second voice note used to
+    // silently discard the first.
+    setAudioRecordings(prev => [...prev, { ...recording, capturedAt: nextSeq() }]);
     setShowAudioRecorder(false);
   };
 
@@ -469,6 +449,8 @@ export const JournalComposeModal = ({
         <CameraCapture
           onCapture={handleCameraCapture}
           onClose={() => setShowCamera(false)}
+          onDone={() => setShowCamera(false)}
+          captureCount={attachedMedia.length}
           primaryColor={primaryColor}
         />
       </Modal>
@@ -563,15 +545,33 @@ export const JournalComposeModal = ({
               </View>
             )}
 
-            {/* Audio attachment */}
-            {audioRecording && (
+            {/* Audio attachments -- a session can hold several voice notes */}
+            {audioRecordings.map((rec, index) => (
               <AudioAttachment
-                recording={audioRecording}
-                onRemove={() => setAudioRecording(null)}
+                key={rec.localId || rec.uri || index}
+                recording={rec}
+                onRemove={() =>
+                  setAudioRecordings(prev => prev.filter((_, i) => i !== index))
+                }
                 onPlay={() => {/* TODO: Play audio */}}
                 primaryColor={primaryColor}
               />
-            )}
+            ))}
+
+            {/* Typed notes captured in sequence with the other captures */}
+            {textNotes.map((note, index) => (
+              <View key={`note-${index}`} style={styles.textNote}>
+                <Ionicons name="document-text-outline" size={18} color={primaryColor} />
+                <Text style={styles.textNoteContent} numberOfLines={3}>
+                  {note.content}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setTextNotes(prev => prev.filter((_, i) => i !== index))}
+                >
+                  <Ionicons name="close-circle" size={22} color="#FF3B30" />
+                </TouchableOpacity>
+              </View>
+            ))}
 
             {/* Location display */}
             {selectedLocation && (
@@ -639,6 +639,16 @@ export const JournalComposeModal = ({
                 <Ionicons name="mic-outline" size={24} color={primaryColor} />
               </TouchableOpacity>
 
+              {/* Text note. The toolbar had photo, gallery, audio and location
+                  but no way to add a note mid-sequence -- the only text was the
+                  field at the top, which always sorts first. */}
+              <TouchableOpacity
+                style={styles.toolbarButton}
+                onPress={() => setShowTextNoteInput(true)}
+              >
+                <Ionicons name="text-outline" size={24} color={primaryColor} />
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={styles.toolbarButton}
                 onPress={() => setShowLocationPicker(true)}
@@ -668,6 +678,49 @@ export const JournalComposeModal = ({
         initialLocation={selectedLocation}
         primaryColor={primaryColor}
       />
+
+      {/* Text note input. Deliberately a light sheet rather than a full screen:
+          adding a note between two photos should not feel like leaving the
+          capture session. */}
+      <Modal visible={showTextNoteInput} transparent animationType="fade">
+        <View style={styles.noteOverlay}>
+          <View style={styles.noteSheet}>
+            <Text style={styles.noteTitle}>Add a note</Text>
+            <TextInput
+              style={styles.noteInput}
+              value={pendingNote}
+              onChangeText={setPendingNote}
+              placeholder="What's happening?"
+              placeholderTextColor="#9E9E9E"
+              multiline
+              autoFocus
+            />
+            <View style={styles.noteActions}>
+              <TouchableOpacity
+                style={styles.noteCancel}
+                onPress={() => { setPendingNote(''); setShowTextNoteInput(false); }}
+              >
+                <Text style={styles.noteCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.noteAdd,
+                  { backgroundColor: primaryColor },
+                  !pendingNote.trim() && styles.noteAddDisabled,
+                ]}
+                disabled={!pendingNote.trim()}
+                onPress={() => {
+                  handleAddTextNote(pendingNote);
+                  setPendingNote('');
+                  setShowTextNoteInput(false);
+                }}
+              >
+                <Text style={styles.noteAddText}>Add</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </Modal>
   );
 };
@@ -676,6 +729,86 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFF',
+  },
+
+  // Typed note preview in the attachment list
+  textNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#F5F5F7',
+  },
+
+  textNoteContent: {
+    flex: 1,
+    fontSize: 14,
+    color: '#1C1C1E',
+  },
+
+  // Text note input sheet
+  noteOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+
+  noteSheet: {
+    backgroundColor: '#FFF',
+    borderRadius: 16,
+    padding: 20,
+    gap: 14,
+  },
+
+  noteTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1C1C1E',
+  },
+
+  noteInput: {
+    minHeight: 96,
+    maxHeight: 200,
+    fontSize: 16,
+    color: '#1C1C1E',
+    textAlignVertical: 'top',
+  },
+
+  noteActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+
+  noteCancel: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+  },
+
+  noteCancelText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#8E8E93',
+  },
+
+  noteAdd: {
+    paddingVertical: 10,
+    paddingHorizontal: 22,
+    borderRadius: 20,
+  },
+
+  noteAddDisabled: {
+    opacity: 0.4,
+  },
+
+  noteAddText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFF',
   },
 
   // Header
