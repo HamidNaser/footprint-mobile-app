@@ -165,7 +165,13 @@ class ApiClientClass {
    * @returns {boolean} True if token needs refresh
    */
   isTokenExpired() {
-    if (!this._tokenExpiry) return true;
+    // No recorded expiry is *unknown*, not expired. Returning true here forced
+    // a refresh on every request whenever the expiry key was missing, and a
+    // failed refresh then wiped the session -- leaving the UI logged in while
+    // every API call went out unauthenticated. Let the server be the authority
+    // instead: a genuinely dead token comes back 401 and is retried below.
+    if (!this._tokenExpiry) return false;
+    if (Number.isNaN(this._tokenExpiry)) return false;
     return Date.now() >= this._tokenExpiry;
   }
 
@@ -215,8 +221,13 @@ class ApiClientClass {
 
       if (!response.ok) {
         console.log('[ApiClient] Token refresh failed:', response.status);
-        // Clear invalid tokens
-        await this.clearTokens();
+        // Only a rejection of the credential itself means the session is dead.
+        // A 5xx or gateway error says the auth service is having a bad minute,
+        // and wiping tokens for that logs the user out of a working account --
+        // silently, since AuthContext keeps its own state.
+        if (response.status === 401 || response.status === 403) {
+          await this.clearTokens();
+        }
         return false;
       }
 
@@ -294,6 +305,18 @@ class ApiClientClass {
     // Execute request with timeout
     try {
       const response = await this._fetchWithTimeout(url, requestOptions, timeout);
+
+      // Token rejected mid-flight: refresh once, then retry transparently.
+      // This is the counterpart to isTokenExpired() no longer pre-empting --
+      // the server is the authority on whether a token is dead, and without
+      // this retry an expired token would simply fail the request.
+      if (response.status === 401 && requiresAuth && !options.isRetry) {
+        const refreshed = await this.refreshAccessToken();
+        if (refreshed) {
+          return this.request(url, { ...options, isRetry: true });
+        }
+      }
+
       return this._handleResponse(response);
     } catch (error) {
       // Handle network errors

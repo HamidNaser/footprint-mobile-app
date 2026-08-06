@@ -366,17 +366,30 @@ export default function PlacesScreen() {
   // Live places from the Hub API (no mock fallback)
   const [places, setPlaces] = useState([]);
   const [isLoadingPlaces, setIsLoadingPlaces] = useState(true);
+  // A failed request used to be swallowed into an empty list, so "the request
+  // died" and "you have no places" looked identical on screen -- untriageable
+  // without attaching a debugger. Keep the reason and show it.
+  const [loadError, setLoadError] = useState(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
         setIsLoadingPlaces(true);
+        setLoadError(null);
         const data = await getPlaces();
         if (mounted) setPlaces(data);
       } catch (err) {
-        console.warn('Failed to load places:', err?.message);
-        if (mounted) setPlaces([]);
+        console.warn('[PlacesScreen] Failed to load places:', err?.status, err?.code, err?.message);
+        if (mounted) {
+          setPlaces([]);
+          setLoadError({
+            message: err?.message || 'Could not load places',
+            status: err?.status,
+            code: err?.code,
+          });
+        }
       } finally {
         if (mounted) setIsLoadingPlaces(false);
       }
@@ -384,7 +397,9 @@ export default function PlacesScreen() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [reloadToken]);
+
+  const retryLoadPlaces = useCallback(() => setReloadToken(t => t + 1), []);
 
   // Filter places based on active filter and search
   const filteredPlaces = useMemo(() => {
@@ -525,12 +540,32 @@ export default function PlacesScreen() {
               onYearPress={handleYearPress}
             />
           ))
+        ) : loadError ? (
+          <View style={styles.emptyState}>
+            <Ionicons name="cloud-offline-outline" size={48} color="#FF3B30" />
+            <Text style={styles.emptyStateText}>Couldn't load places</Text>
+            <Text style={styles.emptyStateSubtext}>{loadError.message}</Text>
+            {(loadError.status || loadError.code) && (
+              <Text style={styles.errorDetail}>
+                {[loadError.status, loadError.code].filter(Boolean).join(' · ')}
+              </Text>
+            )}
+            <TouchableOpacity style={styles.retryButton} onPress={retryLoadPlaces}>
+              <Ionicons name="refresh" size={18} color="#FFF" />
+              <Text style={styles.retryButtonText}>Try again</Text>
+            </TouchableOpacity>
+          </View>
         ) : (
           <View style={styles.emptyState}>
             <Ionicons name="location-outline" size={48} color={TEXT_MUTED} />
-            <Text style={styles.emptyStateText}>No places found</Text>
+            <Text style={styles.emptyStateText}>No places yet</Text>
             <Text style={styles.emptyStateSubtext}>
-              {searchQuery ? 'Try a different search' : 'Add locations to your memories'}
+              {searchQuery
+                ? 'Try a different search'
+                : // Places are derived server-side from entries that carry
+                  // coordinates, so an entry saved without a location never
+                  // produces one. Say that instead of "no places found".
+                  'Places appear once your memories have a location. Tag a location when you save an entry.'}
             </Text>
           </View>
         )}
@@ -810,6 +845,34 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: TEXT_MUTED,
     marginTop: 4,
+    textAlign: 'center',
+    paddingHorizontal: 24,
+  },
+
+  // Surfaces the HTTP status / error code so a failure is triageable from a
+  // screenshot rather than needing a debugger attached.
+  errorDetail: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    marginTop: 6,
+    fontVariant: ['tabular-nums'],
+  },
+
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+    backgroundColor: PRIMARY_COLOR,
+  },
+
+  retryButtonText: {
+    color: '#FFF',
+    fontSize: 14,
+    fontWeight: '600',
   },
 
   // Modal
