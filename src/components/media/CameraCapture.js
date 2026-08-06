@@ -16,7 +16,7 @@ import {
   Platform,
   StatusBar,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -53,6 +53,8 @@ const formatDuration = (seconds) => {
 export const CameraCapture = ({
   onCapture,
   onClose,
+  onDone,
+  captureCount = 0,
   initialMode = CameraMode.PHOTO,
   allowModeSwitch = true,
   allowFlash = true,
@@ -61,6 +63,10 @@ export const CameraCapture = ({
   style,
 }) => {
   const [permission, requestPermission] = useCameraPermissions();
+  // Video records audio, which is a separate grant from the camera itself.
+  // Without it recordAsync fails on iOS rather than silently producing a
+  // silent clip.
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const [mode, setMode] = useState(initialMode);
   const [facing, setFacing] = useState('back');
   const [flash, setFlash] = useState(FlashMode.OFF);
@@ -70,6 +76,7 @@ export const CameraCapture = ({
 
   const cameraRef = useRef(null);
   const recordingTimerRef = useRef(null);
+  const recordedSecondsRef = useRef(0);
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const flashAnim = useRef(new Animated.Value(0)).current;
 
@@ -102,11 +109,12 @@ export const CameraCapture = ({
     if (isRecording) {
       recordingTimerRef.current = setInterval(() => {
         setRecordingDuration(prev => {
-          if (prev >= maxVideoDuration - 1) {
-            stopRecording();
-            return prev;
-          }
-          return prev + 1;
+          const next = prev >= maxVideoDuration - 1 ? prev : prev + 1;
+          // Mirrored into a ref because startRecording's closure captured
+          // recordingDuration as 0 and reported every clip as 0ms long.
+          recordedSecondsRef.current = next;
+          if (prev >= maxVideoDuration - 1) stopRecording();
+          return next;
         });
       }, 1000);
     } else {
@@ -224,7 +232,18 @@ export const CameraCapture = ({
   const startRecording = async () => {
     if (!cameraRef.current || isRecording) return;
 
+    // Video captures audio, which needs its own grant. Ask before rolling
+    // rather than letting recordAsync reject with an opaque error.
+    if (!micPermission?.granted) {
+      const result = await requestMicPermission();
+      if (!result?.granted) {
+        console.warn('[CameraCapture] Microphone denied; cannot record video');
+        return;
+      }
+    }
+
     try {
+      recordedSecondsRef.current = 0;
       setIsRecording(true);
 
       const video = await cameraRef.current.recordAsync({
@@ -232,13 +251,18 @@ export const CameraCapture = ({
         quality: videoQuality,
       });
 
-      console.log('[CameraCapture] Video recorded:', video.uri);
+      // recordAsync resolves only once recording stops, so read the ref rather
+      // than the stale `recordingDuration` this closure captured at start.
+      const seconds = recordedSecondsRef.current;
+      console.log('[CameraCapture] Video recorded:', video?.uri, seconds + 's');
 
-      onCapture?.({
-        uri: video.uri,
-        type: 'video',
-        duration: recordingDuration * 1000, // Convert to ms
-      });
+      if (video?.uri) {
+        onCapture?.({
+          uri: video.uri,
+          type: 'video',
+          duration: seconds * 1000, // ms
+        });
+      }
     } catch (error) {
       console.error('[CameraCapture] Video recording error:', error);
     } finally {
@@ -304,6 +328,9 @@ export const CameraCapture = ({
         style={styles.camera}
         facing={facing}
         flash={flash}
+        // Required: CameraView defaults to "picture", and recordAsync() fails
+        // outright on a picture-mode camera. This is why video never worked.
+        mode={mode === CameraMode.VIDEO ? 'video' : 'picture'}
         enableTorch={flash === FlashMode.ON}
       >
         {/* Flash overlay */}
@@ -326,6 +353,15 @@ export const CameraCapture = ({
           {allowFlash && mode === CameraMode.PHOTO && (
             <TouchableOpacity style={styles.topButton} onPress={cycleFlash}>
               <Ionicons name={getFlashIcon()} size={24} color="#FFF" />
+            </TouchableOpacity>
+          )}
+
+          {/* Done. The camera stays open after each shot so captures can be
+              taken back to back; this is how you leave once finished. */}
+          {onDone && captureCount > 0 && !isRecording && (
+            <TouchableOpacity style={styles.doneButton} onPress={onDone}>
+              <Text style={styles.doneCount}>{captureCount}</Text>
+              <Text style={styles.doneLabel}>Done</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -456,6 +492,28 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.3)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  doneButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    height: 44,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+
+  doneCount: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#000',
+  },
+
+  doneLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#000',
   },
 
   // Recording indicator

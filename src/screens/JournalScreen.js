@@ -35,6 +35,12 @@ import { JournalEntryDetail } from './JournalEntryDetail';
 import { ConnectionStatusIndicator } from '../components/common/ConnectionStatusIndicator';
 import { NotificationBadge } from '../components/common/NotificationBadge';
 import { SyncStatusBadge } from '../components/common/SyncStatusBadge';
+import {
+  toDateKey,
+  parseDateKey,
+  adjacentDateKey,
+  isSameDay as isSameCivilDay,
+} from '../utils/journalDate';
 import { 
   DateSwipeContainer,
   QuickCaptureBar,
@@ -260,14 +266,11 @@ export default function JournalScreen({ navigation }) {
   /**
    * Check if a timestamp is on the same day as the selected date
    */
-  const isSameDay = useCallback((timestamp, date) => {
-    const entryDate = new Date(timestamp);
-    return (
-      entryDate.getFullYear() === date.getFullYear() &&
-      entryDate.getMonth() === date.getMonth() &&
-      entryDate.getDate() === date.getDate()
-    );
-  }, []);
+  // Entry dates are floating civil dates, compared as YYYY-MM-DD keys so a
+  // stored date is never re-parsed as an instant. Re-parsing was what made
+  // entries land on the wrong day west of Greenwich, and would also slide them
+  // when the user crosses timezones. See src/utils/journalDate.js.
+  const isSameDay = useCallback((value, date) => isSameCivilDay(value, date), []);
 
   /**
    * All entries used for both display and calendar marking. Always the user's
@@ -291,12 +294,21 @@ export default function JournalScreen({ navigation }) {
   const markedDates = useMemo(() => {
     const dates = {};
     allEntries.forEach(entry => {
-      const date = new Date(entry.date || entry.createdAt);
-      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-      dates[dateStr] = { marked: true };
+      const key = toDateKey(entry.date || entry.createdAt);
+      if (key) dates[key] = { marked: true };
     });
     return dates;
   }, [allEntries]);
+
+  /**
+   * Sorted civil dates that have entries. Drives the left/right swipe, which
+   * moves to the next/previous day that actually has entries rather than to the
+   * adjacent calendar day.
+   */
+  const datesWithEntries = useMemo(
+    () => Object.keys(markedDates).sort(),
+    [markedDates],
+  );
 
   // On first load, if the currently selected date (defaults to today) has no
   // entries but the journal does, jump to the most recent entry's date so the
@@ -315,12 +327,15 @@ export default function JournalScreen({ navigation }) {
       return;
     }
 
-    const newest = entries.reduce((latest, e) => {
-      const t = new Date(e.date || e.createdAt).getTime();
-      return Number.isFinite(t) && t > latest ? t : latest;
-    }, 0);
-    if (newest > 0) {
-      setSelectedDate(new Date(newest));
+    // Compare as civil-date keys (lexicographic == chronological) and rebuild a
+    // local Date from the winner. Going via new Date(key).getTime() would pick
+    // UTC midnight and land the screen on the previous day west of Greenwich.
+    const newestKey = entries.reduce((latest, e) => {
+      const key = toDateKey(e.date || e.createdAt);
+      return key && key > latest ? key : latest;
+    }, '');
+    if (newestKey) {
+      setSelectedDate(parseDateKey(newestKey));
     }
     didInitialDateJump.current = true;
   }, [entries, selectedDate, isSameDay]);
@@ -357,15 +372,35 @@ export default function JournalScreen({ navigation }) {
   }, [clearNewEntries, refresh]);
 
   /**
-   * Navigate date
+   * Navigate to the next/previous date that actually has entries.
+   *
+   * Deliberately not +/- one calendar day: journals are sparse, and stepping
+   * through empty days one swipe at a time to cross a gap between trips is
+   * unusable. `direction` is 1 for later, -1 for earlier.
    */
   const navigateDate = useCallback((direction) => {
     setSelectedDate(prev => {
-      const newDate = new Date(prev);
-      newDate.setDate(newDate.getDate() + direction);
-      return newDate;
+      const target = adjacentDateKey(datesWithEntries, toDateKey(prev), direction);
+      // No populated date that way -- stay put. The swipe container also guards
+      // this, so reaching here means the two disagreed; preferring the current
+      // date keeps the screen stable rather than jumping somewhere arbitrary.
+      return target ? parseDateKey(target) : prev;
     });
-  }, []);
+  }, [datesWithEntries]);
+
+  /**
+   * Whether a populated date exists in each direction, so the swipe container
+   * can refuse the gesture at either end of the journal.
+   */
+  const selectedDateKey = useMemo(() => toDateKey(selectedDate), [selectedDate]);
+  const hasNextDate = useMemo(
+    () => adjacentDateKey(datesWithEntries, selectedDateKey, 1) !== null,
+    [datesWithEntries, selectedDateKey],
+  );
+  const hasPreviousDate = useMemo(
+    () => adjacentDateKey(datesWithEntries, selectedDateKey, -1) !== null,
+    [datesWithEntries, selectedDateKey],
+  );
 
   /**
    * Go to next date (for swipe gesture)
@@ -478,17 +513,27 @@ export default function JournalScreen({ navigation }) {
     console.log('[JournalScreen] Sending quick message:', text, 'visibility:', visibility);
     
     try {
-      await createEntry({
+      const created = await createEntry({
         userId: authUser?.id || 'local_user',
         contentBlocks: [{ type: 'text', content: text }],
         visibility: visibility,
         date: new Date(),
       });
+      revealEntry(created);
       console.log('[JournalScreen] Quick message saved');
     } catch (error) {
       console.error('[JournalScreen] Failed to save quick message:', error);
     }
-  }, [createEntry, authUser]);
+  }, [createEntry, authUser, revealEntry]);
+
+  /**
+   * Move the screen to the day a just-created entry belongs to, so a save is
+   * always visibly confirmed. No-op when already on that day.
+   */
+  const revealEntry = useCallback((created) => {
+    const key = toDateKey(created?.date || created?.createdAt);
+    if (key) setSelectedDate(parseDateKey(key));
+  }, []);
 
   const handleQuickCamera = useCallback(() => {
     setComposeMode('camera');
@@ -515,21 +560,25 @@ export default function JournalScreen({ navigation }) {
     console.log('[JournalScreen] Saving entry:', entryData);
     
     try {
-      await createEntry({
+      const created = await createEntry({
         userId: authUser?.id || 'local_user',
         contentBlocks: entryData.contentBlocks,
         visibility: entryData.visibility,
         location: entryData.location,
         date: entryData.date,
       });
-      
+
       setShowComposeModal(false);
+      // Land on the day the entry belongs to. Saving while looking at another
+      // date would otherwise drop the user back onto a screen that does not
+      // contain what they just captured.
+      revealEntry(created);
       console.log('[JournalScreen] Entry saved successfully');
     } catch (error) {
       console.error('[JournalScreen] Failed to save entry:', error);
       // Error will be shown via the useJournal hook's error state
     }
-  }, [createEntry, authUser]);
+  }, [createEntry, authUser, revealEntry]);
 
   /**
    * Handle delete entry
@@ -739,6 +788,8 @@ export default function JournalScreen({ navigation }) {
         enabled={swipeGesturesEnabled}
         onNextDate={goToNextDate}
         onPreviousDate={goToPreviousDate}
+        hasNext={hasNextDate}
+        hasPrevious={hasPreviousDate}
       >
         {isInitializing || loading ? (
           <View style={styles.loadingContainer}>

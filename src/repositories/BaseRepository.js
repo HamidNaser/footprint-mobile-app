@@ -10,6 +10,7 @@
  */
 
 import { DatabaseService } from '../services/DatabaseService';
+import { toDateKey, parseDateKey } from '../utils/journalDate';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { SyncStatus } from '../database/schema';
 import { v4 as uuidv4 } from 'uuid';
@@ -63,24 +64,31 @@ export class BaseRepository {
   }
 
   /**
-   * Format a Date object to ISO date string (YYYY-MM-DD)
-   * @param {Date} date - Date to format
+   * Format a Date to a floating civil-date string (YYYY-MM-DD).
+   *
+   * Uses *local* calendar parts. The previous toISOString() implementation
+   * stamped the UTC day, so west of Greenwich anything written before the UTC
+   * rollover landed on the wrong day and disappeared from the journal view.
+   * See src/utils/journalDate.js for why entry dates must not be instants.
+   *
+   * @param {Date|string|number} date - Date to format
    * @returns {string} Formatted date
    */
   formatDate(date) {
-    if (typeof date === 'string') return date;
-    
-    const d = date instanceof Date ? date : new Date(date);
-    return d.toISOString().split('T')[0];
+    return toDateKey(date) ?? toDateKey(new Date());
   }
 
   /**
-   * Parse a date string to Date object
+   * Parse a date string to a Date object.
+   *
+   * `YYYY-MM-DD` resolves to *local* midnight. `new Date('2026-08-05')` parses
+   * as UTC midnight per spec, which reads back as the 4th west of Greenwich.
+   *
    * @param {string} dateStr - Date string (YYYY-MM-DD or ISO)
    * @returns {Date} Date object
    */
   parseDate(dateStr) {
-    return new Date(dateStr);
+    return parseDateKey(dateStr);
   }
 
   /**

@@ -202,6 +202,10 @@ export const ContentBlockType = {
   PHOTOS: 'photos',
   AUDIO: 'audio',
   VIDEO: 'video',
+  // Stored on entries but not yet rendered by JournalEntryCard. Declared so
+  // ContentBlock.location() emits a real type -- it previously referenced a
+  // missing constant and produced `type: undefined`, which renders as nothing.
+  LOCATION: 'location',
 };
 
 /**
