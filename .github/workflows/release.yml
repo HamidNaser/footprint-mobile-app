@@ -1,0 +1,103 @@
+name: Release
+
+# The release button. Manual only -- shipping is a decision, not a side effect
+# of merging. Actions tab -> Release -> Run workflow.
+#
+# A `production` build is the SAME binary that eventually reaches the App Store:
+# it uploads to App Store Connect, lands in TestFlight, and is later promoted to
+# store review without rebuilding. See docs/RELEASING.md.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        default: 'ios'
+        type: choice
+        options:
+          - ios
+          - android
+          - all
+      profile:
+        description: 'production = TestFlight/App Store. preview = internal ad-hoc testing.'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - preview
+      submit:
+        description: 'Upload to App Store Connect / Play after a successful build'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+
+concurrency:
+  # Never let two releases race -- build numbers and store uploads are not
+  # safely concurrent. Queue rather than cancel: a running release may already
+  # have uploaded a binary.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    # Approval gate. Requires a GitHub Environment named "production" with
+    # required reviewers configured -- see docs/RELEASING.md for setup.
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Guard against submitting a preview build
+        if: ${{ inputs.submit && inputs.profile == 'preview' }}
+        run: |
+          echo "::error::The 'preview' profile is distribution:internal (ad-hoc) and cannot be submitted to a store. Re-run with profile=production, or with submit=false."
+          exit 1
+
+      - name: Build${{ inputs.submit && ' and submit' || '' }}
+        run: |
+          eas build \
+            --platform ${{ inputs.platform }} \
+            --profile ${{ inputs.profile }} \
+            --non-interactive \
+            ${{ inputs.submit && '--auto-submit' || '' }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Release run"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Platform | \`${{ inputs.platform }}\` |"
+            echo "| Profile | \`${{ inputs.profile }}\` |"
+            echo "| Submitted | \`${{ inputs.submit }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Triggered by | @${{ github.actor }} |"
+            echo ""
+            echo "Builds: https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds"
+            echo "TestFlight: https://appstoreconnect.apple.com/apps/6796826616/testflight/ios"
+          } >> $GITHUB_STEP_SUMMARY
