@@ -39,13 +39,20 @@ export const ContentBlock = {
    * @returns {object} Image content block
    */
   image({ localPath, serverUrl, width, height, caption }, order = 0) {
+    // Emits a `photos` block with a one-item `media` array: that is the shape
+    // JournalEntryCard renders. This previously used ContentBlockType.IMAGE --
+    // a constant that does not exist -- so every block it built had
+    // `type: undefined` and silently rendered as nothing.
     return {
       id: uuidv4(),
-      type: ContentBlockType.IMAGE,
-      localPath,
-      serverUrl: serverUrl || null,
-      width: width || null,
-      height: height || null,
+      type: ContentBlockType.PHOTOS,
+      media: [{
+        localId: uuidv4(),
+        localPath,
+        serverUrl: serverUrl || null,
+        width: width || null,
+        height: height || null,
+      }],
       caption: caption || null,
       order,
     };
@@ -58,13 +65,19 @@ export const ContentBlock = {
    * @returns {object} Video content block
    */
   video({ localPath, serverUrl, thumbnailPath, thumbnailServerUrl, duration, caption }, order = 0) {
+    // Media goes in a `media` array; JournalEntryCard reads block.media, not
+    // block.localPath, so a flat block rendered as an empty player.
     return {
       id: uuidv4(),
       type: ContentBlockType.VIDEO,
-      localPath,
-      serverUrl: serverUrl || null,
-      thumbnailPath: thumbnailPath || null,
-      thumbnailServerUrl: thumbnailServerUrl || null,
+      media: [{
+        localId: uuidv4(),
+        localPath,
+        serverUrl: serverUrl || null,
+        thumbnailPath: thumbnailPath || null,
+        thumbnailServerUrl: thumbnailServerUrl || null,
+        duration: duration || null,
+      }],
       duration: duration || null,
       caption: caption || null,
       order,
@@ -78,11 +91,16 @@ export const ContentBlock = {
    * @returns {object} Audio content block
    */
   audio({ localPath, serverUrl, duration, caption }, order = 0) {
+    // Same as video: the card reads block.media.
     return {
       id: uuidv4(),
       type: ContentBlockType.AUDIO,
-      localPath,
-      serverUrl: serverUrl || null,
+      media: [{
+        localId: uuidv4(),
+        localPath,
+        serverUrl: serverUrl || null,
+        duration: duration || null,
+      }],
       duration: duration || null,
       caption: caption || null,
       order,
@@ -98,7 +116,7 @@ export const ContentBlock = {
   location({ lat, lng, name, address }, order = 0) {
     return {
       id: uuidv4(),
-      type: ContentBlockType.LOCATION,
+      type: ContentBlockType.LOCATION, // now a real constant; was undefined
       lat,
       lng,
       name: name || null,
@@ -140,12 +158,15 @@ class JournalServiceClass {
     if (!journalId) throw new Error('journalId is required');
     if (!userId) throw new Error('userId is required');
 
+    // Copy captured media out of the OS cache before the entry references it.
+    const durableBlocks = await this._persistMediaBlocks(contentBlocks);
+
     // Create the entry
     const entry = await this.repository.createEntry({
       journalId,
       userId,
       date,
-      contentBlocks,
+      contentBlocks: durableBlocks,
       location,
       visibility,
     });
@@ -158,6 +179,67 @@ class JournalServiceClass {
     // arriving from external sources (e.g., SignalR sync from another device).
 
     return entry;
+  }
+
+  /**
+   * Copy any captured media referenced by content blocks into permanent
+   * storage, returning blocks whose `localPath`s are durable.
+   *
+   * Callers that build blocks themselves (the compose modal does) hand us raw
+   * camera / image-picker URIs. Those live in the OS cache, which is purged
+   * without warning, so an entry that stores one renders as a grey placeholder
+   * once the file is gone. Doing this here rather than in the modal means every
+   * caller of createEntry gets it, including future capture surfaces.
+   *
+   * Already-persisted paths are left alone, so this is safe to run twice.
+   *
+   * @param {Array<object>} contentBlocks
+   * @returns {Promise<Array<object>>} blocks with durable media paths
+   */
+  async _persistMediaBlocks(contentBlocks) {
+    if (!Array.isArray(contentBlocks)) return [];
+
+    const typeForBlock = {
+      [ContentBlockType.PHOTOS]: MediaType.IMAGE,
+      [ContentBlockType.VIDEO]: MediaType.VIDEO,
+      [ContentBlockType.AUDIO]: MediaType.AUDIO,
+    };
+
+    return Promise.all(
+      contentBlocks.map(async (block) => {
+        const mediaType = typeForBlock[block?.type];
+        if (!mediaType || !Array.isArray(block.media)) return block;
+
+        const media = await Promise.all(
+          block.media.map(async (item) => {
+            if (!item?.localPath) return item;
+            try {
+              const next = {
+                ...item,
+                localPath: await this.fileService.persist(item.localPath, mediaType),
+              };
+              if (item.thumbnailPath) {
+                next.thumbnailPath = await this.fileService.persist(
+                  item.thumbnailPath,
+                  MediaType.IMAGE,
+                );
+              }
+              return next;
+            } catch (error) {
+              // Keep the original URI rather than dropping the block. A cache
+              // path that may expire still beats losing the user's capture.
+              console.warn(
+                '[JournalService] Failed to persist media, keeping source URI:',
+                error?.message,
+              );
+              return item;
+            }
+          }),
+        );
+
+        return { ...block, media };
+      }),
+    );
   }
 
   /**

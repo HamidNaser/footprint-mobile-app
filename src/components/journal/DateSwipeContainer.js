@@ -1,10 +1,18 @@
 /**
  * DateSwipeContainer Component
- * 
+ *
  * Wraps content and provides swipe gesture support for date navigation:
- * - Swipe down: Go to next date
- * - Swipe up: Go to previous date
- * 
+ * - Swipe right: Go to the next date that has entries
+ * - Swipe left:  Go to the previous date that has entries
+ *
+ * Navigation is entry-to-entry, not day-by-day: empty days are skipped, so a
+ * journal with a three-week gap between trips takes one swipe to cross it. The
+ * caller decides which date that is (see JournalScreen's `datesWithEntries`);
+ * this component only reports the direction.
+ *
+ * `hasNext` / `hasPrevious` let the container refuse a swipe at either end
+ * rather than animating out to an unchanged screen.
+ *
  * Can be enabled/disabled via settings.
  */
 
@@ -19,35 +27,35 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Threshold for triggering date change (in pixels)
 const SWIPE_THRESHOLD = 80;
 
-// Visual indicator height
-const INDICATOR_HEIGHT = 60;
+// Visual indicator width
+const INDICATOR_WIDTH = 130;
 
 /**
  * Swipe indicator that shows during gesture
  */
-const SwipeIndicator = memo(({ direction, opacity, translateY }) => (
+const SwipeIndicator = memo(({ direction, opacity, translateX }) => (
   <Animated.View
     style={[
       styles.indicator,
-      direction === 'up' ? styles.indicatorTop : styles.indicatorBottom,
+      direction === 'left' ? styles.indicatorLeft : styles.indicatorRight,
       {
         opacity,
-        transform: [{ translateY }],
+        transform: [{ translateX }],
       },
     ]}
   >
-    <Ionicons 
-      name={direction === 'up' ? 'chevron-up' : 'chevron-down'} 
-      size={24} 
-      color="#4361ee" 
+    <Ionicons
+      name={direction === 'left' ? 'chevron-back' : 'chevron-forward'}
+      size={24}
+      color="#4361ee"
     />
     <Text style={styles.indicatorText}>
-      {direction === 'up' ? 'Previous Day' : 'Next Day'}
+      {direction === 'left' ? 'Previous' : 'Next'}
     </Text>
   </Animated.View>
 ));
@@ -59,20 +67,22 @@ const DateSwipeContainer = ({
   children,
   onNextDate,
   onPreviousDate,
+  hasNext = true,
+  hasPrevious = true,
   enabled = true,
   style,
 }) => {
   // Animation values
-  const translateY = useRef(new Animated.Value(0)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
   const indicatorOpacity = useRef(new Animated.Value(0)).current;
-  
+
   // State to track swipe direction
   const [swipeDirection, setSwipeDirection] = useState(null);
 
   // Reset animations
   const resetAnimations = useCallback(() => {
     Animated.parallel([
-      Animated.spring(translateY, {
+      Animated.spring(translateX, {
         toValue: 0,
         useNativeDriver: true,
         tension: 65,
@@ -86,120 +96,136 @@ const DateSwipeContainer = ({
     ]).start(() => {
       setSwipeDirection(null);
     });
-  }, [translateY, indicatorOpacity]);
+  }, [translateX, indicatorOpacity]);
 
-  // Trigger date change with animation
+  // Trigger date change with animation. `direction` is the direction the finger
+  // travelled: 'right' advances to the next date, 'left' goes back.
   const triggerDateChange = useCallback((direction) => {
-    // Animate off screen
-    Animated.timing(translateY, {
-      toValue: direction === 'up' ? -SCREEN_HEIGHT : SCREEN_HEIGHT,
+    // Content follows the finger off screen.
+    Animated.timing(translateX, {
+      toValue: direction === 'right' ? SCREEN_WIDTH : -SCREEN_WIDTH,
       duration: 200,
       useNativeDriver: true,
     }).start(() => {
-      // Call the date change callback
-      if (direction === 'up') {
-        onPreviousDate?.();
-      } else {
+      if (direction === 'right') {
         onNextDate?.();
+      } else {
+        onPreviousDate?.();
       }
-      
+
       // Reset position immediately (content has changed)
-      translateY.setValue(0);
+      translateX.setValue(0);
       indicatorOpacity.setValue(0);
       setSwipeDirection(null);
     });
-  }, [translateY, indicatorOpacity, onNextDate, onPreviousDate]);
+  }, [translateX, indicatorOpacity, onNextDate, onPreviousDate]);
 
-  // Pan responder for swipe gestures
-  const panResponder = useRef(
-    PanResponder.create({
+  // Whether a swipe in this direction has anywhere to go.
+  const canGo = useCallback(
+    (direction) => (direction === 'right' ? hasNext : hasPrevious),
+    [hasNext, hasPrevious],
+  );
+
+  // Pan responder for swipe gestures. Recreated when the guards change so the
+  // closure never tests a stale hasNext/hasPrevious.
+  const panResponder = useRef(null);
+  const guards = `${enabled}:${hasNext}:${hasPrevious}`;
+  const guardsRef = useRef(null);
+
+  if (guardsRef.current !== guards) {
+    guardsRef.current = guards;
+    panResponder.current = PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: (_, gestureState) => {
-        // Only respond to vertical swipes
-        return enabled && Math.abs(gestureState.dy) > 10 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
+        // Only respond to horizontal swipes, and only when the vertical intent
+        // is clearly smaller -- the journal list scrolls vertically underneath.
+        return (
+          enabled &&
+          Math.abs(gestureState.dx) > 10 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy)
+        );
       },
       onPanResponderGrant: () => {
         // Gesture started
       },
       onPanResponderMove: (_, gestureState) => {
-        const { dy } = gestureState;
-        
-        // Limit the drag amount with resistance
-        const limitedDy = dy > 0 
-          ? Math.min(dy * 0.5, SWIPE_THRESHOLD * 1.5) 
-          : Math.max(dy * 0.5, -SWIPE_THRESHOLD * 1.5);
-        
-        translateY.setValue(limitedDy);
-        
-        // Show indicator
-        const progress = Math.min(Math.abs(dy) / SWIPE_THRESHOLD, 1);
+        const { dx } = gestureState;
+        const direction = dx > 0 ? 'right' : 'left';
+
+        // Resist the drag, and resist harder when there is nowhere to go so the
+        // edge of the journal is felt rather than just discovered on release.
+        const resistance = canGo(direction) ? 0.5 : 0.15;
+        const limitedDx = dx > 0
+          ? Math.min(dx * resistance, SWIPE_THRESHOLD * 1.5)
+          : Math.max(dx * resistance, -SWIPE_THRESHOLD * 1.5);
+
+        translateX.setValue(limitedDx);
+
+        // Show indicator only when the swipe would actually move somewhere.
+        const progress = canGo(direction)
+          ? Math.min(Math.abs(dx) / SWIPE_THRESHOLD, 1)
+          : 0;
         indicatorOpacity.setValue(progress);
-        
-        // Update direction
-        if (dy > 10) {
-          setSwipeDirection('down');
-        } else if (dy < -10) {
-          setSwipeDirection('up');
+
+        if (Math.abs(dx) > 10) {
+          setSwipeDirection(direction);
         }
       },
       onPanResponderRelease: (_, gestureState) => {
-        const { dy, vy } = gestureState;
-        
-        // Check if swipe exceeded threshold or had enough velocity
-        if (Math.abs(dy) > SWIPE_THRESHOLD || Math.abs(vy) > 0.5) {
-          if (dy > 0 || vy > 0.5) {
-            // Swipe down - next date
-            triggerDateChange('down');
-          } else {
-            // Swipe up - previous date
-            triggerDateChange('up');
-          }
+        const { dx, vx } = gestureState;
+        const direction = dx > 0 ? 'right' : 'left';
+
+        const passedThreshold =
+          Math.abs(dx) > SWIPE_THRESHOLD || Math.abs(vx) > 0.5;
+
+        if (passedThreshold && canGo(direction)) {
+          triggerDateChange(direction);
         } else {
-          // Didn't meet threshold - reset
+          // Either too small a gesture, or no date in that direction.
           resetAnimations();
         }
       },
       onPanResponderTerminate: () => {
         resetAnimations();
       },
-    })
-  ).current;
+    });
+  }
 
-  // Indicator translate based on swipe
-  const indicatorTranslateY = translateY.interpolate({
+  // Indicator slides in from its edge as the gesture progresses.
+  const indicatorTranslateX = translateX.interpolate({
     inputRange: [-SWIPE_THRESHOLD, 0, SWIPE_THRESHOLD],
-    outputRange: [0, swipeDirection === 'up' ? -INDICATOR_HEIGHT : INDICATOR_HEIGHT, 0],
+    outputRange: [0, swipeDirection === 'left' ? INDICATOR_WIDTH : -INDICATOR_WIDTH, 0],
     extrapolate: 'clamp',
   });
 
   return (
     <View style={[styles.container, style]}>
-      {/* Swipe up indicator (previous day) */}
+      {/* Swipe left indicator (previous date) */}
       {enabled && (
         <SwipeIndicator
-          direction="up"
-          opacity={swipeDirection === 'up' ? indicatorOpacity : 0}
-          translateY={indicatorTranslateY}
+          direction="left"
+          opacity={swipeDirection === 'left' ? indicatorOpacity : 0}
+          translateX={indicatorTranslateX}
         />
       )}
 
       {/* Content */}
       <Animated.View
-        {...(enabled ? panResponder.panHandlers : {})}
+        {...(enabled ? panResponder.current.panHandlers : {})}
         style={[
           styles.content,
-          { transform: [{ translateY }] },
+          { transform: [{ translateX }] },
         ]}
       >
         {children}
       </Animated.View>
 
-      {/* Swipe down indicator (next day) */}
+      {/* Swipe right indicator (next date) */}
       {enabled && (
         <SwipeIndicator
-          direction="down"
-          opacity={swipeDirection === 'down' ? indicatorOpacity : 0}
-          translateY={indicatorTranslateY}
+          direction="right"
+          opacity={swipeDirection === 'right' ? indicatorOpacity : 0}
+          translateX={indicatorTranslateX}
         />
       )}
     </View>
@@ -218,9 +244,9 @@ const styles = StyleSheet.create({
 
   indicator: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    height: INDICATOR_HEIGHT,
+    top: 0,
+    bottom: 0,
+    width: INDICATOR_WIDTH,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
@@ -228,18 +254,18 @@ const styles = StyleSheet.create({
     zIndex: 100,
   },
 
-  indicatorTop: {
-    top: 0,
+  indicatorLeft: {
+    left: 0,
     backgroundColor: 'rgba(240, 244, 255, 0.95)',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5E5',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: '#E5E5E5',
   },
 
-  indicatorBottom: {
-    bottom: 0,
+  indicatorRight: {
+    right: 0,
     backgroundColor: 'rgba(240, 244, 255, 0.95)',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#E5E5E5',
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: '#E5E5E5',
   },
 
   indicatorText: {

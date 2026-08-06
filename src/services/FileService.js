@@ -216,6 +216,34 @@ class FileServiceClass {
   }
 
   /**
+   * Whether a URI already points inside the app's permanent media directory.
+   *
+   * Camera and image-picker URIs live in the OS cache, which is purged without
+   * warning -- storing one in an entry yields a broken image later. Callers use
+   * this to avoid re-copying a file that has already been persisted.
+   *
+   * @param {string} uri
+   * @returns {boolean}
+   */
+  isPersisted(uri) {
+    return typeof uri === 'string' && uri.startsWith(MEDIA_DIR);
+  }
+
+  /**
+   * Copy a captured file into permanent storage unless it is already there.
+   * Returns the durable URI to store on the entry.
+   *
+   * @param {string} uri - source URI (may be a cache path)
+   * @param {string} type - MediaType value
+   * @returns {Promise<string>} durable local URI
+   */
+  async persist(uri, type) {
+    if (!uri || this.isPersisted(uri)) return uri;
+    const saved = await this.saveFile(uri, type);
+    return saved.localPath;
+  }
+
+  /**
    * Save video from camera
    * @param {string} videoUri - Video URI from expo-camera
    * @returns {Promise<object>} { localPath, filename, size }
