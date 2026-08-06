@@ -90,6 +90,28 @@ upload for another 5–15 min, then it appears in
 Releases are **manual by design**. Merging to `main` runs CI only — it never
 builds and never ships.
 
+### Which build is which?
+
+`version` in `app.json` is set by hand and rarely changes, so every build looks
+like `1.0.0` in TestFlight. The **build number** is the only thing that tells
+them apart, and because `appVersionSource` is `remote` it lives on EAS's
+servers, not in the repo.
+
+The Release run reports it for you:
+
+- The **Actions list** shows profile, platform and branch in the run title.
+- The run's **Summary** opens with what is building — branch, commit and where
+  the build lands — written before the build starts, then closes with the
+  version and build number to look for in TestFlight.
+
+TestFlight itself does not show the git commit. To go from a TestFlight build
+back to source, open the [expo.dev builds
+list](https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds)
+— each build shows both its number and the commit it came from.
+
+Remember that `preview` builds are `distribution: internal`; they never reach
+TestFlight at all and are installed from the expo.dev link.
+
 ### Running it locally instead
 
 Equivalent, and useful when CI is unavailable:

@@ -1,5 +1,11 @@
 name: Release
 
+# Identifies the run in the Actions list without having to open it, e.g.
+# "production ios from main -> TestFlight" vs "preview ios from fix/x (no upload)".
+run-name: >-
+  ${{ inputs.profile }} ${{ inputs.platform }} from ${{ github.ref_name }}
+  ${{ inputs.profile == 'production' && inputs.submit && '-> TestFlight' || '(no upload)' }}
+
 # The release button. Manual only -- shipping is a decision, not a side effect
 # of merging. Actions tab -> Release -> Run workflow.
 #
@@ -55,6 +61,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Written before the build so the run page identifies itself immediately,
+      # rather than only once the 15-30 min build finishes.
+      - name: What is building
+        run: |
+          if [ "${{ inputs.profile }}" = "production" ]; then
+            if [ "${{ inputs.submit }}" = "true" ]; then
+              LANDS="**TestFlight.** Same binary that is later promoted to App Store review."
+            else
+              LANDS="EAS artifact only — built but not uploaded to App Store Connect."
+            fi
+          else
+            LANDS="**Ad-hoc internal install** via the expo.dev build link. Does *not* appear in TestFlight."
+          fi
+          {
+            echo "## Building"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`$(git rev-parse --short HEAD)\` — $(git log -1 --pretty=%s) |"
+            echo "| Platform | \`${{ inputs.platform }}\` |"
+            echo "| Profile | \`${{ inputs.profile }}\` |"
+            echo "| Where it lands | $LANDS |"
+            echo ""
+          } >> $GITHUB_STEP_SUMMARY
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -84,20 +116,50 @@ jobs:
             --non-interactive \
             ${{ inputs.submit && '--auto-submit' || '' }}
 
+      # The number that identifies this build in TestFlight. appVersionSource is
+      # "remote", so EAS owns the counter and app.json cannot tell us it.
+      # Reporting only -- never allowed to fail a release that already built.
+      - name: Read build number
+        id: buildnum
+        if: always()
+        continue-on-error: true
+        run: |
+          read_one() {
+            eas build:version:get --platform "$1" --non-interactive 2>/dev/null \
+              | grep -oE '[0-9]+' | tail -1
+          }
+          if [ "${{ inputs.platform }}" = "all" ]; then
+            LABEL="ios $(read_one ios) / android $(read_one android)"
+          else
+            LABEL="$(read_one ${{ inputs.platform }})"
+          fi
+          echo "label=${LABEL:-unknown}" >> $GITHUB_OUTPUT
+
       - name: Summary
         if: always()
         run: |
+          BUILD="${{ steps.buildnum.outputs.label }}"
+          VERSION="$(node -p "require('./app.json').expo.version" 2>/dev/null || echo '?')"
           {
-            echo "## Release run"
+            echo "## Result: ${{ job.status }}"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Platform | \`${{ inputs.platform }}\` |"
-            echo "| Profile | \`${{ inputs.profile }}\` |"
-            echo "| Submitted | \`${{ inputs.submit }}\` |"
+            if [ "${{ job.status }}" = "success" ] && [ "${{ inputs.profile }}" = "production" ]; then
+              echo "| Look for in TestFlight | **$VERSION (${BUILD:-unknown})** |"
+            else
+              echo "| Build number | \`${BUILD:-unknown}\` — nothing reached TestFlight |"
+            fi
+            echo "| Branch | \`${{ github.ref_name }}\` |"
             echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Submitted | \`${{ inputs.submit }}\` |"
             echo "| Triggered by | @${{ github.actor }} |"
             echo ""
-            echo "Builds: https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds"
-            echo "TestFlight: https://appstoreconnect.apple.com/apps/6796826616/testflight/ios"
+            if [ "${{ inputs.profile }}" = "preview" ]; then
+              echo "> This is an **ad-hoc** build. It will **not** appear in TestFlight —"
+              echo "> install it from the build link below."
+            fi
+            echo ""
+            echo "- Builds (build number ↔ commit): https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds"
+            echo "- TestFlight: https://appstoreconnect.apple.com/apps/6796826616/testflight/ios"
           } >> $GITHUB_STEP_SUMMARY
