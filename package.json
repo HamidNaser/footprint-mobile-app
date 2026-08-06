@@ -54,6 +54,7 @@
   },
   "private": true,
   "devDependencies": {
+    "better-sqlite3": "^13.0.3",
     "jest": "~29.7.0",
     "jest-expo": "~54.0.17"
   }
