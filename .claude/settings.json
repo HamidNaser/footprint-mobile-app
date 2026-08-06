@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(eas submit*)",
+      "Bash(eas build*)",
+      "Bash(eas credentials*)",
+      "Bash(gh workflow run*)",
+      "Bash(gh pr merge*)",
+      "Bash(gh release*)",
+      "Bash(npm publish*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "Bash(git push origin main*)",
+      "Bash(git push origin HEAD:main*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -*)",
+      "Bash(git push origin --delete*)",
+      "Read(./AuthKey_*.p8)",
+      "Read(./.env*)",
+      "Read(./google-service-account.json)"
+    ]
+  },
+  "askUserQuestionTimeout": "10m",
+  "autoCompactEnabled": true,
+  "fileCheckpointingEnabled": true
+}
