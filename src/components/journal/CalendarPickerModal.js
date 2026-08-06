@@ -1,193 +1,140 @@
 /**
  * CalendarPickerModal Component (Native Version)
- * 
- * Full calendar modal for selecting a date.
- * Uses react-native-calendars for the calendar UI.
- * Note: Web uses CalendarPickerModal.web.js instead.
+ *
+ * Full-screen date picker backed by the platform's own control:
+ *   - iOS     : UIDatePicker in `inline` mode. Shows a month grid; tapping the
+ *               "August 2026 v" header collapses it into month/year wheels, which
+ *               is the zoom-out behaviour of Apple's Calendar app.
+ *   - Android : the system Material date dialog, which manages its own window.
+ *   - Web     : CalendarPickerModal.web.js is used instead (see metro platform
+ *               resolution -- do NOT add web extensions to metro sourceExts).
+ *
+ * NOTE ON `markedDates`: this prop is still accepted so callers (JournalScreen,
+ * PersonJournalScreen) keep working unchanged, but it is intentionally IGNORED.
+ * UIDatePicker is a system component and exposes no API for decorating
+ * individual dates, so entry dots cannot be rendered here. This was a deliberate
+ * trade chosen over keeping the JS calendar.
  */
 
-import React, { memo, useMemo } from 'react';
+import React, { memo, useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   Modal,
   StyleSheet,
   TouchableOpacity,
-  TouchableWithoutFeedback,
-  Dimensions,
   Platform,
+  SafeAreaView,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { Calendar } from 'react-native-calendars';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-/**
- * Format date to YYYY-MM-DD string (required by react-native-calendars)
- */
-const formatDateString = (date) => {
-  const d = new Date(date);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+/** Coerce whatever the caller passed into a valid Date, falling back to today. */
+const toDate = (value) => {
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? new Date() : d;
 };
 
-/**
- * CalendarPickerModal component (Native version)
- */
 export const CalendarPickerModal = memo(({
   visible,
   selectedDate,
   onSelectDate,
   onClose,
-  markedDates = {}, // Dates with entries
+  // eslint-disable-next-line no-unused-vars
+  markedDates = {}, // accepted for API compatibility; see note above
   primaryColor = '#4361ee',
   minDate,
   maxDate,
 }) => {
-  const today = useMemo(() => formatDateString(new Date()), []);
-  const currentDateString = useMemo(() => formatDateString(selectedDate), [selectedDate]);
+  // Held locally so the inline picker can be scrubbed without committing, and
+  // Cancel can discard. Re-synced whenever the sheet is reopened.
+  const [draftDate, setDraftDate] = useState(() => toDate(selectedDate));
 
-  // Combine marked dates with selected date styling
-  const calendarMarkedDates = useMemo(() => {
-    const marks = { ...markedDates };
-    
-    // Add selected date styling
-    marks[currentDateString] = {
-      ...marks[currentDateString],
-      selected: true,
-      selectedColor: primaryColor,
-    };
-    
-    // Style today if different from selected
-    if (currentDateString !== today) {
-      marks[today] = {
-        ...marks[today],
-        today: true,
-        todayTextColor: primaryColor,
-      };
-    }
-    
-    return marks;
-  }, [markedDates, currentDateString, today, primaryColor]);
+  useEffect(() => {
+    if (visible) setDraftDate(toDate(selectedDate));
+  }, [visible, selectedDate]);
 
-  /**
-   * Handle day press
-   */
-  const handleDayPress = (day) => {
-    const newDate = new Date(day.dateString);
-    onSelectDate(newDate);
+  const commit = useCallback((date) => {
+    onSelectDate(date);
     onClose();
-  };
+  }, [onSelectDate, onClose]);
 
-  /**
-   * Go to today
-   */
-  const goToToday = () => {
-    onSelectDate(new Date());
-    onClose();
-  };
+  // ---------------------------------------------------------------------------
+  // Android: the picker IS a dialog. Rendering it inside our own <Modal> would
+  // nest two windows, so it is returned bare and dismisses itself.
+  // ---------------------------------------------------------------------------
+  if (Platform.OS === 'android') {
+    if (!visible) return null;
+    return (
+      <DateTimePicker
+        value={draftDate}
+        mode="date"
+        display="calendar"
+        minimumDate={minDate ? toDate(minDate) : undefined}
+        maximumDate={maxDate ? toDate(maxDate) : undefined}
+        onChange={(event, date) => {
+          if (event.type === 'set' && date) commit(date);
+          else onClose();
+        }}
+      />
+    );
+  }
 
+  // ---------------------------------------------------------------------------
+  // iOS: full-screen sheet wrapping the inline UIDatePicker.
+  // ---------------------------------------------------------------------------
   return (
     <Modal
       visible={visible}
-      animationType="fade"
-      transparent
+      animationType="slide"
+      presentationStyle="pageSheet"
       onRequestClose={onClose}
-      statusBarTranslucent
     >
-      <TouchableWithoutFeedback onPress={onClose}>
-        <View style={styles.overlay}>
-          <TouchableWithoutFeedback>
-            <View style={styles.modalContainer}>
-              {/* Header */}
-              <View style={styles.header}>
-                <Text style={styles.headerTitle}>Select Date</Text>
-                <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                  <Ionicons name="close" size={24} color="#666" />
-                </TouchableOpacity>
-              </View>
+      <SafeAreaView style={styles.sheet}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={onClose} hitSlop={12}>
+            <Text style={[styles.headerAction, { color: primaryColor }]}>Cancel</Text>
+          </TouchableOpacity>
 
-              {/* Calendar */}
-              <Calendar
-                current={currentDateString}
-                onDayPress={handleDayPress}
-                markedDates={calendarMarkedDates}
-                minDate={minDate ? formatDateString(minDate) : undefined}
-                maxDate={maxDate ? formatDateString(maxDate) : undefined}
-                enableSwipeMonths
-                theme={{
-                  backgroundColor: '#FFFFFF',
-                  calendarBackground: '#FFFFFF',
-                  textSectionTitleColor: '#666',
-                  selectedDayBackgroundColor: primaryColor,
-                  selectedDayTextColor: '#FFFFFF',
-                  todayTextColor: primaryColor,
-                  dayTextColor: '#333',
-                  textDisabledColor: '#d9e1e8',
-                  dotColor: primaryColor,
-                  selectedDotColor: '#FFFFFF',
-                  arrowColor: primaryColor,
-                  disabledArrowColor: '#d9e1e8',
-                  monthTextColor: '#333',
-                  indicatorColor: primaryColor,
-                  textDayFontWeight: '500',
-                  textMonthFontWeight: '600',
-                  textDayHeaderFontWeight: '500',
-                  textDayFontSize: 15,
-                  textMonthFontSize: 16,
-                  textDayHeaderFontSize: 13,
-                }}
-                style={styles.calendar}
-              />
+          <Text style={styles.headerTitle}>Select Date</Text>
 
-              {/* Footer with Today button */}
-              <View style={styles.footer}>
-                <TouchableOpacity
-                  style={[styles.todayButton, { backgroundColor: primaryColor }]}
-                  onPress={goToToday}
-                >
-                  <Ionicons name="today-outline" size={18} color="#FFF" />
-                  <Text style={styles.todayButtonText}>Today</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </TouchableWithoutFeedback>
+          <TouchableOpacity onPress={() => commit(draftDate)} hitSlop={12}>
+            <Text style={[styles.headerAction, styles.headerActionStrong, { color: primaryColor }]}>
+              Done
+            </Text>
+          </TouchableOpacity>
         </View>
-      </TouchableWithoutFeedback>
+
+        <View style={styles.pickerWrap}>
+          <DateTimePicker
+            value={draftDate}
+            mode="date"
+            display="inline"
+            accentColor={primaryColor}
+            themeVariant="light"
+            minimumDate={minDate ? toDate(minDate) : undefined}
+            maximumDate={maxDate ? toDate(maxDate) : undefined}
+            onChange={(_event, date) => { if (date) setDraftDate(date); }}
+            style={styles.picker}
+          />
+        </View>
+
+        <View style={styles.footer}>
+          <TouchableOpacity
+            style={[styles.todayButton, { backgroundColor: primaryColor }]}
+            onPress={() => commit(new Date())}
+          >
+            <Text style={styles.todayButtonText}>Today</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     </Modal>
   );
 });
 
 const styles = StyleSheet.create({
-  overlay: {
+  sheet: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-
-  modalContainer: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    width: Math.min(SCREEN_WIDTH - 40, 360),
-    maxWidth: 400,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.15,
-        shadowRadius: 12,
-      },
-      android: {
-        elevation: 8,
-      },
-      web: {
-        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.15)',
-      },
-    }),
   },
 
   header: {
@@ -195,24 +142,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5E5',
   },
 
   headerTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '600',
     color: '#333',
   },
 
-  closeButton: {
-    padding: 4,
-    borderRadius: 20,
+  headerAction: {
+    fontSize: 17,
   },
 
-  calendar: {
-    borderRadius: 8,
-    paddingBottom: 8,
+  headerActionStrong: {
+    fontWeight: '600',
+  },
+
+  // flex:1 is what lets the inline picker expand to fill the sheet rather than
+  // collapsing to its compact intrinsic height.
+  pickerWrap: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+
+  picker: {
+    flex: 1,
   },
 
   footer: {
@@ -226,18 +184,16 @@ const styles = StyleSheet.create({
   },
 
   todayButton: {
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    gap: 6,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 22,
   },
 
   todayButtonText: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '600',
   },
 });

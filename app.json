@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aqrava.footprint",
-      "buildNumber": "13",
+      "buildNumber": "14",
       "infoPlist": {
         "NSCameraUsageDescription": "FootPrint needs camera access to capture photos for your memories.",
         "NSPhotoLibraryUsageDescription": "FootPrint needs photo library access to save and share your memories.",
@@ -61,7 +61,8 @@
     "plugins": [
       "expo-sqlite",
       "expo-web-browser",
-      "expo-font"
+      "expo-font",
+      "@react-native-community/datetimepicker"
     ]
   }
 }
