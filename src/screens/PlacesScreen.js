@@ -11,7 +11,7 @@
  * - Memory request functionality
  */
 
-import React, { useState, memo, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, memo, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -25,10 +25,11 @@ import {
   FlatList,
   Alert,
   ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { PLACE_FILTERS, PEOPLE, getStoryPrompts } from '../data/placesData';
 import { getPlaces, getPlace } from '../api/PlacesApi';
@@ -366,40 +367,74 @@ export default function PlacesScreen() {
   // Live places from the Hub API (no mock fallback)
   const [places, setPlaces] = useState([]);
   const [isLoadingPlaces, setIsLoadingPlaces] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   // A failed request used to be swallowed into an empty list, so "the request
   // died" and "you have no places" looked identical on screen -- untriageable
   // without attaching a debugger. Keep the reason and show it.
   const [loadError, setLoadError] = useState(null);
-  const [reloadToken, setReloadToken] = useState(0);
+
+  const mountedRef = useRef(true);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        setIsLoadingPlaces(true);
-        setLoadError(null);
-        const data = await getPlaces();
-        if (mounted) setPlaces(data);
-      } catch (err) {
-        console.warn('[PlacesScreen] Failed to load places:', err?.status, err?.code, err?.message);
-        if (mounted) {
-          setPlaces([]);
-          setLoadError({
-            message: err?.message || 'Could not load places',
-            status: err?.status,
-            code: err?.code,
-          });
-        }
-      } finally {
-        if (mounted) setIsLoadingPlaces(false);
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [reloadToken]);
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
-  const retryLoadPlaces = useCallback(() => setReloadToken(t => t + 1), []);
+  /**
+   * Fetch the places list.
+   *
+   * @param {object} [opts]
+   * @param {boolean} [opts.showSpinner] - full-screen spinner (first load only);
+   *   refreshes keep the existing list on screen so it does not flash empty.
+   */
+  const loadPlaces = useCallback(async ({ showSpinner = false } = {}) => {
+    if (showSpinner) setIsLoadingPlaces(true);
+    try {
+      setLoadError(null);
+      const data = await getPlaces();
+      if (!mountedRef.current) return;
+      setPlaces(data);
+      hasLoadedRef.current = true;
+    } catch (err) {
+      console.warn('[PlacesScreen] Failed to load places:', err?.status, err?.code, err?.message);
+      if (!mountedRef.current) return;
+      // Keep whatever was already on screen: a failed refresh should not wipe a
+      // list the user was reading.
+      if (!hasLoadedRef.current) setPlaces([]);
+      setLoadError({
+        message: err?.message || 'Could not load places',
+        status: err?.status,
+        code: err?.code,
+      });
+    } finally {
+      if (mountedRef.current) {
+        setIsLoadingPlaces(false);
+        setIsRefreshing(false);
+      }
+    }
+  }, []);
+
+  // Refetch whenever the tab regains focus. In a tab navigator the screen stays
+  // mounted after its first visit, so a mount-only fetch froze the list for the
+  // life of the app process -- entries added elsewhere (or by family) never
+  // appeared until a full restart, while the web app picked them up on every
+  // page load. That divergence is what made mobile look like it was losing data.
+  useFocusEffect(
+    useCallback(() => {
+      loadPlaces({ showSpinner: !hasLoadedRef.current });
+    }, [loadPlaces]),
+  );
+
+  const retryLoadPlaces = useCallback(
+    () => loadPlaces({ showSpinner: true }),
+    [loadPlaces],
+  );
+
+  const handlePullToRefresh = useCallback(() => {
+    setIsRefreshing(true);
+    loadPlaces({ showSpinner: false });
+  }, [loadPlaces]);
 
   // Filter places based on active filter and search
   const filteredPlaces = useMemo(() => {
@@ -525,6 +560,14 @@ export default function PlacesScreen() {
         style={styles.placesList}
         contentContainerStyle={styles.placesListContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={handlePullToRefresh}
+            tintColor={PRIMARY_COLOR}
+            colors={[PRIMARY_COLOR]}
+          />
+        }
       >
         {isLoadingPlaces ? (
           <View style={styles.emptyState}>
