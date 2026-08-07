@@ -1,23 +1,22 @@
 /**
- * useEvents — loads events for a tab (my | invites | drafts).
+ * useEvents — loads events for a tab (my | invites | drafts) from the Hub API.
  *
- * Mirrors the web hook: when the user is authenticated it calls the Hub API,
- * otherwise (or on any API error) it falls back to the local mock data so the
- * screens always render. Returns { events, isLoading, error, source, refresh }.
+ * There is deliberately no mock fallback. Falling back to fabricated events on
+ * an API error meant a broken request and a real (if sparse) event list looked
+ * identical on screen, so failures were invisible and the demo data could be
+ * mistaken for the user's own. The screen now shows honest loading / empty /
+ * error states instead.
  *
- *   source === 'api'  -> live backend data
- *   source === 'mock' -> local fallback (unauthenticated or API failed)
+ * Returns { events, isLoading, error, refresh }.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { EventsApi } from '../api';
-import { getEventsForTab } from '../data/eventsData';
 
 export function useEvents(tab = 'my') {
   const [events, setEvents] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [source, setSource] = useState('mock');
   const [reloadKey, setReloadKey] = useState(0);
   const mountedRef = useRef(true);
 
@@ -35,11 +34,11 @@ export function useEvents(tab = 'my') {
       setIsLoading(true);
       setError(null);
 
-      // Unauthenticated → mock immediately (offline-friendly, like the web app).
+      // Not signed in: an empty list with a clear reason, not fabricated events.
       if (!EventsApi.isAuthenticated()) {
         if (!cancelled && mountedRef.current) {
-          setEvents(getEventsForTab(tab));
-          setSource('mock');
+          setEvents([]);
+          setError({ message: 'Sign in to see your events.', code: 'NOT_AUTHENTICATED' });
           setIsLoading(false);
         }
         return;
@@ -49,14 +48,16 @@ export function useEvents(tab = 'my') {
         const apiEvents = await EventsApi.getEvents(tab);
         if (!cancelled && mountedRef.current) {
           setEvents(apiEvents);
-          setSource('api');
         }
       } catch (err) {
-        console.warn('[useEvents] API failed, falling back to mock:', err?.message);
+        console.warn('[useEvents] failed to load events:', err?.status, err?.code, err?.message);
         if (!cancelled && mountedRef.current) {
-          setEvents(getEventsForTab(tab));
-          setSource('mock');
-          setError(err);
+          setEvents([]);
+          setError({
+            message: err?.message || 'Could not load events',
+            status: err?.status,
+            code: err?.code,
+          });
         }
       } finally {
         if (!cancelled && mountedRef.current) setIsLoading(false);
@@ -71,7 +72,7 @@ export function useEvents(tab = 'my') {
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
 
-  return { events, isLoading, error, source, refresh };
+  return { events, isLoading, error, refresh };
 }
 
 export default useEvents;

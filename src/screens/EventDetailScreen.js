@@ -28,7 +28,6 @@ import { GuestAvatarRow, RsvpBar, RsvpPill } from '../components/events';
 import { EventsApi } from '../api';
 import {
   getTemplate,
-  getEventById,
   getGuestCounts,
   getStatusMeta,
   formatEventDate,
@@ -101,12 +100,10 @@ export default function EventDetailScreen() {
           return;
         }
       }
-      // Unauthenticated or not found → mock fallback.
-      const mock = getEventById(eventId);
-      if (mock) setEvent(mock);
+      // Nothing to fall back to: the list passes the event in via route params,
+      // and inventing one here would show the user somebody else's demo data.
     } catch (err) {
-      console.warn('[EventDetail] load failed, using provided/mock:', err?.message);
-      if (!event) setEvent(getEventById(eventId));
+      console.warn('[EventDetail] load failed:', err?.status, err?.code, err?.message);
     } finally {
       setIsLoading(false);
     }

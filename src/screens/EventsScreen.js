@@ -33,19 +33,15 @@ const TAB_EMPTY = {
   drafts: { icon: 'document-outline', title: 'No drafts', hint: 'Saved-but-unsent events live here.' },
 };
 
-const Header = memo(({ onBack, source }) => (
+const Header = memo(({ onBack }) => (
   <View style={styles.header}>
     <TouchableOpacity style={styles.headerBtn} onPress={onBack}>
       <Ionicons name="arrow-back" size={24} color="#1e293b" />
     </TouchableOpacity>
     <Text style={styles.headerTitle}>Events</Text>
-    <View style={styles.headerBtn}>
-      {source === 'mock' && (
-        <View style={styles.demoBadge}>
-          <Text style={styles.demoText}>Demo</Text>
-        </View>
-      )}
-    </View>
+    {/* The "Demo" badge is gone: there is no demo mode any more, only live
+        data with honest empty and error states. */}
+    <View style={styles.headerBtn} />
   </View>
 ));
 Header.displayName = 'EventsHeader';
@@ -81,11 +77,33 @@ const EmptyState = memo(({ tab }) => {
 });
 EmptyState.displayName = 'EventsEmptyState';
 
+/**
+ * Shown when the request failed. Distinct from EmptyState on purpose: "you have
+ * no events" and "we could not ask" are different facts, and collapsing them
+ * into one blank screen is what hid the failure before.
+ */
+const ErrorState = memo(({ error, onRetry }) => {
+  const detail = [error?.status, error?.code].filter(Boolean).join(' · ');
+  return (
+    <View style={styles.empty}>
+      <Ionicons name="cloud-offline-outline" size={54} color="#fca5a5" />
+      <Text style={styles.emptyTitle}>Couldn't load events</Text>
+      <Text style={styles.emptyHint}>{error?.message || 'Something went wrong.'}</Text>
+      {!!detail && <Text style={styles.errorDetail}>{detail}</Text>}
+      <TouchableOpacity style={styles.retryBtn} onPress={onRetry}>
+        <Ionicons name="refresh" size={18} color="#fff" />
+        <Text style={styles.retryText}>Try again</Text>
+      </TouchableOpacity>
+    </View>
+  );
+});
+ErrorState.displayName = 'EventsErrorState';
+
 export default function EventsScreen() {
   const navigation = useNavigation();
   const [activeTab, setActiveTab] = useState('my');
   const [refreshing, setRefreshing] = useState(false);
-  const { events, isLoading, source, refresh } = useEvents(activeTab);
+  const { events, isLoading, error, refresh } = useEvents(activeTab);
 
   const handleSelect = useCallback(
     (event) => navigation.navigate('EventDetail', { eventId: event.id, event }),
@@ -111,7 +129,7 @@ export default function EventsScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <Header onBack={() => navigation.goBack()} source={source} />
+      <Header onBack={() => navigation.goBack()} />
       <SegmentedTabs active={activeTab} onChange={setActiveTab} />
 
       {isLoading && !refreshing ? (
@@ -124,7 +142,11 @@ export default function EventsScreen() {
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           contentContainerStyle={styles.list}
-          ListEmptyComponent={<EmptyState tab={activeTab} />}
+          ListEmptyComponent={
+            error
+              ? <ErrorState error={error} onRetry={refresh} />
+              : <EmptyState tab={activeTab} />
+          }
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={PRIMARY} />
           }
@@ -162,16 +184,25 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
   },
-  demoBadge: {
-    backgroundColor: '#fde68a',
-    borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+  errorDetail: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#94a3b8',
   },
-  demoText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#92400e',
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+    backgroundColor: '#4361ee',
+  },
+  retryText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   tabs: {
     flexDirection: 'row',
