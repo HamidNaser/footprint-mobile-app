@@ -126,7 +126,17 @@ export default function EventFormScreen() {
       }
       navigation.goBack();
     } catch (err) {
-      Alert.alert('Could not save', 'Please check your connection and try again.');
+      // Report what actually went wrong. This used to blame the connection
+      // unconditionally, so a 400 from a rejected field and a 401 from an
+      // expired session looked identical -- and neither was the connection.
+      console.warn('[EventForm] save failed:', err?.status, err?.code, err?.message);
+      const detail = [err?.status, err?.code].filter(Boolean).join(' · ');
+      Alert.alert(
+        'Could not save',
+        [err?.message || 'The event could not be saved.', detail && `(${detail})`]
+          .filter(Boolean)
+          .join('\n'),
+      );
     } finally {
       setSaving(false);
     }
