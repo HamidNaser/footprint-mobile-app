@@ -6,6 +6,7 @@
  */
 
 import { ApiClient } from './ApiClient';
+import { toDateKey } from '../utils/journalDate';
 import {
   API_CONFIG,
   JOURNAL_ENDPOINTS,
@@ -282,6 +283,12 @@ class JournalApiClass {
     return {
       localId: entry.local_id || entry.localId,
       journalId: entry.journal_id || entry.journalId,
+      // The calendar day the memory happened. This was missing, so the server saw
+      // no date and defaulted it to year 1 -- invisible on the device that wrote
+      // the entry, because the local row keeps its own date, and only wrong
+      // everywhere else. Sent as YYYY-MM-DD; see src/utils/journalDate.js for why
+      // it must not become an instant on the way.
+      date: toDateKey(entry.date || entry.created_at || entry.createdAt),
       title: entry.title,
       contentBlocks: this._parseContentBlocks(entry.content_blocks || entry.contentBlocks),
       visibility: entry.visibility,
