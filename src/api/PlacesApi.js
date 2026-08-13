@@ -207,6 +207,15 @@ export const checkIWasHere = async (placeId) => {
 // ============================================
 
 /**
+ * A Mongo ObjectId as the API renders it. Guards the boundary between seeded mock data and
+ * the live backend, which still coexist on the Places screens.
+ */
+const OBJECT_ID = /^[0-9a-f]{24}$/i;
+
+export const isEntryId = (value) =>
+  typeof value === 'string' && OBJECT_ID.test(value);
+
+/**
  * Start a new interview session
  * @param {Object} data
  * @param {string} data.intervieweeId
@@ -214,6 +223,10 @@ export const checkIWasHere = async (placeId) => {
  * @param {string} [data.intervieweeAvatar]
  * @param {string} [data.placeId]
  * @param {string} [data.placeName]
+ * @param {string} [data.targetEntryId] - the memory this interview is about. With it,
+ *   completing the interview appends the story to that entry instead of creating a second
+ *   one beside it: one afternoon, one memory. Without it the interview stands alone, which
+ *   is what "tell me about Swansea" in general should do.
  * @returns {Promise<InterviewSession>}
  */
 export const startInterview = async ({
@@ -222,6 +235,7 @@ export const startInterview = async ({
   intervieweeAvatar,
   placeId,
   placeName,
+  targetEntryId,
 } = {}) => {
   const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/interviews');
   return ApiClient.post(url, {
@@ -230,6 +244,10 @@ export const startInterview = async ({
     intervieweeAvatar,
     placeId,
     placeName,
+    // Only a real entry id is sent. Seeded places still supply ids like "m1", and the
+    // backend refuses to enrich an entry it cannot find -- which would silently drop the
+    // story rather than fall back to creating one.
+    targetEntryId: isEntryId(targetEntryId) ? targetEntryId : null,
   });
 };
 

@@ -267,6 +267,10 @@ const NavigationButtons = memo(({
  * Import TextInput
  */
 import { TextInput } from 'react-native';
+import { Audio } from 'expo-av';
+import * as ImagePicker from 'expo-image-picker';
+import MediaApi from '../api/MediaApi';
+import { createInterviewSession } from '../utils/interviewSession';
 
 /**
  * Main InterviewModeScreen component
@@ -285,6 +289,26 @@ const InterviewModeScreen = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [photos, setPhotos] = useState([]);
+  const [busy, setBusy] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+
+  // The live expo-av recording, held in a ref because it is a device handle rather than
+  // rendered state.
+  const recordingRef = useRef(null);
+
+  // The server side of this interview. Answers used to live in component state and be
+  // discarded on close; this is what makes them outlive the screen.
+  const sessionRef = useRef(null);
+  if (!sessionRef.current) {
+    sessionRef.current = createInterviewSession({
+      subject: person || memory?.author,
+      place,
+      // The memory being interviewed about. With it, finishing appends the story to that
+      // entry rather than creating a second one beside the photographs it describes.
+      targetEntryId: memory?.entryId || memory?.id,
+      onError: setSaveError,
+    });
+  }
 
   // Get questions for this interview
   const questions = INTERVIEW_QUESTIONS[questionCategory] || INTERVIEW_QUESTIONS.general;
@@ -302,36 +326,129 @@ const InterviewModeScreen = ({
     return () => clearInterval(interval);
   }, [isRecording]);
 
-  const handleStartRecording = () => {
-    setIsRecording(true);
-    setRecordingDuration(0);
-    // In a real app, start actual audio recording
+  const handleStartRecording = async () => {
+    setSaveError(null);
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) {
+        // Say what happened rather than appearing to record and capturing nothing, which
+        // is what this screen did before.
+        setSaveError('Microphone access was blocked. Allow it in Settings to record.');
+        return;
+      }
+
+      // Recording is silent on an iPhone with the ringer switch off unless this is set.
+      // The failure is invisible: the UI counts up and the file is empty.
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingDuration(0);
+    } catch (e) {
+      setSaveError(e?.message || 'Could not start recording.');
+    }
   };
 
-  const handleStopRecording = () => {
+  const handleStopRecording = async () => {
     setIsRecording(false);
-    // Save recording reference to answers
-    setAnswers(prev => ({
-      ...prev,
-      [currentQuestion.id]: {
-        type: 'audio',
-        duration: recordingDuration,
-        uri: 'mock-recording-uri',
-      },
-    }));
+
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    if (!recording) return;
+
+    let uri = null;
+    try {
+      await recording.stopAndUnloadAsync();
+      uri = recording.getURI();
+    } catch (e) {
+      setSaveError(e?.message || 'Could not save that recording.');
+      return;
+    }
+
+    // A button pressed and released captures nothing. An audio answer with no media
+    // renders as a player that plays silence, which reads as a lost recording.
+    if (!uri || recordingDuration <= 0) return;
+
+    setBusy('Saving the recording...');
+    try {
+      // Uploaded now rather than at the end: the answers are worth keeping even if the
+      // interview is abandoned, and a local file:// path means nothing to anyone else.
+      const uploaded = await MediaApi.uploadMedia({ localUri: uri, type: 'audio' });
+      const next = {
+        ...answers,
+        [currentQuestion.id]: {
+          type: 'audio',
+          url: uploaded.url,
+          duration: recordingDuration,
+        },
+      };
+      setAnswers(next);
+      await sessionRef.current.persist(questions, next, photos);
+    } catch (e) {
+      setSaveError(e?.message || 'Could not upload that recording.');
+    } finally {
+      setBusy(null);
+    }
   };
 
-  const handlePlayback = () => {
-    Alert.alert('Playback', 'Playing recording... (mock)');
+  const handlePlayback = async () => {
+    const answer = answers[currentQuestion?.id];
+    if (!answer?.url) return;
+
+    try {
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync({ uri: answer.url }, { shouldPlay: true });
+      // Freed once it finishes, rather than held open for the life of the screen.
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) sound.unloadAsync();
+      });
+    } catch (e) {
+      setSaveError(e?.message || 'Could not play that recording.');
+    }
   };
 
-  const handleAddPhoto = () => {
-    // In a real app, open image picker
-    Alert.alert('Add Photo', 'Photo picker would open here');
+  const handleAddPhoto = async () => {
+    setSaveError(null);
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        setSaveError('Photo access was blocked. Allow it in Settings to attach photos.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsMultipleSelection: true,
+        quality: 0.8,
+      });
+      if (result.canceled || !result.assets?.length) return;
+
+      setBusy(result.assets.length === 1 ? 'Uploading photo...' : 'Uploading photos...');
+      const uploaded = [];
+      for (const asset of result.assets) {
+        const media = await MediaApi.uploadMedia({ localUri: asset.uri, type: 'image' });
+        uploaded.push({ url: media.url, uri: media.url });
+      }
+
+      const nextPhotos = [...photos, ...uploaded];
+      setPhotos(nextPhotos);
+      await sessionRef.current.persist(questions, answers, nextPhotos);
+    } catch (e) {
+      setSaveError(e?.message || 'Could not add that photo.');
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleNext = () => {
     if (currentQuestionIndex < totalQuestions - 1) {
+      // Saved on the way past, not only at the end. An interview is a conversation and
+      // conversations get interrupted -- a phone call, a tired eighty-year-old, the app
+      // backgrounded. You cannot ask again next week and get the same words.
+      sessionRef.current.persist(questions, answers, photos);
       setCurrentQuestionIndex(prev => prev + 1);
       setRecordingDuration(0);
     }
@@ -347,23 +464,33 @@ const InterviewModeScreen = ({
     handleNext();
   };
 
-  const handleFinish = () => {
-    // Compile all answers
-    const interview = {
+
+  const handleFinish = async () => {
+    setBusy('Saving the interview...');
+    const outcome = await sessionRef.current.complete(questions, answers, photos);
+    setBusy(null);
+
+    // Stay on the screen when it could not be saved. The answers are still here and a
+    // retry costs one tap; closing would throw away a conversation that cannot be had
+    // twice. The error is already on screen via onError.
+    if (!outcome) return;
+
+    onComplete?.({
       person,
       place,
       memory,
       answers,
       photos,
+      interviewId: outcome.interviewId,
+      journalEntryId: outcome.journalEntryId,
       completedAt: new Date().toISOString(),
-    };
+    });
 
     Alert.alert(
       'Interview Complete!',
-      'Thank you for capturing this precious memory.',
-      [
-        { text: 'Save & Exit', onPress: () => onComplete?.(interview) },
-      ]
+      memory
+        ? 'Their story has been added to this memory.'
+        : 'Thank you for capturing this precious memory.'
     );
   };
 
@@ -412,6 +539,14 @@ const InterviewModeScreen = ({
 
         {/* Photo attachment */}
         <PhotoAttachment photos={photos} onAddPhoto={handleAddPhoto} />
+
+        {/* What the screen is doing, and what went wrong. Uploads and saves used to be
+            entirely silent, so a failed recording looked identical to a saved one. */}
+        {(busy || saveError) && (
+          <Text style={saveError ? styles.interviewError : styles.interviewBusy}>
+            {saveError || busy}
+          </Text>
+        )}
       </ScrollView>
 
       {/* Navigation */}
@@ -429,6 +564,19 @@ const InterviewModeScreen = ({
 };
 
 const styles = StyleSheet.create({
+  interviewBusy: {
+    textAlign: 'center',
+    color: TEXT_MUTED,
+    fontSize: 13,
+    marginTop: 12,
+  },
+  interviewError: {
+    textAlign: 'center',
+    color: '#EF4444',
+    fontSize: 13,
+    marginTop: 12,
+    paddingHorizontal: 24,
+  },
   container: {
     flex: 1,
     backgroundColor: BACKGROUND_COLOR,
