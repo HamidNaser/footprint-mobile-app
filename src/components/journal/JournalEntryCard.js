@@ -21,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import { AudioPlayer } from '../media/AudioPlayer';
 import { EngagementSection } from './EngagementSection';
+import { thumbnailSource } from '../../utils/mediaSource';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
@@ -86,6 +87,11 @@ const TextBlock = memo(({ content, isFirst }) => {
  * Photo block - displays photos in a grid
  * Uses native img on web (RN Image has issues), RN Image on native
  */
+/**
+ * A grid tile is a postage stamp. Loading the full-size original into one costs 76 KB
+ * where the Hub will serve a 7 KB rendition -- and the person opening the photograph
+ * properly still gets the original, because the viewer picks its own source.
+ */
 const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   if (!photos || photos.length === 0) return null;
 
@@ -126,7 +132,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
 
   const renderSinglePhoto = () => (
     <PhotoImage 
-      uri={photos[0].localPath || photos[0].serverUrl}
+      uri={thumbnailSource(photos[0])}
       style={{ height: PHOTO_HEIGHT }}
       onPress={() => onPhotoPress?.(photos, 0)}
     />
@@ -140,7 +146,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
           style={{ flex: 1, marginLeft: index > 0 ? GRID_GAP : 0 }}
         >
           <PhotoImage
-            uri={photo.localPath || photo.serverUrl}
+            uri={thumbnailSource(photo)}
             style={{ height: PHOTO_HEIGHT }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
@@ -153,7 +159,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
     <View style={styles.photoRow}>
       <View style={{ flex: 2 }}>
         <PhotoImage
-          uri={photos[0].localPath || photos[0].serverUrl}
+          uri={thumbnailSource(photos[0])}
           style={{ height: PHOTO_HEIGHT }}
           onPress={() => onPhotoPress?.(photos, 0)}
         />
@@ -165,7 +171,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
             style={{ marginTop: index > 0 ? GRID_GAP : 0, flex: 1 }}
           >
             <PhotoImage
-              uri={photo.localPath || photo.serverUrl}
+              uri={thumbnailSource(photo)}
               style={{ height: (PHOTO_HEIGHT - GRID_GAP) / 2 }}
               onPress={() => onPhotoPress?.(photos, index + 1)}
             />
@@ -183,7 +189,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
           style={styles.gridPhotoContainer}
         >
           <PhotoImage
-            uri={photo.localPath || photo.serverUrl}
+            uri={thumbnailSource(photo)}
             style={{ height: '100%' }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
