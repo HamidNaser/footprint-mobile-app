@@ -33,6 +33,7 @@ import { VideoThumbnail } from '../media/VideoThumbnail';
 import { LocationPicker, LocationDisplay } from '../map/LocationPicker';
 import LocationService from '../../services/LocationService';
 import { buildContentBlocks } from '../../utils/journalBlocks';
+import { withLocation } from '../../services/CaptureLocation';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -396,10 +397,14 @@ export const JournalComposeModal = ({
         const newMedia = Array.isArray(result) ? result : [result];
         // Stamped like camera captures so gallery picks sort into the same
         // capture timeline rather than always landing first.
-        setAttachedMedia(prev => [
-          ...prev,
-          ...newMedia.map(m => ({ ...m, capturedAt: nextSeq() })),
-        ]);
+        // A gallery photograph's own EXIF beats the device's position: an imported or
+        // older picture may have been taken years and continents from where the phone
+        // is standing now. withLocation only falls back when EXIF has nothing.
+        const stamped = await Promise.all(newMedia.map(m => withLocation(
+          { ...m, capturedAt: nextSeq() },
+          LocationService.extractLocationFromExif(m?.exif),
+        )));
+        setAttachedMedia(prev => [...prev, ...stamped]);
       }
     } catch (error) {
       console.error('[JournalCompose] Pick media error:', error);
@@ -416,29 +421,43 @@ export const JournalComposeModal = ({
   /**
    * Handle camera capture
    */
-  const handleCameraCapture = (media) => {
+  const handleCameraCapture = async (media) => {
     // Stay in the camera. Closing after every shot was the friction: capturing
     // three things meant three round trips out to the compose form. The Done
     // button in the camera header is how you leave.
-    setAttachedMedia(prev => [...prev, { ...media, capturedAt: nextSeq() }]);
+    //
+    // Stamped with where the phone is, per Decision 10. A photograph taken now is
+    // the one case where the device position is exactly right.
+    const stamped = await withLocation(
+      { ...media, capturedAt: nextSeq() },
+      LocationService.extractLocationFromExif(media?.exif),
+    );
+    setAttachedMedia(prev => [...prev, stamped]);
   };
 
   /**
    * Add a typed note as its own block, in sequence with the other captures.
    */
-  const handleAddTextNote = useCallback((note) => {
+  const handleAddTextNote = useCallback(async (note) => {
     const content = (note || '').trim();
     if (!content) return;
-    setTextNotes(prev => [...prev, { content, capturedAt: nextSeq() }]);
+    // Notes carried no position of their own before this, so a thought written in Paris
+    // was recorded as having happened nowhere.
+    const stamped = await withLocation({ content, capturedAt: nextSeq() });
+    setTextNotes(prev => [...prev, stamped]);
   }, [nextSeq]);
 
   /**
    * Handle audio recording complete
    */
-  const handleAudioComplete = (recording) => {
+  const handleAudioComplete = async (recording) => {
     // Append rather than replace: recording a second voice note used to
     // silently discard the first.
-    setAudioRecordings(prev => [...prev, { ...recording, capturedAt: nextSeq() }]);
+    //
+    // Stamped where it was recorded. Somebody who recorded their grandmother in Paris
+    // had, as far as the timeline was concerned, been nowhere.
+    const stamped = await withLocation({ ...recording, capturedAt: nextSeq() });
+    setAudioRecordings(prev => [...prev, stamped]);
     setShowAudioRecorder(false);
   };
 

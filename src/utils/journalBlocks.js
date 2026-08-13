@@ -28,7 +28,9 @@ export function buildContentBlocks({
   audioRecordings = [],
   textNotes = [],
   blockLocation,
-  mediaLocation = () => blockLocation,
+  // Consults the item first: an audio note or text note stamped at capture carries its own
+  // position, and the entry-level location is only a fallback.
+  mediaLocation = (m) => m?.location || blockLocation,
 }) {
   const blocks = [];
 
@@ -90,19 +92,25 @@ export function buildContentBlocks({
         duration: item.duration,
       });
     } else if (kind === 'audio') {
+      // The recording's own position when it has one, per Decision 10. It used to inherit
+      // the entry's single picked location, which for most entries is nothing -- so a
+      // grandmother recorded in Paris was filed as having happened nowhere.
+      const recordedAt = mediaLocation(item);
       blocks.push({
         type: 'audio',
-        location: blockLocation,
+        location: recordedAt,
         media: [{
           localId: item.localId || `audio-${item.capturedAt ?? 0}-${item.uri}`,
           localPath: item.uri,
-          location: blockLocation,
+          location: recordedAt,
         }],
         duration: item.duration,
         waveform: item.waveform,
       });
     } else if (kind === 'text') {
-      blocks.push({ type: 'text', content: item.content, location: blockLocation });
+      // Same for a typed note: where the thought was written, not where the entry was
+      // tagged afterwards.
+      blocks.push({ type: 'text', content: item.content, location: mediaLocation(item) });
     }
 
     i += 1;
