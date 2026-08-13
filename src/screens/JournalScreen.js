@@ -64,6 +64,7 @@ import { SettingsService } from '../services/SettingsService';
 import { ReactionsApi, CommentsApi } from '../api';
 // Sync (adopt reconciled server journal id once the first pull completes)
 import { SyncEngine, SyncEvent } from '../sync/SyncEngine';
+import { entriesNeedingStory } from '../utils/entryNarrative';
 
 // Mock data (dev only)
 
@@ -279,13 +280,24 @@ export default function JournalScreen({ navigation }) {
    */
   const allEntries = entries;
 
+  // "Show me what I have never written about." A photograph without context decays into an
+  // unidentifiable image, and this is how somebody finds theirs while they can still ask.
+  const [noStoryOnly, setNoStoryOnly] = useState(false);
+
+  const noStoryEntries = useMemo(() => entriesNeedingStory(allEntries), [allEntries]);
+
   const displayEntries = useMemo(() => {
+    // The worklist ignores the selected day on purpose. Somebody asking what they have
+    // never written about wants every such memory, not the ones that happen to share a
+    // date with whatever the calendar was left on -- which would usually be none.
+    if (noStoryOnly) return noStoryEntries;
+
     // Filter entries to only show those from the selected date. Use the entry's
     // journal `date` (when the memory happened) rather than `createdAt` (when the
     // row was written/synced) so entries land on the correct calendar day. Fall
     // back to createdAt for legacy/mock entries that have no explicit date.
     return allEntries.filter(entry => isSameDay(entry.date || entry.createdAt, selectedDate));
-  }, [allEntries, selectedDate, isSameDay]);
+  }, [allEntries, selectedDate, isSameDay, noStoryOnly, noStoryEntries]);
 
   /**
    * Dates that have journal entries - for calendar marking
@@ -732,6 +744,26 @@ export default function JournalScreen({ navigation }) {
       <View style={styles.topHeader}>
         <View style={styles.topHeaderLeft}>
           <SyncStatusIndicator pendingCount={pendingCount} isOnline={isOnline} />
+          {/* Only offered when there is something to find. A filter that always returns
+              nothing reads as broken rather than as good news. */}
+          {noStoryEntries.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setNoStoryOnly(on => !on)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: noStoryOnly }}
+              accessibilityLabel={`No story yet, ${noStoryEntries.length} memories`}
+              style={[styles.noStoryChip, noStoryOnly && styles.noStoryChipActive]}
+            >
+              <Ionicons
+                name="mic-outline"
+                size={13}
+                color={noStoryOnly ? '#FFF' : PRIMARY_COLOR}
+              />
+              <Text style={[styles.noStoryChipText, noStoryOnly && styles.noStoryChipTextActive]}>
+                No story yet · {noStoryEntries.length}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
         <View style={styles.topHeaderRight}>
           <TouchableOpacity style={styles.headerIcon}>
@@ -874,6 +906,29 @@ export default function JournalScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  noStoryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginLeft: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: PRIMARY_COLOR,
+    backgroundColor: '#FFF',
+  },
+  noStoryChipActive: {
+    backgroundColor: PRIMARY_COLOR,
+  },
+  noStoryChipText: {
+    color: PRIMARY_COLOR,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  noStoryChipTextActive: {
+    color: '#FFF',
+  },
   container: {
     flex: 1,
     backgroundColor: '#F0F4FF',
