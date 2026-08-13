@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getQuestionsForMemory } from '../../data/placesData';
+import { buildStoryPrompts } from '../../utils/storyPrompts';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -75,7 +76,11 @@ const MemoryCard = memo(({
   onAnswerQuestion,  // Handler for answering questions on YOUR memory
   variant = 'default', // 'default' | 'compact' | 'grid'
 }) => {
-  const { author, media, caption, date, isCurrentUser, hasStory, storyPrompt } = memory;
+  const { author, media, caption, date, isCurrentUser, hasStory, storyPrompt, needsStory } = memory;
+
+  // A seeded memory keeps its hand-written prompt; a live one is worded from the same rule
+  // the place's list uses, so the two never disagree about the same photographs.
+  const [{ prompt: livePrompt } = {}] = buildStoryPrompts([memory], memory.year);
   const relationshipColor = RELATIONSHIP_COLORS[author.relationship] || RELATIONSHIP_COLORS.friend;
   
   // Get primary image
@@ -194,7 +199,9 @@ const MemoryCard = memo(({
       )}
 
       {/* Story Prompt - if this memory has an untold story */}
-      {hasStory && storyPrompt && (
+      {/* Live now. `hasStory` was a hand-typed boolean on a few seeded records, so this
+          prompt could never appear on a real memory. */}
+      {(needsStory || hasStory) && (livePrompt || storyPrompt) && (
         <TouchableOpacity 
           style={styles.storyPromptContainer}
           onPress={() => onStoryPromptPress?.(memory)}
@@ -203,7 +210,7 @@ const MemoryCard = memo(({
             <Ionicons name="mic" size={18} color={PRIMARY_COLOR} />
           </View>
           <View style={styles.storyPromptContent}>
-            <Text style={styles.storyPromptText}>{storyPrompt}</Text>
+            <Text style={styles.storyPromptText}>{livePrompt || storyPrompt}</Text>
             <Text style={styles.storyPromptHint}>Tap to record their story</Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={TEXT_MUTED} />

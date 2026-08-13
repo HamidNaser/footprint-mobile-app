@@ -31,9 +31,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
-import { PLACE_FILTERS, PEOPLE, getStoryPrompts } from '../data/placesData';
+import { PLACE_FILTERS, PEOPLE } from '../data/placesData';
 import { getPlaces, getPlace } from '../api/PlacesApi';
-import { YearMemoriesModal, IWasHereIndicator, ShareMemorySheet } from '../components/places';
+import { YearMemoriesModal, IWasHereIndicator, ShareMemorySheet, ThenNowComparison } from '../components/places';
+import MemoryDetailModal from '../components/places/MemoryDetailModal';
+import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 import PlaceMapPreview from '../components/map/PlaceMapPreview';
 
@@ -356,6 +358,10 @@ export default function PlacesScreen() {
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
   
+  // The memory being read, and the two-era comparison opened from it.
+  const [detailMemory, setDetailMemory] = useState(null);
+  const [showThenNow, setShowThenNow] = useState(false);
+
   // New state for YearMemoriesModal
   const [showYearMemories, setShowYearMemories] = useState(false);
   const [selectedYear, setSelectedYear] = useState(null);
@@ -496,10 +502,19 @@ export default function PlacesScreen() {
     setSelectedYear(null);
   }, []);
 
+  // Opening a memory used to be a console.log, which is why MemoryDetailModal -- and the
+  // three actions on it -- had never appeared on a screen despite being written.
   const handleMemoryPress = useCallback((memory) => {
-    // Could open full memory view
-    console.log('Memory pressed:', memory);
+    setDetailMemory(memory);
   }, []);
+
+  /** Every memory at this place, across all years — what Then & Now compares. */
+  const placeMemories = useMemo(() => {
+    const years = selectedPlace?.years || [];
+    return years.flatMap((y) => y.memories || []);
+  }, [selectedPlace]);
+
+  const thenNowPair = useMemo(() => pickThenNow(placeMemories), [placeMemories]);
 
   const handleAddMemory = useCallback((place, year) => {
     Alert.alert(
@@ -631,6 +646,33 @@ export default function PlacesScreen() {
         onAddMemory={handleAddMemory}
         onStartInterview={handleStartInterview}
       />
+
+      {/* Reading one memory, with the three actions on it. */}
+      {detailMemory && !showThenNow && (
+        <MemoryDetailModal
+          memory={detailMemory}
+          place={selectedPlace}
+          placeMemories={placeMemories}
+          onClose={() => setDetailMemory(null)}
+          onAsk={handleShareMemory}
+          onStartInterview={(memory) => {
+            setDetailMemory(null);
+            handleStartInterview(memory);
+          }}
+          onThenNow={() => setShowThenNow(true)}
+        />
+      )}
+
+      {/* Then & Now. The component has existed the whole time and was imported by
+          nothing, so this comparison had never once been rendered. */}
+      {showThenNow && thenNowPair && (
+        <ThenNowComparison
+          thenMemory={thenNowPair.then}
+          nowMemory={thenNowPair.now}
+          placeName={selectedPlace?.name}
+          onClose={() => setShowThenNow(false)}
+        />
+      )}
 
       {/* Share Memory Sheet */}
       <ShareMemorySheet

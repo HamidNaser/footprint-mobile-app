@@ -23,6 +23,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getQuestionsForMemory } from '../../data/placesData';
+import { pickThenNow } from '../../utils/thenNow';
+import { buildStoryPrompts } from '../../utils/storyPrompts';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -104,6 +106,8 @@ const MemoryDetailModal = ({
   onClose,
   onAsk,
   onStartInterview,
+  onThenNow,
+  placeMemories,
 }) => {
   if (!memory) return null;
 
@@ -112,6 +116,15 @@ const MemoryDetailModal = ({
     RELATIONSHIP_COLORS[author.relationship] || RELATIONSHIP_COLORS.friend;
   const questions = getQuestionsForMemory(memory.id) || [];
   const subtitle = [place?.name, memory.year].filter(Boolean).join(' · ');
+
+  // Only offer Then & Now when this place genuinely spans two eras. Without the check the
+  // button opens onto a comparison of a memory with itself.
+  const hasThenNow = !!pickThenNow(placeMemories || []);
+
+  // A seeded memory keeps its hand-written prompt; a live one is worded from the same rule
+  // the place's list uses, so the two never disagree about the same photographs.
+  const [{ prompt: livePrompt } = {}] = buildStoryPrompts([memory], memory.year);
+  const storyPrompt = (memory.hasStory && memory.storyPrompt) || livePrompt || null;
 
   return (
     <View style={styles.overlay}>
@@ -191,22 +204,38 @@ const MemoryDetailModal = ({
                   <Text style={styles.pillPrimaryText}>Ask about this</Text>
                 </TouchableOpacity>
               )}
-              {memory.hasStory && (
+              {/* Not gated on memory.hasStory. That flag only ever existed on a handful of
+                  seeded records, so on live memories it is always undefined and this button
+                  never rendered. Recording a story is its own action -- sitting someone
+                  down and asking what they remember -- and any memory can have one. */}
+              <TouchableOpacity
+                style={[styles.pill, styles.pillPrimary]}
+                onPress={() => onStartInterview?.(memory)}
+              >
+                <Ionicons name="mic-outline" size={15} color="#FFF" />
+                <Text style={styles.pillPrimaryText}>Record a story</Text>
+              </TouchableOpacity>
+
+              {/* The third button. ThenNowComparison has existed in this codebase the
+                  whole time and was imported by nothing, so the feature had never once
+                  appeared on a screen. Shown only when the place genuinely has two eras to
+                  compare -- otherwise it opens onto an empty comparison. */}
+              {hasThenNow && (
                 <TouchableOpacity
-                  style={[styles.pill, styles.pillPrimary]}
-                  onPress={() => onStartInterview?.(memory)}
+                  style={[styles.pill, styles.pillSecondary]}
+                  onPress={() => onThenNow?.(memory)}
                 >
-                  <Ionicons name="mic-outline" size={15} color="#FFF" />
-                  <Text style={styles.pillPrimaryText}>Record a story</Text>
+                  <Ionicons name="swap-horizontal-outline" size={15} color={PRIMARY_COLOR} />
+                  <Text style={styles.pillSecondaryText}>Then &amp; Now</Text>
                 </TouchableOpacity>
               )}
             </View>
 
             {/* Story prompt */}
-            {memory.hasStory && !!memory.storyPrompt && (
+            {!!storyPrompt && (
               <View style={styles.storyPrompt}>
                 <Ionicons name="mic" size={18} color={PRIMARY_COLOR} />
-                <Text style={styles.storyPromptText}>{memory.storyPrompt}</Text>
+                <Text style={styles.storyPromptText}>{storyPrompt}</Text>
               </View>
             )}
 
@@ -397,6 +426,16 @@ const styles = StyleSheet.create({
   },
   pillPrimaryText: {
     color: '#FFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  pillSecondary: {
+    backgroundColor: '#FFF',
+    borderWidth: 1,
+    borderColor: PRIMARY_COLOR,
+  },
+  pillSecondaryText: {
+    color: PRIMARY_COLOR,
     fontSize: 13,
     fontWeight: '600',
   },
