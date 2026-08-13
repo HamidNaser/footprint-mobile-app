@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { getLifeline, getLifelineYear, mockLifeline } from '../api/LifelineApi';
 import { useAuth } from '../context/AuthContext';
+import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 
 const C = {
   bg: '#0a1424',
@@ -158,6 +159,13 @@ export default function TimelineScreen({ navigation }) {
   const years = overview.years || [];
   const lineage = overview.lineage || [];
 
+  // What made this year matter, beyond how many photographs were taken in it. Carried on
+  // the year row rather than the year detail, so it is available without a second request.
+  const milestones = useMemo(
+    () => years.find((y) => y.year === year)?.milestones || [],
+    [years, year],
+  );
+
   // Load the overview whenever the focused person changes.
   useEffect(() => {
     let active = true;
@@ -284,6 +292,24 @@ export default function TimelineScreen({ navigation }) {
           </Text>
           <Text style={styles.storyText}>{storyText}</Text>
 
+          {/* Stated plainly: these are projections of the person's own records -- a
+              marriage date, a job's start date, a child's birth year -- not guesses. */}
+          {milestones.length > 0 && (
+            <View style={styles.milestones}>
+              {milestones.map((m) => (
+                <View style={styles.milestone} key={`${m.type}-${m.date}-${m.title}`}>
+                  <Text style={styles.milestoneIcon}>{MILESTONE_ICONS[m.type] || '•'}</Text>
+                  <Text style={styles.milestoneTitle} numberOfLines={2}>{m.title}</Text>
+                  {/* Only when the date is known to the day. A year-precision event would
+                      otherwise read "1 January", a date nobody chose. */}
+                  {m.precision === 'day' && (
+                    <Text style={styles.milestoneWhen}>{formatMilestoneDate(m.date)}</Text>
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
+
           <AudioBar url={detail?.audioUrl} />
 
           {/* World + At-my-age folded in as compact chips */}
@@ -388,6 +414,31 @@ export default function TimelineScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
+  milestones: {
+    marginTop: 12,
+    gap: 8,
+  },
+  milestone: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  milestoneIcon: {
+    fontSize: 15,
+    // Fixed width so titles line up whether or not a glyph renders on the platform.
+    width: 22,
+    textAlign: 'center',
+  },
+  milestoneTitle: {
+    flex: 1,
+    color: '#E8EEF7',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  milestoneWhen: {
+    color: '#8AA0BC',
+    fontSize: 12,
+  },
   root: { flex: 1, backgroundColor: C.bg },
 
   header: { paddingTop: 54, paddingHorizontal: 18, paddingBottom: 8 },
