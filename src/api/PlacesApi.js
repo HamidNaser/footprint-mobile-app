@@ -93,6 +93,11 @@ const adaptMemory = (m, placeId, year) => {
     media: photos.map((uri) => ({ uri, type: 'photo' })),
     caption: m.text || '',
     isCurrentUser: !!m.isCurrentUser,
+    // Photographs nobody has explained -- no text, no voice. Derived on the backend from
+    // the entry's blocks rather than stored, so it cannot drift the way the old mock
+    // `hasStory` flag did. That flag is why "Record a story" never appeared on live data:
+    // it only ever existed on a handful of seeded records.
+    needsStory: !!m.needsStory,
   };
 };
 
@@ -113,7 +118,9 @@ const adaptPlaceDetail = (detail) => {
       people: Object.values(peopleMap),
       memoryCount: memories.length,
       memories,
-      hasUntoldStory: false,
+      // True when any memory this year has photographs nobody has explained. Was hardcoded
+      // false, so the year badge could never light up on real data.
+      hasUntoldStory: memories.some((mem) => mem.needsStory),
     };
   });
 
