@@ -9,9 +9,10 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getLifeline, getLifelineYear, mockLifeline } from '../api/LifelineApi';
+import { getTimelineCandidates, getLifeline, getLifelineYear, mockLifeline } from '../api/LifelineApi';
 import { useAuth } from '../context/AuthContext';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
+import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
 
 const C = {
   bg: '#0a1424',
@@ -161,6 +162,40 @@ export default function TimelineScreen({ navigation }) {
 
   // What made this year matter, beyond how many photographs were taken in it. Carried on
   // the year row rather than the year detail, so it is available without a second request.
+  // Suggestions, kept apart from the milestones. Those are facts projected from somebody's
+  // own records; these are guesses, and mixing them would lend a guess the authority of a
+  // marriage certificate.
+  const [candidates, setCandidates] = useState([]);
+
+  useEffect(() => {
+    let active = true;
+    getTimelineCandidates()
+      .then((found) => { if (active) setCandidates(found || []); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  const candidatesThisYear = useMemo(
+    () => candidates.filter((c) => Number(String(c.date).slice(0, 4)) === year),
+    [candidates, year],
+  );
+
+  /** Remove a dismissed card at once; a null key means it failed and the card stays. */
+  const handleDismissed = (key) => {
+    if (!key) return;
+    setCandidates((prev) => prev.filter((c) => c.candidateKey !== key));
+  };
+
+  /**
+   * Answering opens the interview against the memories behind the day, so the words land
+   * on the entries themselves rather than in a record beside them.
+   */
+  const handleAnswer = (candidate) => {
+    const entryId = candidate?.entryIds?.[0];
+    if (!entryId) return;
+    navigation.navigate('InterviewMode', { memory: { entryId, id: entryId } });
+  };
+
   const milestones = useMemo(
     () => years.find((y) => y.year === year)?.milestones || [],
     [years, year],
@@ -291,6 +326,16 @@ export default function TimelineScreen({ navigation }) {
             {detail?.isBirthYear ? 'The beginning' : `Age ${age}`}
           </Text>
           <Text style={styles.storyText}>{storyText}</Text>
+
+          {/* Suggestions, after the milestones so a guess never appears above a fact. */}
+          {candidatesThisYear.map((c) => (
+            <TimelineCandidateCard
+              key={c.candidateKey}
+              candidate={c}
+              onAnswer={handleAnswer}
+              onDismissed={handleDismissed}
+            />
+          ))}
 
           {/* Stated plainly: these are projections of the person's own records -- a
               marriage date, a job's start date, a child's birth year -- not guesses. */}

@@ -152,4 +152,48 @@ export const getLifelineYear = async (personId, year) => {
   }
 };
 
-export default { getLifeline, getLifelineYear, mockLifeline, mockLifelineYear };
+/**
+ * Days that might have mattered, offered as questions.
+ *
+ * Returns an empty list on any failure rather than falling back to mock data, unlike the
+ * overview above. Inventing a suggestion would mean asking somebody about an afternoon
+ * that never happened.
+ */
+export const getTimelineCandidates = async (limit = 20) => {
+  try {
+    const url = buildUrl(API_CONFIG.HUB_BASE_URL, `/lifeline/candidates?limit=${limit}`);
+    const data = await ApiClient.get(url);
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.warn('[LifelineApi] could not load candidates:', err.message);
+    return [];
+  }
+};
+
+/**
+ * Never show me this suggestion again.
+ *
+ * The one call here that must not fail quietly. A lost dismissal means showing the same
+ * memory again to somebody who has already asked once to stop seeing it, so this throws
+ * and lets the card put itself back.
+ */
+export const dismissCandidate = async (candidateKey, personId = null) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/lifeline/candidates/dismiss');
+  await ApiClient.post(url, { candidateKey, personId });
+};
+
+/** Undo a dismissal, for a mis-tap. */
+export const restoreCandidate = async (candidateKey) => {
+  const url = buildUrl(API_CONFIG.HUB_BASE_URL, '/lifeline/candidates/restore');
+  await ApiClient.post(url, { candidateKey });
+};
+
+export default {
+  getLifeline,
+  getLifelineYear,
+  getTimelineCandidates,
+  dismissCandidate,
+  restoreCandidate,
+  mockLifeline,
+  mockLifelineYear,
+};
