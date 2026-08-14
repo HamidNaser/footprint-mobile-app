@@ -142,4 +142,53 @@ describe('edge cases', () => {
     expect(kinds(blocks)).toEqual(['photos']);
     expect(blocks[0].media.map((m) => m.localPath)).toEqual(['legacy.jpg', 'p5.jpg']);
   });
+
+  describe('Decision 10 — everything keeps where it happened', () => {
+    const paris = { lat: 48.85, lng: 2.35 };
+    const home = { lat: 38.62, lng: -90.19, name: 'Home' };
+
+    it('keeps a recording position rather than the entry location', () => {
+      // The gap this closes. Audio inherited the entry's single picked location, which for
+      // most entries is nothing -- so a grandmother recorded in Paris was filed as having
+      // happened nowhere.
+      const blocks = buildContentBlocks({
+        audioRecordings: [{ uri: 'gran.m4a', capturedAt: 1, duration: 90, location: paris }],
+        blockLocation: home,
+      });
+
+      const audio = blocks.find((b) => b.type === 'audio');
+      expect(audio.location).toEqual(paris);
+      expect(audio.media[0].location).toEqual(paris);
+    });
+
+    it('keeps where a note was written', () => {
+      const blocks = buildContentBlocks({
+        textNotes: [{ content: 'It rained all week', capturedAt: 1, location: paris }],
+        blockLocation: home,
+      });
+
+      expect(blocks.find((b) => b.type === 'text').location).toEqual(paris);
+    });
+
+    it('still falls back to the entry location when a capture has none', () => {
+      // Most captures will have nothing for a long while yet, and they must keep behaving
+      // exactly as before.
+      const blocks = buildContentBlocks({
+        audioRecordings: [{ uri: 'a.m4a', capturedAt: 1 }],
+        textNotes: [{ content: 'A note', capturedAt: 2 }],
+        blockLocation: home,
+      });
+
+      expect(blocks.find((b) => b.type === 'audio').location).toEqual(home);
+      expect(blocks.find((b) => b.type === 'text').location).toEqual(home);
+    });
+
+    it('leaves everything unlocated when there is nothing to go on', () => {
+      const blocks = buildContentBlocks({
+        audioRecordings: [{ uri: 'a.m4a', capturedAt: 1 }],
+      });
+
+      expect(blocks.find((b) => b.type === 'audio').location).toBeUndefined();
+    });
+  });
 });
