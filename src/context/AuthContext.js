@@ -335,7 +335,20 @@ export function AuthProvider({ children }) {
   // ETag captured by fetchProfile for optimistic concurrency (If-Match).
   const updateProfile = async (updates) => {
     if (!accessToken) throw new Error('Not authenticated');
-    const etag = user?._etag || '"1"';
+
+    // The server requires If-Match and rejects a mismatch with 409. This used to claim
+    // version 1 when it had no etag -- which is right exactly once in a profile's life and
+    // wrong every time after, so anyone who had ever saved could not save again. Fetch the
+    // real one instead; a round trip is cheap next to a save that cannot succeed.
+    let current = user;
+    if (!current?._etag) {
+      current = await fetchProfile();
+    }
+
+    const etag = current?._etag;
+    if (!etag) {
+      throw new Error('Could not read the profile version. Pull to refresh and try again.');
+    }
     const response = await fetch(`${USERS_BASE_URL}/api/${API_VERSION}/users/me`, {
       method: 'PATCH',
       headers: {
@@ -353,7 +366,7 @@ export function AuthProvider({ children }) {
       throw new Error(data.message || `Failed to update profile (${response.status})`);
     }
     const newEtag = response.headers.get('ETag');
-    const mergedUser = { ...(user || {}), ...data, ...(newEtag ? { _etag: newEtag } : {}) };
+    const mergedUser = { ...(current || {}), ...data, ...(newEtag ? { _etag: newEtag } : {}) };
     setUser(mergedUser);
     await AsyncStorage.setItem(
       AUTH_STORAGE_KEY,
