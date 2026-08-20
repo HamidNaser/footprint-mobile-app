@@ -105,6 +105,43 @@ export function AuthProvider({ children }) {
     }
   };
 
+  /**
+   * Ask for a six-digit reset code by email.
+   *
+   * Neither of these touches stored auth: somebody resetting a password is, by definition,
+   * not signed in, and the reset revokes every refresh token anyway.
+   */
+  const requestPasswordReset = async (email) => {
+    const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || 'Could not send the code. Please try again.');
+    }
+    return data;
+  };
+
+  /**
+   * Exchange the code for a new password.
+   */
+  const resetPasswordWithCode = async (email, code, newPassword) => {
+    const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code, newPassword }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || 'That code was not accepted. It may have expired.');
+    }
+    return data;
+  };
+
   const login = async (email, password) => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/${API_VERSION}/auth/login`, {
@@ -394,6 +431,8 @@ export function AuthProvider({ children }) {
     isLoading,
     isAuthenticated,
     login,
+    requestPasswordReset,
+    resetPasswordWithCode,
     register,
     loginWithGoogle,
     loginWithApple,
