@@ -179,6 +179,8 @@ export const USER_ENDPOINTS = {
 export const SETTINGS_ENDPOINTS = {
   GET_LOCATION: '/settings/location',
   UPDATE_LOCATION: '/settings/location',
+  GET_SUGGESTIONS: '/settings/suggestions',
+  UPDATE_SUGGESTIONS: '/settings/suggestions',
 };
 
 /**

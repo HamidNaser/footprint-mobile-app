@@ -44,6 +44,30 @@ class SettingsApiClass {
     const url = buildUrl(this.baseUrl, SETTINGS_ENDPOINTS.UPDATE_LOCATION);
     return ApiClient.put(url, settings);
   }
+
+  /**
+   * Whether this person wants to be told about the days that might have mattered.
+   *
+   * Read from the server rather than kept on the device: the prompts are raised
+   * server-side, so a value stored here would hide the card and do nothing about the
+   * notification — and this phone and the browser would quietly disagree about what had
+   * been chosen.
+   *
+   * @returns {Promise<{ showSuggestions: boolean, notifyAboutSuggestions: boolean }>}
+   */
+  async getSuggestionSettings() {
+    const url = buildUrl(this.baseUrl, SETTINGS_ENDPOINTS.GET_SUGGESTIONS);
+    return ApiClient.get(url);
+  }
+
+  /**
+   * Record the choice, and return what was actually stored rather than what was asked for.
+   * @param {{ showSuggestions: boolean, notifyAboutSuggestions: boolean }} settings
+   */
+  async updateSuggestionSettings(settings) {
+    const url = buildUrl(this.baseUrl, SETTINGS_ENDPOINTS.UPDATE_SUGGESTIONS);
+    return ApiClient.put(url, settings);
+  }
 }
 
 export const SettingsApi = new SettingsApiClass();

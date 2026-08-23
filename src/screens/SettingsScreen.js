@@ -300,6 +300,10 @@ export default function SettingsScreen({ navigation }) {
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Location privacy (per-audience precision)
+  // On by default, and notifications off by default: seeing a suggestion when you go
+  // looking is a different matter from being interrupted by one.
+  const [showSuggestions, setShowSuggestions] = useState(true);
+  const [notifyAboutSuggestions, setNotifyAboutSuggestions] = useState(false);
   const [familyMeters, setFamilyMeters] = useState(100);
   const [friendsMeters, setFriendsMeters] = useState(5000);
   const [defaultLocationSharing, setDefaultLocationSharing] = useState('private');
@@ -349,7 +353,44 @@ export default function SettingsScreen({ navigation }) {
     } catch (error) {
       console.warn('[SettingsScreen] Could not load location settings:', error?.message);
     }
+
+    // Same again for the suggestion switches: held on the server so this phone and the
+    // browser cannot disagree, and loaded separately so a failure leaves the rest of the
+    // screen usable.
+    try {
+      const suggestions = await SettingsApi.getSuggestionSettings();
+      if (suggestions) {
+        setShowSuggestions(suggestions.showSuggestions ?? true);
+        setNotifyAboutSuggestions(suggestions.notifyAboutSuggestions ?? false);
+      }
+    } catch (error) {
+      console.warn('[SettingsScreen] Could not load suggestion settings:', error?.message);
+    }
   };
+
+  /**
+   * Record a change to the suggestion switches.
+   *
+   * Moved immediately and corrected from whatever the server stored: a switch that waits
+   * for a round trip before it moves feels broken, and this is the control somebody
+   * reaches for when a suggestion has already upset them.
+   */
+  const handleSuggestionChange = useCallback(async (next) => {
+    setShowSuggestions(next.showSuggestions);
+    setNotifyAboutSuggestions(next.notifyAboutSuggestions);
+    try {
+      const saved = await SettingsApi.updateSuggestionSettings(next);
+      if (saved) {
+        setShowSuggestions(saved.showSuggestions);
+        setNotifyAboutSuggestions(saved.notifyAboutSuggestions);
+      }
+    } catch (error) {
+      console.warn('[SettingsScreen] Could not save suggestion settings:', error?.message);
+      // Put the switch back rather than leave it showing a choice that was not stored.
+      setShowSuggestions((v) => (next.showSuggestions === v ? !v : v));
+      setNotifyAboutSuggestions((v) => (next.notifyAboutSuggestions === v ? !v : v));
+    }
+  }, []);
 
   /**
    * Persist a change to the per-audience location precision.
@@ -671,6 +712,37 @@ export default function SettingsScreen({ navigation }) {
             subtitle="How precisely friends see your locations"
             value={precisionLabel(friendsMeters)}
             onPress={() => setPrecisionAudience('friends')}
+          />
+        </View>
+
+        {/* Suggested memories */}
+        <SectionHeader title="SUGGESTED MEMORIES" icon="bulb" />
+        <View style={styles.section}>
+          <ToggleRow
+            icon="bulb-outline"
+            iconColor="#FF9500"
+            title="Show suggested memories"
+            subtitle="Days that might have mattered, on your timeline"
+            value={showSuggestions}
+            onValueChange={(value) =>
+              handleSuggestionChange({
+                showSuggestions: value,
+                notifyAboutSuggestions: notifyAboutSuggestions,
+              })
+            }
+          />
+          <ToggleRow
+            icon="notifications-outline"
+            iconColor="#FF9500"
+            title="Notify me about them"
+            subtitle="Off by default. We will not interrupt you unless you ask us to"
+            value={notifyAboutSuggestions}
+            onValueChange={(value) =>
+              handleSuggestionChange({
+                showSuggestions: showSuggestions,
+                notifyAboutSuggestions: value,
+              })
+            }
           />
         </View>
 
