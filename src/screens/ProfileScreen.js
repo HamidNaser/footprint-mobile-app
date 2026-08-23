@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import ProfileService from '../services/ProfileService';
+import { pickEditableProfileFields } from '../utils/profileFields';
 
 // ==================== SECTION COMPONENTS ====================
 
@@ -279,7 +280,10 @@ export default function ProfileScreen({ navigation }) {
   const handleSaveBasicInfo = async (data) => {
     setIsSaving(true);
     try {
-      await updateProfile(data);
+      // Only the fields the editor owns. It is opened with the whole user object, and
+      // sending that back posts `_etag`, `id`, `email` and the education, employment and
+      // address arrays along with the name -- fields the server does not accept.
+      await updateProfile(pickEditableProfileFields(data));
       closeEditModal();
       showAlert('Success', 'Profile updated successfully');
     } catch (err) {
