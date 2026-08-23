@@ -17,6 +17,7 @@ import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '../context/AuthContext';
 import { googleAuthConfig, isGoogleOAuthConfigured, GOOGLE_SCOPES } from '../config/oauth.config';
+import ForgotPasswordModal from '../components/auth/ForgotPasswordModal';
 
 // Complete auth session for web browser redirect
 WebBrowser.maybeCompleteAuthSession();
@@ -29,6 +30,7 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [forgotVisible, setForgotVisible] = useState(false);
   const [error, setError] = useState('');
 
   const { login, register, loginWithGoogle, loginWithApple, loginWithFacebook } = useAuth();
@@ -256,6 +258,18 @@ export default function LoginScreen() {
             )}
           </TouchableOpacity>
 
+          {/* Forgot password -- sign-in only. There was no way to reset a password on a
+              phone at all, though the endpoints have been declared in the config the
+              whole time. */}
+          {!isSignUp && (
+            <TouchableOpacity
+              style={styles.forgotContainer}
+              onPress={() => { setError(''); setForgotVisible(true); }}
+            >
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
+          )}
+
           {/* Toggle Sign Up / Log In */}
           <TouchableOpacity 
             style={styles.toggleContainer}
@@ -314,6 +328,20 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <ForgotPasswordModal
+        visible={forgotVisible}
+        initialEmail={email}
+        onClose={() => setForgotVisible(false)}
+        onDone={(resetEmail) => {
+          // Drop them back on the sign-in form with the email filled and the password
+          // cleared, which is exactly where they need to be next.
+          setEmail(resetEmail);
+          setPassword('');
+          setIsSignUp(false);
+          setError('Password set. Sign in with your new password.');
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -395,6 +423,8 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
   },
+  forgotContainer: { alignItems: 'center', marginTop: 14 },
+  forgotText: { color: '#4361EE', fontSize: 14 },
   toggleContainer: {
     marginTop: 20,
     alignItems: 'center',
