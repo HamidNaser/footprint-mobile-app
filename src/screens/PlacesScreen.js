@@ -34,6 +34,7 @@ import { useAuth } from '../context/AuthContext';
 import { PLACE_FILTERS, PEOPLE } from '../data/placesData';
 import { getPlaces, getPlace } from '../api/PlacesApi';
 import { YearMemoriesModal, IWasHereIndicator, ShareMemorySheet, ThenNowComparison } from '../components/places';
+import PlaceDetailsExplorer from '../components/places/PlaceDetailsExplorer';
 import MemoryDetailModal from '../components/places/MemoryDetailModal';
 import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
@@ -272,7 +273,26 @@ const ImageCarousel = memo(({ photos }) => {
 /**
  * Place detail modal
  */
-const PlaceDetailModal = memo(({ place, visible, onClose }) => {
+const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
+  // Before the early return: hooks cannot sit behind a conditional.
+  const [tab, setTab] = useState('timeline');
+  const [selectedPeopleIds, setSelectedPeopleIds] = useState([]);
+  const [groupBy, setGroupBy] = useState('year');
+
+  // Every memory at this place, which is what the Details tab reads. The years carry
+  // them; the counts alone cannot say who posted what.
+  const memories = useMemo(
+    () => (place?.years || []).flatMap((y) => y.memories || []),
+    [place]
+  );
+
+  // A new place is a fresh question. Carrying a previous selection over would silently
+  // filter somewhere the reader has just arrived.
+  useEffect(() => {
+    setSelectedPeopleIds([]);
+    setTab('timeline');
+  }, [place?.id]);
+
   if (!place) return null;
 
   const totalMemories = place.years.reduce((sum, y) => sum + y.memoryCount, 0);
@@ -326,19 +346,55 @@ const PlaceDetailModal = memo(({ place, visible, onClose }) => {
               />
             )}
 
-            {/* Years Timeline */}
-            <Text style={styles.sectionTitle}>Timeline</Text>
-            {place.years.map((yearData) => (
-              <View key={yearData.year} style={styles.timelineYear}>
-                <View style={styles.timelineYearHeader}>
-                  <Text style={styles.timelineYearLabel}>{yearData.year}</Text>
-                  <Text style={styles.timelineMemoryCount}>
-                    {yearData.memoryCount} memories
+            {/* Timeline | Details, as the web right page has. A place could only be
+                read by year here, which cannot answer "what did my father post at this
+                place" -- the question the Details tab exists for. */}
+            <View style={styles.tabBar}>
+              {[
+                { id: 'timeline', label: 'Timeline', icon: 'list-outline' },
+                { id: 'details', label: 'Details', icon: 'information-circle-outline' },
+              ].map((t) => (
+                <TouchableOpacity
+                  key={t.id}
+                  style={[styles.tab, tab === t.id && styles.tabActive]}
+                  onPress={() => setTab(t.id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: tab === t.id }}
+                >
+                  <Ionicons
+                    name={t.icon}
+                    size={16}
+                    color={tab === t.id ? PRIMARY_COLOR : TEXT_MUTED}
+                  />
+                  <Text style={[styles.tabText, tab === t.id && styles.tabTextActive]}>
+                    {t.label}
                   </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {tab === 'timeline' ? (
+              place.years.map((yearData) => (
+                <View key={yearData.year} style={styles.timelineYear}>
+                  <View style={styles.timelineYearHeader}>
+                    <Text style={styles.timelineYearLabel}>{yearData.year}</Text>
+                    <Text style={styles.timelineMemoryCount}>
+                      {yearData.memoryCount} memories
+                    </Text>
+                  </View>
+                  <AvatarGroup avatars={yearData.avatars} maxVisible={6} />
                 </View>
-                <AvatarGroup avatars={yearData.avatars} maxVisible={6} />
-              </View>
-            ))}
+              ))
+            ) : (
+              <PlaceDetailsExplorer
+                memories={memories}
+                selectedPeopleIds={selectedPeopleIds}
+                onSelectPeople={setSelectedPeopleIds}
+                groupBy={groupBy}
+                onGroupBy={setGroupBy}
+                onOpenMemory={onOpenMemory}
+              />
+            )}
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -634,6 +690,7 @@ export default function PlacesScreen() {
         place={selectedPlace}
         visible={showDetail}
         onClose={handleCloseDetail}
+        onOpenMemory={handleMemoryPress}
       />
 
       {/* Year Memories Modal */}
@@ -1068,6 +1125,28 @@ const styles = StyleSheet.create({
   },
 
   // Timeline
+  tabBar: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14,
+  },
+  tab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: BORDER_COLOR,
+    backgroundColor: SURFACE_COLOR,
+  },
+  tabActive: {
+    borderColor: PRIMARY_COLOR,
+    backgroundColor: '#eef2ff',
+  },
+  tabText: { fontSize: 13, fontWeight: '600', color: TEXT_MUTED },
+  tabTextActive: { color: PRIMARY_COLOR },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '600',
