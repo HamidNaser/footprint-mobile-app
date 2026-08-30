@@ -9,6 +9,7 @@
  */
 
 import React, { memo, useState, useCallback } from 'react';
+import Avatar from '../Avatar';
 import {
   View,
   Text,
@@ -48,8 +49,9 @@ const formatRelativeTime = (timestamp) => {
 const ResponseItem = memo(({ response, onReply }) => {
   return (
     <View style={styles.responseItem}>
-      <Image
-        source={{ uri: response.user?.avatarUrl || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=50&h=50&fit=crop&crop=face' }}
+      <Avatar
+        src={response.user?.avatarUrl}
+        name={response.user?.name}
         style={styles.responseAvatar}
       />
       <View style={styles.responseContent}>

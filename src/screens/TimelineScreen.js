@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTimelineCandidates, getLifeline, getLifelineYear, mockLifeline } from '../api/LifelineApi';
+import { getTimelineCandidates, getLifeline, getLifelineYear } from '../api/LifelineApi';
 import { useAuth } from '../context/AuthContext';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
@@ -152,13 +152,20 @@ export default function TimelineScreen({ navigation }) {
   const [personId, setPersonId] = useState(null); // null = current user
   const [year, setYear] = useState(null);
   const [windowStart, setWindowStart] = useState(0);
-  const [overview, setOverview] = useState(() => mockLifeline('you'));
+  // Null until the real one arrives. This used to be seeded with mockLifeline('you'),
+  // so an invented father called Omar and a grandfather called Ali were on screen from
+  // the first frame -- before any request had been made, and with nothing to say they
+  // were not the reader's own family.
+  const [overview, setOverview] = useState(null);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
+  // "We could not load it", as distinct from "there is nothing here". They look the same
+  // in the data and want opposite things on screen.
+  const [failed, setFailed] = useState(false);
 
-  const { person } = overview;
-  const years = overview.years || [];
-  const lineage = overview.lineage || [];
+  const person = overview?.person || null;
+  const years = overview?.years || [];
+  const lineage = overview?.lineage || [];
 
   // What made this year matter, beyond how many photographs were taken in it. Carried on
   // the year row rather than the year detail, so it is available without a second request.
@@ -205,11 +212,13 @@ export default function TimelineScreen({ navigation }) {
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setFailed(false);
     getLifeline(personId)
       .then((data) => {
         if (!active) return;
         setOverview(data);
-        const nextYears = data.years || [];
+        setFailed(data === null);
+        const nextYears = data?.years || [];
         setYear(nextYears.length ? nextYears[0].year : null);
         setWindowStart(0);
       })
@@ -263,6 +272,52 @@ export default function TimelineScreen({ navigation }) {
   }, [moments, detail, person]);
 
   const headerTitle = person?.isSelf ? `Your ${ordinal(age)} year` : person?.name || '';
+
+  // Nothing to draw. This state could not previously occur: an empty or unreachable
+  // timeline was replaced with an invented family, so the screen always had years,
+  // a lineage and a story to show -- none of them the reader's.
+  //
+  // Failed and empty are kept apart because they look identical here and want opposite
+  // things. Telling somebody their life has no years in it when the request simply
+  // failed is the worse of the two mistakes.
+  if (!loading && years.length === 0) {
+    return (
+      <View style={styles.root}>
+        <View style={styles.header}>
+          <View style={styles.headerTop}>
+            <View style={styles.headerRow}>
+              <Ionicons name="git-branch" size={20} color={C.accent} />
+              <Text style={styles.headerBrand}>Lifeline</Text>
+            </View>
+            <TouchableOpacity onPress={() => navigation?.navigate('Profile')}>
+              <Avatar
+                src={user?.avatarUrl}
+                name={user?.name || user?.firstName}
+                size={36}
+                style={styles.headerAvatar}
+              />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.emptyWrap}>
+          <Ionicons
+            name={failed ? 'cloud-offline-outline' : 'git-branch-outline'}
+            size={34}
+            color={C.textMuted}
+          />
+          <Text style={styles.emptyTitle}>
+            {failed ? 'Couldn’t load your timeline' : 'Your timeline is empty'}
+          </Text>
+          <Text style={styles.emptyHint}>
+            {failed
+              ? 'Check your connection and try again. Nothing has been lost.'
+              : 'Journal entries with a date appear here, year by year.'}
+          </Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.root}>
@@ -506,6 +561,9 @@ const styles = StyleSheet.create({
   laneChipTextActive: { color: '#fff', fontWeight: '700' },
 
   loading: { position: 'absolute', top: 60, right: 20, zIndex: 5 },
+  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 40, gap: 8 },
+  emptyTitle: { fontSize: 16, fontWeight: '600', color: C.text, marginTop: 6, textAlign: 'center' },
+  emptyHint: { fontSize: 13, lineHeight: 19, color: C.textMuted, textAlign: 'center' },
 
   // ZONE 1 — story
   storyZone: { flex: 1.05, paddingHorizontal: 18 },
