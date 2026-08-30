@@ -19,6 +19,7 @@ const KEYS = {
   LAST_SYNC_TIME: '@footprint/last_sync_time',
   JOURNAL_ID: '@footprint/default_journal_id',
   THEME: '@footprint/theme',
+  APP_THEME: '@footprint/app_theme',
   NOTIFICATIONS_ENABLED: '@footprint/notifications_enabled',
   AUTO_BACKUP: '@footprint/auto_backup',
   ONBOARDING_COMPLETE: '@footprint/onboarding_complete',
@@ -56,6 +57,19 @@ export const Theme = {
   LIGHT: 'light',
   DARK: 'dark',
   SYSTEM: 'system',
+};
+
+/**
+ * Visual theme (skin) options.
+ *
+ * Separate from `Theme` above, which is the light/dark appearance mode. A skin
+ * decides palette, typography, borders and iconography; see src/theme/themes/.
+ * Stored as a plain string so a removed theme degrades to the default rather
+ * than breaking startup.
+ */
+export const AppTheme = {
+  DEFAULT: 'default',
+  ENCHANTED_STORYBOOK: 'enchantedStorybook',
 };
 
 class SettingsServiceClass {
@@ -222,6 +236,23 @@ class SettingsServiceClass {
   // ============================================================
   // App Preferences
   // ============================================================
+
+  /**
+   * Get the selected visual theme (skin)
+   * @returns {Promise<string|null>} Theme key, or null if never set
+   */
+  async getAppTheme() {
+    return AsyncStorage.getItem(KEYS.APP_THEME);
+  }
+
+  /**
+   * Set the visual theme (skin)
+   * @param {string} themeKey - Key from src/theme/themes
+   */
+  async setAppTheme(themeKey) {
+    await AsyncStorage.setItem(KEYS.APP_THEME, themeKey);
+    this._notifyListeners('appTheme', themeKey);
+  }
 
   /**
    * Get the current theme
