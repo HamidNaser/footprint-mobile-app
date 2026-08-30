@@ -135,6 +135,31 @@ describe('getPlaces', () => {
     expect(await getPlaces({ search: 'fran' })).toHaveLength(1);
     expect(await getPlaces({ search: 'tokyo' })).toHaveLength(0);
   });
+
+  it('leaves the image null when nobody has photographed the place', async () => {
+    // This used to be an Unsplash travel shot, so an unphotographed place in Amman
+    // showed a stranger's picture of somewhere else beside a real family memory.
+    // PlacesScreen draws a monogram from the place's own name instead.
+    ApiClient.get.mockResolvedValue({
+      places: [{ id: 'p2', name: 'Amman', image: null, years: [] }],
+    });
+
+    const [place] = await getPlaces();
+
+    expect(place.image).toBeNull();
+  });
+
+  it('still uses the photograph when there is one', async () => {
+    // The other half: removing the invented photo must not lose the real one.
+    ApiClient.get.mockResolvedValue({
+      places: [{ id: 'p1', name: 'Paris', image: 'https://cdn/paris.jpg', years: [] }],
+    });
+
+    const [place] = await getPlaces();
+
+    expect(place.image).toBe('https://cdn/paris.jpg');
+  });
+
 });
 
 describe('getPlace', () => {

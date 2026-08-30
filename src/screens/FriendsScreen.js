@@ -21,7 +21,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { FRIENDS_LIST_DATA, FRIENDS_TREE_DATA } from '../data/friendsData';
+import { FRIENDS_TREE_DATA } from '../data/friendsData';
 import { useAuth } from '../context/AuthContext';
 import { getFriends } from '../services/SocialService';
 
@@ -130,11 +130,34 @@ const FriendListCard = memo(({ friend, isSelected, onPress }) => {
 /**
  * List View - Detailed friend cards
  */
-const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshing, onRefresh }) => {
+const ListView = memo(({ data, selectedFriend, onFriendPress, loading, failed, refreshing, onRefresh }) => {
   if (loading && (!data || data.length === 0)) {
     return (
       <View style={styles.centerFill}>
         <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+      </View>
+    );
+  }
+
+  // An empty list could not previously happen: it was replaced with a bundled set of
+  // invented friends. Failed and empty are kept apart because they read the same in the
+  // data and want opposite things -- one is an invitation, the other a retry.
+  if (!data || data.length === 0) {
+    return (
+      <View style={styles.centerFill}>
+        <Ionicons
+          name={failed ? 'cloud-offline-outline' : 'people-outline'}
+          size={34}
+          color="#9aa3ad"
+        />
+        <Text style={styles.emptyTitle}>
+          {failed ? 'Couldn’t load your friends' : 'No friends yet'}
+        </Text>
+        <Text style={styles.emptyHint}>
+          {failed
+            ? 'Check your connection and pull down to try again.'
+            : 'People you connect with will appear here.'}
+        </Text>
       </View>
     );
   }
@@ -333,24 +356,33 @@ export default function FriendsScreen({ navigation }) {
   const [activeView, setActiveView] = useState('list');
   const [selectedFriend, setSelectedFriend] = useState(null);
 
-  // Live friends (network-first). Falls back to bundled mock data when there's
-  // no token or the account has no friends yet.
+  // Live friends only. This used to fall back to FRIENDS_LIST_DATA in three separate
+  // cases -- no token, no friends yet, and a failed request -- so somebody who had added
+  // nobody, and anybody whose request failed, were both shown a list of invented people
+  // with real-sounding names, indistinguishable from friends they had actually added.
   const [friends, setFriends] = useState([]);
+  // "We could not load them", as distinct from "there are none". Identical in the data,
+  // opposite on screen.
+  const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadFriends = useCallback(async () => {
     if (!accessToken) {
-      setFriends(FRIENDS_LIST_DATA);
+      setFriends([]);
+      setFailed(false);
       setLoading(false);
       return;
     }
     try {
       const live = await getFriends(accessToken);
-      setFriends(live.length > 0 ? live : FRIENDS_LIST_DATA);
+      setFriends(live);
+      setFailed(false);
     } catch (err) {
       console.warn('[FriendsScreen] Failed to load friends:', err.message);
-      setFriends((prev) => (prev.length > 0 ? prev : FRIENDS_LIST_DATA));
+      // The previously loaded list is kept rather than blanked -- a refresh that fails
+      // should not empty a list that was correct a moment ago.
+      setFailed(true);
     } finally {
       setLoading(false);
     }
@@ -436,14 +468,20 @@ export default function FriendsScreen({ navigation }) {
           selectedFriend={selectedFriend}
           onFriendPress={handleFriendPress}
           loading={loading}
+          failed={failed}
           refreshing={refreshing}
           onRefresh={handleRefresh}
         />
       ) : (
-        <TreeView 
-          data={FRIENDS_TREE_DATA} 
+        // NOTE: still the bundled sample. Unlike the list above, this view has no live
+        // source at all -- it groups friends by school and workplace, and the backend has
+        // no concept of either. Emptying it would remove a whole tab with nothing to put
+        // back, and filling it is a feature rather than a clean-up, so it is left as it
+        // stands and called out in the PR.
+        <TreeView
+          data={FRIENDS_TREE_DATA}
           onOrgPress={handleOrgPress}
-          onFriendPress={handleFriendPress} 
+          onFriendPress={handleFriendPress}
         />
       )}
 
@@ -457,6 +495,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8f9fa',
+  },
+  emptyTitle: { marginTop: 10, fontSize: 16, fontWeight: '600', color: '#4a545e' },
+  emptyHint: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#8a939d',
+    textAlign: 'center',
+    paddingHorizontal: 40,
   },
 
   // Header
