@@ -21,6 +21,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import { routeForHeadTap } from './familyTapRouting';
 import { useFamilyTree } from '../hooks/useFamilyTree';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -310,6 +311,15 @@ export default function FamilyScreen({ navigation }) {
   // Handle tapping head card - opens family journal (group)
   const handleFamilyPress = useCallback((head) => {
     console.log('Selected family:', head.name);
+
+    // Tapping your own head card means "show me my whole immediate family," which is a
+    // different view from the group journal: sections per person rather than one merged
+    // stream, and scoped to spouse and children rather than whatever unit was tapped.
+    // Every other branch keeps today's exact behaviour.
+    if (routeForHeadTap(head, user?.id) === 'FamilySummary') {
+      navigation.navigate('FamilySummary');
+      return;
+    }
     
     // Collect all family members for this family unit. `id` is the linked user
     // account (falls back to the tree-node id) so PersonJournal can fetch their
@@ -332,7 +342,7 @@ export default function FamilyScreen({ navigation }) {
       isGroup: true,
       groupName: `${head.name.split(' ')[0]}'s Family`,
     });
-  }, [navigation]);
+  }, [navigation, user?.id]);
 
   // Handle tapping spouse/children - opens individual journal
   const handleMemberPress = useCallback((member) => {
