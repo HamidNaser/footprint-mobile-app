@@ -33,7 +33,7 @@ import { useAuth } from '../context/AuthContext';
 import { getFamilySummary } from '../services/SocialService';
 
 const RELATION_LABELS = {
-  self: 'You',
+  head: 'You',
   spouse: 'Spouse',
   child: 'Child',
 };
