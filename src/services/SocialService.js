@@ -204,3 +204,33 @@ export async function getUserEntries(accessToken, userId) {
   const items = data?.items || [];
   return items.map((item) => adaptEntry(item.entry || item));
 }
+
+/**
+ * The signed-in user's own entries together with their spouse's and children's, already
+ * grouped into one section per family member and ordered self -> spouse -> children.
+ *
+ * The server derives who counts as immediate family from the caller's own tree, so this
+ * can never be pointed at somebody else's family, and it enforces per-entry visibility
+ * exactly as `getUserEntries` does — this is a new arrangement of what the viewer could
+ * already see, never a new grant.
+ *
+ * `limit` applies per section rather than across the view, so a relative who journals
+ * rarely can't be squeezed out by one who journals constantly.
+ *
+ * @param {string} accessToken
+ * @param {object} [options]
+ * @param {number} [options.limit] - max entries per member section
+ * @returns {Promise<Array>} `{ memberId, relation, name, avatarUrl, entries }[]`
+ */
+export async function getFamilySummary(accessToken, { limit } = {}) {
+  const query = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+  const data = await authFetch(`/feed/family-summary${query}`, accessToken);
+
+  return (data?.sections || []).map((section) => ({
+    memberId: section.memberId,
+    relation: section.relation,
+    name: section.name,
+    avatarUrl: section.avatarUrl ?? null,
+    entries: (section.entries || []).map(adaptEntry),
+  }));
+}
