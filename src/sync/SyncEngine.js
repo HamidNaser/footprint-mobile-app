@@ -609,6 +609,59 @@ class SyncEngineClass {
     }
   }
 
+  /**
+   * Write an uploaded url onto the media item inside its entry, and re-queue the entry.
+   *
+   * Matched on file path rather than id: media saved before ids were assigned carries a
+   * synthesised one, and the path is the field that is always present and always unique
+   * within an entry.
+   */
+  async _applyUploadedMediaToEntry(media, uploadResult) {
+    const entryLocalId = media.entry_id;
+    if (!entryLocalId) return;
+
+    const entry = await DatabaseService.getEntryByLocalId(entryLocalId);
+    if (!entry) return;
+
+    let changed = false;
+
+    const contentBlocks = (entry.contentBlocks || []).map((block) => {
+      if (!Array.isArray(block?.media)) return block;
+
+      const items = block.media.map((item) => {
+        const localPath = item?.localPath || item?.uri;
+        if (localPath !== media.local_uri) return item;
+
+        changed = true;
+        return {
+          ...item,
+          id: uploadResult.mediaId || item.id,
+          serverUrl: uploadResult.url,
+          url: uploadResult.url,
+          thumbnailUrl: uploadResult.thumbnailUrl || item.thumbnailUrl,
+        };
+      });
+
+      return { ...block, media: items };
+    });
+
+    if (!changed) return;
+
+    // Marked pending again so the entry is pushed with the url it now carries. Without
+    // this the entry keeps whatever it was pushed with the first time.
+    await DatabaseService.updateEntry(entryLocalId, {
+      contentBlocks,
+      syncStatus: 'pending',
+    });
+
+    await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: entryLocalId,
+      serverId: entry.serverId || null,
+      data: { ...entry, contentBlocks },
+    });
+  }
+
   async _uploadPendingMedia() {
     const result = { uploaded: 0, failed: 0 };
 
@@ -616,7 +669,15 @@ class SyncEngineClass {
 
     // Get pending media from queue
     const mediaQueue = await DatabaseService.getMediaQueue();
-    const pending = mediaQueue.filter(m => m.status === 'pending');
+    // 'failed' included deliberately. A failed upload used to be terminal: the filter took
+    // only 'pending', so anything rejected once was never offered again -- and every upload
+    // was rejected while the request contract was wrong, leaving a queue of files that
+    // would never be retried no matter how many syncs ran.
+    //
+    // 'uploading' too: that status is written before the attempt, so an app closed
+    // mid-upload leaves items stranded in it forever.
+    const RETRYABLE = ['pending', 'failed', 'uploading'];
+    const pending = mediaQueue.filter(m => RETRYABLE.includes(m.status));
 
     if (pending.length === 0) {
       return result;
@@ -643,6 +704,12 @@ class SyncEngineClass {
           server_url: uploadResult.url,
           server_id: uploadResult.mediaId,
         });
+
+        // Put the url on the entry itself. Recording it only in the queue left the entry
+        // still pointing at a local file path, so it was pushed referencing something no
+        // other device can read -- the phone reported everything synced and the web app
+        // showed entries with no pictures in them.
+        await this._applyUploadedMediaToEntry(media, uploadResult);
 
         result.uploaded++;
         this._emit(SyncEvent.MEDIA_UPLOADED, {
