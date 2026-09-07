@@ -2,7 +2,7 @@
  * AudioPlayer Component
  * 
  * Plays audio with waveform visualization and seek controls.
- * Uses expo-av for audio playback.
+ * Uses expo-audio for playback. expo-av carried no native module from SDK 57 onward.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -15,7 +15,7 @@ import {
   PanResponder,
   Platform,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
 
 /**
@@ -96,35 +96,34 @@ export const AudioPlayer = ({
     try {
       setPlaybackState(PlaybackState.LOADING);
 
-      // Configure audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
+      // expo-audio renamed these: the iOS suffixes are gone because the options apply to
+      // both platforms now.
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        shouldPlayInBackground: false,
       });
 
-      // Unload existing sound
       if (soundRef.current) {
-        await soundRef.current.unloadAsync();
+        soundRef.current.remove();
+        soundRef.current = null;
       }
 
-      // Load new sound
-      const { sound, status } = await Audio.Sound.createAsync(
-        { uri },
-        { shouldPlay: autoPlay },
-        onPlaybackStatusUpdate
-      );
+      const player = createAudioPlayer({ uri });
+      soundRef.current = player;
 
-      soundRef.current = sound;
+      // The player reports its own status rather than taking a callback at creation.
+      player.addListener('playbackStatusUpdate', onPlaybackStatusUpdate);
 
-      if (status.isLoaded) {
-        setDuration(status.durationMillis || initialDuration || 0);
-        setPlaybackState(autoPlay ? PlaybackState.PLAYING : PlaybackState.READY);
-        
-        if (autoPlay) {
-          onPlaybackStart?.();
-        }
+      if (autoPlay) {
+        player.play();
+        setPlaybackState(PlaybackState.PLAYING);
+        onPlaybackStart?.();
+      } else {
+        setPlaybackState(PlaybackState.READY);
       }
+
+      if (initialDuration) setDuration(initialDuration);
     } catch (error) {
       console.error('[AudioPlayer] Load error:', error);
       setPlaybackState(PlaybackState.ERROR);
@@ -138,7 +137,7 @@ export const AudioPlayer = ({
   const unloadAudio = async () => {
     if (soundRef.current) {
       try {
-        await soundRef.current.unloadAsync();
+        soundRef.current.remove();
         soundRef.current = null;
       } catch (e) {
         // Ignore cleanup errors
@@ -150,45 +149,39 @@ export const AudioPlayer = ({
    * Handle playback status updates
    */
   const onPlaybackStatusUpdate = useCallback((status) => {
-    if (!status.isLoaded) {
-      if (status.error) {
-        console.error('[AudioPlayer] Playback error:', status.error);
-        setPlaybackState(PlaybackState.ERROR);
-        onError?.(new Error(status.error));
-      }
-      return;
-    }
+    if (!status.isLoaded) return;
 
-    setPosition(status.positionMillis || 0);
-    setDuration(status.durationMillis || duration);
+    // expo-audio reports seconds; everything below this line stays in milliseconds so the
+    // waveform, the progress bar and formatDuration are all unchanged.
+    setPosition((status.currentTime || 0) * 1000);
+    if (status.duration) setDuration(status.duration * 1000);
 
     if (status.didJustFinish) {
       setPlaybackState(PlaybackState.READY);
       setPosition(0);
       progressAnim.setValue(0);
       onPlaybackEnd?.();
-    } else if (status.isPlaying) {
+    } else if (status.playing) {
       setPlaybackState(PlaybackState.PLAYING);
-    } else if (status.isLoaded) {
+    } else {
       setPlaybackState(PlaybackState.PAUSED);
     }
-  }, [duration, onPlaybackEnd, onError]);
+  }, [onPlaybackEnd]);
 
   /**
    * Play audio
    */
   const play = async () => {
-    if (!soundRef.current) return;
+    const player = soundRef.current;
+    if (!player) return;
 
     try {
-      const status = await soundRef.current.getStatusAsync();
-      
-      // If at end, restart from beginning
-      if (status.isLoaded && status.positionMillis >= status.durationMillis - 100) {
-        await soundRef.current.setPositionAsync(0);
+      // If at the end, restart rather than sitting on silence. Seconds, not millis.
+      if (player.duration && player.currentTime >= player.duration - 0.1) {
+        await player.seekTo(0);
       }
-      
-      await soundRef.current.playAsync();
+
+      player.play();
       setPlaybackState(PlaybackState.PLAYING);
       onPlaybackStart?.();
     } catch (error) {
@@ -203,7 +196,7 @@ export const AudioPlayer = ({
     if (!soundRef.current) return;
 
     try {
-      await soundRef.current.pauseAsync();
+      soundRef.current.pause();
       setPlaybackState(PlaybackState.PAUSED);
     } catch (error) {
       console.error('[AudioPlayer] Pause error:', error);
@@ -228,7 +221,8 @@ export const AudioPlayer = ({
     if (!soundRef.current) return;
 
     try {
-      await soundRef.current.setPositionAsync(positionMillis);
+      // Callers speak milliseconds; expo-audio wants seconds.
+      await soundRef.current.seekTo(positionMillis / 1000);
       setPosition(positionMillis);
     } catch (error) {
       console.error('[AudioPlayer] Seek error:', error);

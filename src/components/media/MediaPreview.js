@@ -5,7 +5,7 @@
  * Supports images, videos, and audio with playback controls.
  */
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import {
   View,
   Image,
@@ -18,7 +18,8 @@ import {
   ActivityIndicator,
   ScrollView,
 } from 'react-native';
-import { Video, ResizeMode } from 'expo-av';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import { useEvent } from 'expo';
 import { Ionicons } from '@expo/vector-icons';
 import { AudioPlayer } from './AudioPlayer';
 
@@ -48,7 +49,6 @@ export const MediaPreview = ({
   primaryColor = '#007AFF',
   style,
 }) => {
-  const videoRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [duration, setDuration] = useState(0);
@@ -62,46 +62,59 @@ export const MediaPreview = ({
      PreviewMediaType.IMAGE);
 
   /**
-   * Clean up video on unmount
+   * The video player.
+   *
+   * expo-video owns playback state rather than reporting it through a status callback, and
+   * it releases itself, so the unmount cleanup expo-av needed is gone. Times are seconds
+   * here where expo-av used milliseconds; this component's duration/position state stays in
+   * milliseconds so formatDuration and the progress bar below are unchanged.
+   *
+   * The hook is called unconditionally with a conditional source, because the component
+   * renders images and audio too and a hook cannot be skipped for those.
    */
-  useEffect(() => {
-    return () => {
-      if (videoRef.current) {
-        videoRef.current.unloadAsync();
-      }
-    };
-  }, []);
+  const player = useVideoPlayer(
+    mediaType === PreviewMediaType.VIDEO && media?.uri ? { uri: media.uri } : null
+  );
 
-  /**
-   * Handle video status updates
-   */
-  const handleVideoStatusUpdate = useCallback((status) => {
-    setIsLoading(status.isBuffering);
-    setIsPlaying(status.isPlaying);
-    
-    if (status.durationMillis) {
-      setDuration(status.durationMillis);
-    }
-    if (status.positionMillis !== undefined) {
-      setPosition(status.positionMillis);
-    }
-    
-    if (status.didJustFinish) {
-      setIsPlaying(false);
-      videoRef.current?.setPositionAsync(0);
-    }
-  }, []);
+  const { isPlaying: playerIsPlaying } = useEvent(
+    player, 'playingChange', { isPlaying: player.playing }
+  );
+  const { status: playerStatus } = useEvent(
+    player, 'statusChange', { status: player.status }
+  );
+
+  useEffect(() => {
+    setIsPlaying(playerIsPlaying);
+  }, [playerIsPlaying]);
+
+  useEffect(() => {
+    setIsLoading(playerStatus === 'loading');
+  }, [playerStatus]);
+
+  useEffect(() => {
+    if (mediaType !== PreviewMediaType.VIDEO) return undefined;
+
+    // Seconds -> milliseconds, so the rest of this component is untouched.
+    const tick = setInterval(() => {
+      setPosition((player.currentTime || 0) * 1000);
+      if (player.duration) setDuration(player.duration * 1000);
+    }, 250);
+
+    return () => clearInterval(tick);
+  }, [player, mediaType]);
 
   /**
    * Toggle video playback
    */
-  const togglePlayback = async () => {
-    if (!videoRef.current) return;
-
-    if (isPlaying) {
-      await videoRef.current.pauseAsync();
+  const togglePlayback = () => {
+    if (player.playing) {
+      player.pause();
     } else {
-      await videoRef.current.playAsync();
+      // Replaying from the end restarts rather than sitting on the last frame.
+      if (player.duration && player.currentTime >= player.duration - 0.1) {
+        player.currentTime = 0;
+      }
+      player.play();
     }
   };
 
@@ -152,17 +165,11 @@ export const MediaPreview = ({
    */
   const renderVideoPreview = () => (
     <View style={styles.videoContainer}>
-      <Video
-        ref={videoRef}
-        source={{ uri: media.uri }}
+      <VideoView
+        player={player}
         style={styles.video}
-        resizeMode={ResizeMode.CONTAIN}
-        isLooping={false}
-        onPlaybackStatusUpdate={handleVideoStatusUpdate}
-        onError={(error) => {
-          console.error('[MediaPreview] Video error:', error);
-          setError('Failed to load video');
-        }}
+        contentFit="contain"
+        nativeControls={false}
       />
 
       {/* Play/Pause overlay */}
@@ -317,6 +324,29 @@ export const MediaPreview = ({
 /**
  * Multi-media preview carousel
  */
+/**
+ * One video in the carousel.
+ *
+ * Its own component because `useVideoPlayer` is a hook and the carousel renders its items
+ * in a map -- a hook per iteration is not something React allows. Each item therefore owns
+ * its player, and plays only while it is the visible one.
+ */
+const CarouselVideo = memo(({ uri, isActive, style }) => {
+  const player = useVideoPlayer({ uri }, (p) => { p.loop = true; });
+
+  useEffect(() => {
+    if (isActive) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [isActive, player]);
+
+  return <VideoView player={player} style={style} contentFit="contain" nativeControls={false} />;
+});
+
+CarouselVideo.displayName = 'CarouselVideo';
+
 export const MediaPreviewCarousel = ({
   mediaItems = [],
   initialIndex = 0,
@@ -402,12 +432,10 @@ export const MediaPreviewCarousel = ({
         {mediaItems.map((item, index) => (
           <View key={index} style={styles.carouselItem}>
             {item.type === 'video' ? (
-              <Video
-                source={{ uri: item.uri }}
+              <CarouselVideo
+                uri={item.uri}
+                isActive={index === currentIndex}
                 style={styles.carouselMedia}
-                resizeMode={ResizeMode.CONTAIN}
-                shouldPlay={index === currentIndex}
-                isLooping
               />
             ) : (
               <Image

@@ -2,7 +2,7 @@
  * AudioRecorder Component
  * 
  * Records audio with waveform visualization.
- * Uses expo-av for audio recording.
+ * Uses expo-audio. expo-av carried no native module from SDK 57 onward.
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
@@ -14,7 +14,14 @@ import {
   Animated,
   Platform,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import {
+  useAudioRecorder,
+  useAudioRecorderState,
+  setAudioModeAsync,
+  requestRecordingPermissionsAsync,
+  IOSOutputFormat,
+  AudioQuality,
+} from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
 
 /**
@@ -22,70 +29,31 @@ import { Ionicons } from '@expo/vector-icons';
  */
 export const RecordingQuality = {
   LOW: {
-    android: {
-      extension: '.m4a',
-      outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-      audioEncoder: Audio.AndroidAudioEncoder.AAC,
-      sampleRate: 22050,
-      numberOfChannels: 1,
-      bitRate: 64000,
-    },
-    ios: {
-      extension: '.m4a',
-      outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-      audioQuality: Audio.IOSAudioQuality.LOW,
-      sampleRate: 22050,
-      numberOfChannels: 1,
-      bitRate: 64000,
-    },
-    web: {
-      mimeType: 'audio/webm',
-      bitsPerSecond: 64000,
-    },
+    extension: '.m4a',
+    sampleRate: 22050,
+    numberOfChannels: 1,
+    bitRate: 64000,
+    android: { outputFormat: 'mpeg4', audioEncoder: 'aac' },
+    ios: { outputFormat: IOSOutputFormat.MPEG4AAC, audioQuality: AudioQuality.LOW },
+    web: { mimeType: 'audio/webm', bitsPerSecond: 64000 },
   },
   MEDIUM: {
-    android: {
-      extension: '.m4a',
-      outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-      audioEncoder: Audio.AndroidAudioEncoder.AAC,
-      sampleRate: 44100,
-      numberOfChannels: 1,
-      bitRate: 128000,
-    },
-    ios: {
-      extension: '.m4a',
-      outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-      audioQuality: Audio.IOSAudioQuality.MEDIUM,
-      sampleRate: 44100,
-      numberOfChannels: 1,
-      bitRate: 128000,
-    },
-    web: {
-      mimeType: 'audio/webm',
-      bitsPerSecond: 128000,
-    },
+    extension: '.m4a',
+    sampleRate: 44100,
+    numberOfChannels: 1,
+    bitRate: 128000,
+    android: { outputFormat: 'mpeg4', audioEncoder: 'aac' },
+    ios: { outputFormat: IOSOutputFormat.MPEG4AAC, audioQuality: AudioQuality.MEDIUM },
+    web: { mimeType: 'audio/webm', bitsPerSecond: 128000 },
   },
   HIGH: {
-    android: {
-      extension: '.m4a',
-      outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-      audioEncoder: Audio.AndroidAudioEncoder.AAC,
-      sampleRate: 44100,
-      numberOfChannels: 2,
-      bitRate: 256000,
-    },
-    ios: {
-      extension: '.m4a',
-      outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-      audioQuality: Audio.IOSAudioQuality.HIGH,
-      sampleRate: 44100,
-      numberOfChannels: 2,
-      bitRate: 256000,
-    },
-    web: {
-      mimeType: 'audio/webm',
-      bitsPerSecond: 256000,
-    },
+    extension: '.m4a',
+    sampleRate: 44100,
+    numberOfChannels: 2,
+    bitRate: 256000,
+    android: { outputFormat: 'mpeg4', audioEncoder: 'aac' },
+    ios: { outputFormat: IOSOutputFormat.MPEG4AAC, audioQuality: AudioQuality.HIGH },
+    web: { mimeType: 'audio/webm', bitsPerSecond: 256000 },
   },
 };
 
@@ -130,9 +98,11 @@ export const AudioRecorder = ({
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [metering, setMetering] = useState([]);
   
-  const recordingRef = useRef(null);
-  const durationIntervalRef = useRef(null);
-  const meteringIntervalRef = useRef(null);
+  // expo-audio's recorder is a hook rather than an object you create on demand, so it is
+  // declared here and driven from the handlers below. `useAudioRecorderState` polls it for
+  // duration and metering, replacing the two intervals expo-av needed.
+  const recorder = useAudioRecorder(RecordingQuality[quality] || RecordingQuality.MEDIUM);
+  const recorderState = useAudioRecorderState(recorder, 100);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   // Request permissions on mount
@@ -168,18 +138,42 @@ export const AudioRecorder = ({
   }, [recordingState]);
 
   /**
+   * Duration and metering, from the recorder's own reported state.
+   *
+   * expo-av needed two intervals here -- one polling getStatusAsync for the level meter,
+   * another for elapsed time. useAudioRecorderState does both, so the intervals are gone
+   * and with them the risk of one outliving the recording.
+   */
+  useEffect(() => {
+    if (!recorderState?.isRecording) return;
+
+    // Seconds -> milliseconds, so maxDuration and formatDuration are unchanged.
+    const millis = (recorderState.currentTime || 0) * 1000;
+    setDuration(millis);
+
+    if (maxDuration && millis >= maxDuration) {
+      stopRecording();
+      return;
+    }
+
+    if (showWaveform && recorderState.metering !== undefined) {
+      // Normalize metering (-160 to 0 dB) to a 0-1 range, as before.
+      const normalized = Math.max(0, (recorderState.metering + 60) / 60);
+      setMetering((prev) => [...prev.slice(-50), normalized]);
+    }
+  }, [recorderState, maxDuration, showWaveform]);
+
+  /**
    * Request audio recording permissions
    */
   const requestPermissions = async () => {
     try {
-      const { granted } = await Audio.requestPermissionsAsync();
+      const { granted } = await requestRecordingPermissionsAsync();
       setPermissionGranted(granted);
-      
+
       if (granted) {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-        });
+        // The iOS-suffixed names are gone in expo-audio; these apply to both platforms.
+        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       }
     } catch (error) {
       console.error('[AudioRecorder] Permission error:', error);
@@ -190,15 +184,11 @@ export const AudioRecorder = ({
    * Clean up resources
    */
   const cleanup = async () => {
-    if (durationIntervalRef.current) {
-      clearInterval(durationIntervalRef.current);
-    }
-    if (meteringIntervalRef.current) {
-      clearInterval(meteringIntervalRef.current);
-    }
-    if (recordingRef.current) {
+    // No intervals to clear any more -- useAudioRecorderState owns the polling, and the
+    // recorder is released with the component.
+    if (recorder?.isRecording) {
       try {
-        await recordingRef.current.stopAndUnloadAsync();
+        await recorder.stop();
       } catch (e) {
         // Ignore cleanup errors
       }
@@ -210,48 +200,12 @@ export const AudioRecorder = ({
    */
   const startRecording = async () => {
     try {
-      // Configure audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 
-      // Get quality settings
-      const qualitySettings = RecordingQuality[quality] || RecordingQuality.MEDIUM;
+      recorder.record();
 
-      // Create recording
-      const { recording } = await Audio.Recording.createAsync(
-        qualitySettings,
-        (status) => {
-          if (status.isRecording) {
-            setDuration(status.durationMillis);
-            
-            // Check max duration
-            if (maxDuration && status.durationMillis >= maxDuration) {
-              stopRecording();
-            }
-          }
-        },
-        100 // Update every 100ms
-      );
-
-      recordingRef.current = recording;
       setRecordingState(RecordingState.RECORDING);
       setMetering([]);
-
-      // Start metering for waveform
-      if (showWaveform) {
-        meteringIntervalRef.current = setInterval(async () => {
-          if (recordingRef.current) {
-            const status = await recordingRef.current.getStatusAsync();
-            if (status.isRecording && status.metering !== undefined) {
-              // Normalize metering (-160 to 0 dB) to 0-1 range
-              const normalized = Math.max(0, (status.metering + 60) / 60);
-              setMetering(prev => [...prev.slice(-50), normalized]);
-            }
-          }
-        }, 100);
-      }
 
       onRecordingStart?.();
       console.log('[AudioRecorder] Recording started');
@@ -264,16 +218,9 @@ export const AudioRecorder = ({
    * Pause recording
    */
   const pauseRecording = async () => {
-    if (!recordingRef.current) return;
-
     try {
-      await recordingRef.current.pauseAsync();
+      recorder.pause();
       setRecordingState(RecordingState.PAUSED);
-      
-      if (meteringIntervalRef.current) {
-        clearInterval(meteringIntervalRef.current);
-      }
-      
       console.log('[AudioRecorder] Recording paused');
     } catch (error) {
       console.error('[AudioRecorder] Pause error:', error);
@@ -284,25 +231,9 @@ export const AudioRecorder = ({
    * Resume recording
    */
   const resumeRecording = async () => {
-    if (!recordingRef.current) return;
-
     try {
-      await recordingRef.current.startAsync();
+      recorder.record();
       setRecordingState(RecordingState.RECORDING);
-      
-      // Resume metering
-      if (showWaveform) {
-        meteringIntervalRef.current = setInterval(async () => {
-          if (recordingRef.current) {
-            const status = await recordingRef.current.getStatusAsync();
-            if (status.isRecording && status.metering !== undefined) {
-              const normalized = Math.max(0, (status.metering + 60) / 60);
-              setMetering(prev => [...prev.slice(-50), normalized]);
-            }
-          }
-        }, 100);
-      }
-      
       console.log('[AudioRecorder] Recording resumed');
     } catch (error) {
       console.error('[AudioRecorder] Resume error:', error);
@@ -313,24 +244,15 @@ export const AudioRecorder = ({
    * Stop recording and save
    */
   const stopRecording = async () => {
-    if (!recordingRef.current) return;
-
     try {
-      if (meteringIntervalRef.current) {
-        clearInterval(meteringIntervalRef.current);
-      }
+      await recorder.stop();
 
-      await recordingRef.current.stopAndUnloadAsync();
-      
-      const uri = recordingRef.current.getURI();
+      // Read the uri after stop resolves -- it is null until the file is finalised.
+      const uri = recorder.uri;
       const finalDuration = duration;
-      
-      // Reset audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-      });
 
-      recordingRef.current = null;
+      await setAudioModeAsync({ allowsRecording: false });
+
       setRecordingState(RecordingState.IDLE);
       setDuration(0);
       setMetering([]);
@@ -352,21 +274,10 @@ export const AudioRecorder = ({
    * Cancel recording
    */
   const cancelRecording = async () => {
-    if (!recordingRef.current) return;
-
     try {
-      if (meteringIntervalRef.current) {
-        clearInterval(meteringIntervalRef.current);
-      }
+      await recorder.stop();
+      await setAudioModeAsync({ allowsRecording: false });
 
-      await recordingRef.current.stopAndUnloadAsync();
-      
-      // Reset audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-      });
-
-      recordingRef.current = null;
       setRecordingState(RecordingState.IDLE);
       setDuration(0);
       setMetering([]);
