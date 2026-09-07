@@ -19,6 +19,7 @@ export function useFamilyTree() {
   const { accessToken } = useAuth();
   const [branchData, setBranchData] = useState(null);
   const [listData, setListData] = useState(null);
+  const [peopleData, setPeopleData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isLive, setIsLive] = useState(false);
   const [error, setError] = useState(null);
@@ -42,6 +43,10 @@ export function useFamilyTree() {
         const parsed = JSON.parse(cached);
         setBranchData(parsed.branch);
         setListData(parsed.list);
+        // Absent from caches written before the Members view existed. Left null rather
+        // than defaulted, so the view shows its loading state until the fetch below
+        // arrives instead of claiming the family is empty.
+        setPeopleData(parsed.people ?? null);
         setIsLive(true);
       }
     } catch {
@@ -59,15 +64,16 @@ export function useFamilyTree() {
 
     // 3. Fetch fresh data from the API
     try {
-      const { branch, list } = await getFamilyTree(accessToken);
+      const { branch, list, people } = await getFamilyTree(accessToken);
       const hasData = (branch?.branches?.length || 0) > 0 || (list?.families?.length || 0) > 0;
 
       if (mounted.current) {
         setBranchData(branch);
         setListData(list);
+        setPeopleData(people);
         setIsLive(true);
         if (hasData) {
-          AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ branch, list })).catch(() => {});
+          AsyncStorage.setItem(CACHE_KEY, JSON.stringify({ branch, list, people })).catch(() => {});
         } else {
           // Account genuinely has no family yet → show the real empty state and
           // drop any stale cache so we don't keep showing removed members.
@@ -88,5 +94,5 @@ export function useFamilyTree() {
     load();
   }, [load]);
 
-  return { branchData, listData, isLoading, isLive, error, refresh: load };
+  return { branchData, listData, peopleData, isLoading, isLive, error, refresh: load };
 }

@@ -126,6 +126,41 @@ export function toListData(members) {
  * @param {string} accessToken - Bearer token from AuthContext.
  * @returns {Promise<{ members, branch, list }>}
  */
+/**
+ * Every individual, flat, one row each.
+ *
+ * The branch and list views both group people into households, so selecting anybody there
+ * opens their whole family. This is the way to one person on their own.
+ *
+ * Ordered oldest first, so a family reads down the generations rather than in whatever
+ * order the backend happened to return. Members with no recorded birth year sort last,
+ * because a guess about where they belong is worse than the end of the list.
+ *
+ * Ported from `foot-print-web/src/services/familyService.js`. No new request: the members
+ * array this flattens is the one `/api/v1/family` already returns and the other two views
+ * are already built from.
+ *
+ * @param {Array} members - adapted members
+ * @returns {{people: Array}}
+ */
+export function toMembersData(members) {
+  const people = [...(members || [])]
+    .sort((a, b) => (a.birthYear ?? Infinity) - (b.birthYear ?? Infinity))
+    .map((m) => ({
+      id: m.id,
+      name: m.name,
+      birthYear: m.birthYear,
+      avatar: m.avatar,
+      location: m.location ?? null,
+      lat: m.lat ?? null,
+      lng: m.lng ?? null,
+      linkedUserId: m.linkedUserId ?? null,
+      ...(m.isMe ? { isMe: true } : {}),
+    }));
+
+  return { people };
+}
+
 export async function getFamilyTree(accessToken) {
   const headers = { 'Content-Type': 'application/json' };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
@@ -144,5 +179,6 @@ export async function getFamilyTree(accessToken) {
     members,
     branch: toBranchData(members),
     list: toListData(members),
+    people: toMembersData(members),
   };
 }

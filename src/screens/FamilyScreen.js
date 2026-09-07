@@ -23,6 +23,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { routeForHeadTap, summaryMemberId } from './familyTapRouting';
 import { useFamilyTree } from '../hooks/useFamilyTree';
+import Avatar from '../components/Avatar';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -53,6 +54,14 @@ const ViewToggle = memo(({ activeView, onViewChange }) => {
       >
         <Text style={[styles.toggleText, activeView === 'me' && styles.toggleTextActive]}>
           Me
+        </Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={[styles.toggleButton, activeView === 'members' && styles.toggleButtonActive]}
+        onPress={() => onViewChange('members')}
+      >
+        <Text style={[styles.toggleText, activeView === 'members' && styles.toggleTextActive]}>
+          Members
         </Text>
       </TouchableOpacity>
     </View>
@@ -270,6 +279,71 @@ const ListFamilyCard = memo(({ family, onFamilyPress, onMemberPress }) => {
 /**
  * List View - Flat list of families ("List" tab)
  */
+/**
+ * Every individual, flat, one row each.
+ *
+ * The other two views group people into households, and once selecting anybody there
+ * opened their whole family there was no way left to reach one person on their own. This
+ * is that way: a row here is one person's journal and never a household, however many
+ * relatives they have.
+ *
+ * Ordered oldest first, so a family reads down the generations.
+ */
+const MembersView = memo(({ data, onMemberPress, isLoading }) => {
+  const people = data?.people || [];
+
+  if (people.length === 0) {
+    return (
+      <View style={styles.membersEmpty}>
+        <Ionicons
+          name={isLoading ? 'hourglass-outline' : 'people-outline'}
+          size={34}
+          color="#9aa3ad"
+        />
+        <Text style={styles.membersEmptyTitle}>
+          {isLoading ? 'Loading your family…' : 'No family recorded yet'}
+        </Text>
+        {!isLoading && (
+          <Text style={styles.membersEmptyHint}>
+            People you add to your family tree will appear here.
+          </Text>
+        )}
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView style={styles.listScrollView} showsVerticalScrollIndicator={false}>
+      <View style={styles.membersContainer}>
+        {people.map((person) => (
+          <TouchableOpacity
+            key={person.id}
+            style={styles.memberListRow}
+            onPress={() => onMemberPress?.(person)}
+            activeOpacity={0.7}
+          >
+            <Avatar src={person.avatar} name={person.name} size={44} />
+            <View style={styles.memberListIdentity}>
+              <Text style={styles.memberListName} numberOfLines={1}>
+                {person.name}
+                {person.isMe ? ' (you)' : ''}
+              </Text>
+              {person.birthYear || person.location ? (
+                <Text style={styles.memberListMeta} numberOfLines={1}>
+                  {[person.birthYear ? `Born ${person.birthYear}` : null, person.location]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </Text>
+              ) : null}
+            </View>
+            <Ionicons name="chevron-forward" size={18} color="#9aa3ad" />
+          </TouchableOpacity>
+        ))}
+      </View>
+    </ScrollView>
+  );
+});
+
 const ListView = memo(({ data, onFamilyPress, onMemberPress }) => {
   const families = data?.families || [];
 
@@ -305,7 +379,7 @@ const LocationFAB = memo(({ onPress }) => {
  */
 export default function FamilyScreen({ navigation }) {
   const { user } = useAuth();
-  const { branchData, listData } = useFamilyTree();
+  const { branchData, listData, peopleData, isLoading } = useFamilyTree();
   const [activeView, setActiveView] = useState('me');
 
   // Handle tapping head card - opens family journal (group)
@@ -388,17 +462,27 @@ export default function FamilyScreen({ navigation }) {
       <ViewToggle activeView={activeView} onViewChange={setActiveView} />
 
       {/* Content */}
-      {activeView === 'me' ? (
+      {activeView === 'me' && (
         <BranchView 
           data={branchData} 
           onFamilyPress={handleFamilyPress}
           onMemberPress={handleMemberPress} 
         />
-      ) : (
+      )}
+      {activeView === 'list' && (
         <ListView 
           data={listData} 
           onFamilyPress={handleFamilyPress}
           onMemberPress={handleMemberPress} 
+        />
+      )}
+      {activeView === 'members' && (
+        // handleMemberPress, deliberately: a row here is one person, never their
+        // household. That distinction is the reason this view exists.
+        <MembersView
+          data={peopleData}
+          onMemberPress={handleMemberPress}
+          isLoading={isLoading}
         />
       )}
 
@@ -631,6 +715,54 @@ const styles = StyleSheet.create({
   listContainer: {
     padding: 16,
     gap: 12,
+  },
+  // Members view
+  membersContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    gap: 8,
+  },
+  memberListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#ece7e0',
+  },
+  memberListIdentity: {
+    flex: 1,
+  },
+  memberListName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#3a352f',
+  },
+  memberListMeta: {
+    marginTop: 2,
+    fontSize: 12,
+    color: '#8a8179',
+  },
+  membersEmpty: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  membersEmptyTitle: {
+    marginTop: 10,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#4a545e',
+  },
+  membersEmptyHint: {
+    marginTop: 6,
+    fontSize: 13,
+    color: '#8a8179',
+    textAlign: 'center',
   },
   listCard: {
     backgroundColor: SURFACE_COLOR,
