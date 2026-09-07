@@ -206,10 +206,13 @@ export function AuthProvider({ children }) {
         // identically, so a rejected password, a malformed request and a backend having a
         // bad minute were indistinguishable -- from the screen and from the logs. The
         // status is what separates "your password is wrong" from "this is not your fault".
+        // errors first: it names the field. `title` is ASP.NET's generic "One or more
+        // validation errors occurred", which says a field is wrong without saying which --
+        // exactly the information needed and the one part it omits.
         const detail =
+          (data.errors && JSON.stringify(data.errors)) ||
           data.message ||
           data.title ||
-          (data.errors && JSON.stringify(data.errors)) ||
           null;
 
         const reason =

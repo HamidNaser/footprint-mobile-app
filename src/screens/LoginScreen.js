@@ -120,12 +120,20 @@ export default function LoginScreen() {
   };
 
   const handleEmailAuth = async () => {
-    if (!email || !password) {
+    // Trimmed before anything looks at it. iOS appends a space after an autocomplete or
+    // autofill suggestion, and the server validates the address strictly -- so a login
+    // that looked exactly right was rejected as a malformed request rather than a wrong
+    // password, and the message said neither. The password is deliberately not trimmed:
+    // leading and trailing spaces are legitimate characters in one.
+    const cleanEmail = email.trim();
+    const cleanName = name.trim();
+
+    if (!cleanEmail || !password) {
       setError('Please fill in all fields');
       return;
     }
 
-    if (isSignUp && !name) {
+    if (isSignUp && !cleanName) {
       setError('Please enter your name');
       return;
     }
@@ -135,9 +143,9 @@ export default function LoginScreen() {
 
     try {
       if (isSignUp) {
-        await register(email, password, name);
+        await register(cleanEmail, password, cleanName);
       } else {
-        await login(email, password);
+        await login(cleanEmail, password);
       }
     } catch (err) {
       setError(err.message || (isSignUp ? 'Registration failed' : 'Login failed'));
