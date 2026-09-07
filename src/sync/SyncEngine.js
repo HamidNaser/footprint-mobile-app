@@ -392,19 +392,40 @@ class SyncEngineClass {
       return;
     }
 
+    // The queued payload is a snapshot taken when the operation was enqueued, and the
+    // entry can change afterwards -- a media upload rewrites its blocks with real urls
+    // precisely while the create sits waiting. Pushing the snapshot would send the local
+    // file paths again and be rejected for the same reason as before. Read the row as it
+    // stands, falling back to the snapshot if it has since been deleted.
+    const currentEntry = operation.entityId
+      ? await DatabaseService.getEntryByLocalId(operation.entityId).catch(() => null)
+      : null;
+    const payload = currentEntry || operation.data;
+
     switch (operation.type) {
       case SyncOperationType.CREATE_ENTRY: {
-        const response = await JournalApi.createEntry(operation.data);
+        const response = await JournalApi.createEntry(payload);
         await this._handleCreateSuccess(operation, response.serverId);
         await SyncQueue.markCompleted(operation.id, { serverId: response.serverId });
         break;
       }
 
       case SyncOperationType.UPDATE_ENTRY: {
+        // Without a server id there is nothing to update: the entry has never been
+        // created remotely, so a PUT goes to a path that does not accept one and comes
+        // back 405. Its pending create carries the change instead, now that the push
+        // reads the row fresh.
+        const serverId = operation.serverId || currentEntry?.serverId;
+        if (!serverId) {
+          console.log('[SyncEngine] Skipping update for an entry not yet on the server:', operation.entityId);
+          await SyncQueue.markCompleted(operation.id);
+          break;
+        }
+
         const response = await JournalApi.updateEntry(
-          operation.serverId,
-          operation.data,
-          operation.data.updated_at
+          serverId,
+          payload,
+          payload.updatedAt || operation.data?.updated_at
         );
         
         if (response.type === 'conflict') {
@@ -663,12 +684,17 @@ class SyncEngineClass {
       syncStatus: 'pending',
     });
 
-    await SyncQueue.enqueue({
-      type: SyncOperationType.UPDATE_ENTRY,
-      entityId: entryLocalId,
-      serverId: entry.serverId || null,
-      data: { ...entry, contentBlocks },
-    });
+    // Only when the entry exists remotely. If it does not, its create is still queued and
+    // will now pick up these blocks when it reads the row at push time -- enqueueing an
+    // update would PUT to a path with no id behind it and take a 405.
+    if (entry.serverId) {
+      await SyncQueue.enqueue({
+        type: SyncOperationType.UPDATE_ENTRY,
+        entityId: entryLocalId,
+        serverId: entry.serverId,
+        data: { ...entry, contentBlocks },
+      });
+    }
   }
 
   async _uploadPendingMedia() {
