@@ -202,7 +202,31 @@ export function AuthProvider({ children }) {
       }
 
       if (!response.ok) {
-        throw new Error(data.message || 'Login failed');
+        // Say what actually happened. "Login failed" covered 400, 401, 429 and 500
+        // identically, so a rejected password, a malformed request and a backend having a
+        // bad minute were indistinguishable -- from the screen and from the logs. The
+        // status is what separates "your password is wrong" from "this is not your fault".
+        const detail =
+          data.message ||
+          data.title ||
+          (data.errors && JSON.stringify(data.errors)) ||
+          null;
+
+        const reason =
+          response.status === 401 ? 'Email or password is incorrect'
+          : response.status === 400 ? 'The sign-in request was rejected'
+          : response.status === 429 ? 'Too many attempts — wait a moment and try again'
+          : response.status >= 500 ? 'The sign-in service is unavailable right now'
+          : 'Login failed';
+
+        console.error(
+          `[AuthContext] Login rejected: HTTP ${response.status}`,
+          detail ?? '(no message from server)'
+        );
+
+        const error = new Error(detail ? `${reason} (${detail})` : reason);
+        error.status = response.status;
+        throw error;
       }
 
       await saveAuth(data.user, { accessToken: data.accessToken, refreshToken: data.refreshToken });
