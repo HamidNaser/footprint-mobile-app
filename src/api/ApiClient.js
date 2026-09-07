@@ -531,7 +531,18 @@ class ApiClientClass {
 
     // Handle errors
     if (!response.ok) {
-      const message = data?.message || data?.error || `Request failed with status ${response.status}`;
+      // `errors` first, because it names the field. ASP.NET answers a validation failure
+      // with a `title` of "One or more validation errors occurred" and the useful part in
+      // `errors` beside it -- so falling back to `title`, or to the status alone, reports
+      // that something was wrong with the request while omitting what. A sync push
+      // rejected this way retries forever against the same objection, unnamed.
+      const validation = data?.errors ? JSON.stringify(data.errors) : null;
+      const message =
+        data?.message
+        || data?.error
+        || (validation && `${data?.title || 'Validation failed'}: ${validation}`)
+        || data?.title
+        || `Request failed with status ${response.status}`;
       const code = data?.code || 'API_ERROR';
       throw new ApiError(message, response.status, code, data);
     }
