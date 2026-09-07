@@ -332,7 +332,16 @@ export const CameraCapture = ({
         // outright on a picture-mode camera. This is why video never worked.
         mode={mode === CameraMode.VIDEO ? 'video' : 'picture'}
         enableTorch={flash === FlashMode.ON}
-      >
+      />
+
+      {/*
+        Overlay, not children. CameraView stopped rendering its children in expo-camera 16+,
+        so everything below -- the shutter, the mode switcher, the close and flip buttons --
+        simply did not draw: the preview filled the screen with no way to take a picture.
+        Rendered as an absolutely-positioned sibling over the preview instead, which is the
+        supported arrangement.
+      */}
+      <View style={styles.overlay} pointerEvents="box-none">
         {/* Flash overlay */}
         <Animated.View
           style={[
@@ -455,7 +464,7 @@ export const CameraCapture = ({
             </TouchableOpacity>
           </View>
         </View>
-      </CameraView>
+      </View>
     </View>
   );
 };
@@ -470,7 +479,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   camera: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Sits over the preview. box-none so the empty middle stays transparent to touch and
+  // only the actual controls take presses.
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
   },
   flashOverlay: {
     ...StyleSheet.absoluteFillObject,

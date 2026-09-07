@@ -23,6 +23,7 @@ import {
   Platform,
   Animated,
   ActivityIndicator,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -849,14 +850,31 @@ export default function JournalScreen({ navigation }) {
         )}
       </DateSwipeContainer>
 
-      {/* WhatsApp-style Input Bar */}
-      <QuickCaptureBar
-        onSend={handleSendMessage}
-        onCameraPress={handleQuickCamera}
-        onMicPress={handleQuickMic}
-        placeholder="Message..."
-        primaryColor={PRIMARY_COLOR}
-      />
+      {/*
+        WhatsApp-style Input Bar.
+
+        Wrapped so the keyboard pushes it up rather than covering it. There was no keyboard
+        handling here at all: the bar is anchored to the bottom of the screen, and on iOS the
+        keyboard is drawn over anything it overlaps unless something moves it. So the moment
+        you started typing, the field you were typing into went behind the keyboard -- along
+        with the send button and the paste target.
+
+        `padding` on iOS, `height` on Android, which is the combination that behaves for a
+        bottom-anchored bar. The SafeAreaView above claims only the top edge, so there is no
+        bottom inset to offset against.
+      */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
+      >
+        <QuickCaptureBar
+          onSend={handleSendMessage}
+          onCameraPress={handleQuickCamera}
+          onMicPress={handleQuickMic}
+          placeholder="Message..."
+          primaryColor={PRIMARY_COLOR}
+        />
+      </KeyboardAvoidingView>
 
       {/* Entry Gallery Modal - Shows map + photos/videos for a specific entry */}
       <EntryGalleryModal
