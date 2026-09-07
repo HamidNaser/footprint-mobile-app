@@ -359,7 +359,16 @@ class SyncEngineClass {
           await this._processSingleOperation(op);
           result.succeeded++;
         } catch (opError) {
-          console.error('[SyncEngine] Operation failed:', op.id, opError.message);
+          // The response body, not just the status. A 400 here says the server rejected
+          // the payload and nothing else; without the body there is no way to tell which
+          // field it objected to, and the operation retries against the same objection
+          // until it exhausts its attempts. Logged rather than surfaced -- this is for
+          // diagnosis, and the queue's own handling is unchanged.
+          const detail = opError?.data ? JSON.stringify(opError.data).slice(0, 500) : null;
+          console.error(
+            '[SyncEngine] Operation failed:', op.id, op.type, opError.message,
+            detail ? `| server said: ${detail}` : '| server sent no body'
+          );
           await SyncQueue.markFailed(op.id, opError.message);
           result.failed++;
         }

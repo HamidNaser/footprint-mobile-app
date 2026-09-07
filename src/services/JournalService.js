@@ -174,6 +174,20 @@ class JournalServiceClass {
     // Queue media for upload if there are media blocks
     await this._queueMediaForUpload(entry);
 
+    // Push it now rather than waiting for the timer.
+    //
+    // Nothing triggered a sync on create, so a new entry sat in the queue until the
+    // five-minute auto-sync came round, the app was backgrounded and reopened, or the
+    // network changed. Post a photo and it could be minutes before it existed anywhere but
+    // the phone -- which reads as the app being broken rather than as a schedule, because
+    // every other app people use posts immediately.
+    //
+    // Deliberately not awaited: the entry is already saved locally and the screen should
+    // not wait on a network round trip to show it. Failures are the sync engine's to
+    // handle -- the operation stays queued and is retried -- so a rejection here is
+    // logged and dropped rather than surfaced as a save failure.
+    this._syncNow('createEntry');
+
     // NOTE: We don't emit 'entryCreated' here because the caller (useJournal hook)
     // already handles optimistic updates. The event is reserved for entries
     // arriving from external sources (e.g., SignalR sync from another device).
@@ -552,6 +566,9 @@ class JournalServiceClass {
 
     this._emit('entryUpdated', updatedEntry);
 
+    // Same reasoning as create: an edit should reach the server now, not in five minutes.
+    this._syncNow('updateEntry');
+
     return updatedEntry;
   }
 
@@ -570,6 +587,9 @@ class JournalServiceClass {
     }
 
     this._emit('entryUpdated', updatedEntry);
+
+    // Adding a block is a change like any other; push it now.
+    this._syncNow('addContentToEntry');
 
     return updatedEntry;
   }
@@ -653,6 +673,22 @@ class JournalServiceClass {
   // ============================================================
   // Media Queue Management
   // ============================================================
+
+  /**
+   * Ask the sync engine to run now, without blocking the caller.
+   *
+   * Imported lazily to avoid a cycle: SyncEngine imports JournalService for the media
+   * backfill, so a top-level import here would close the loop.
+   */
+  _syncNow(reason) {
+    try {
+      const { SyncEngine } = require('../sync/SyncEngine');
+      Promise.resolve(SyncEngine.sync())
+        .catch((error) => console.log(`[JournalService] Immediate sync after ${reason} failed:`, error?.message));
+    } catch (error) {
+      console.log('[JournalService] Sync engine unavailable:', error?.message);
+    }
+  }
 
   /**
    * Queue all media in an entry for upload
