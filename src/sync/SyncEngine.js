@@ -449,7 +449,7 @@ class SyncEngineClass {
       type: 'update_update',
       localEntry,
       serverEntry: response.serverVersion,
-      localModified: localEntry.updated_at,
+      localModified: localEntry.updatedAt,
       serverModified: response.serverVersion.updatedAt,
     };
 
@@ -501,7 +501,7 @@ class SyncEngineClass {
       for (const deletedId of changes.deletedIds) {
         const localEntry = await JournalRepository.getByServerId(deletedId);
         if (localEntry) {
-          await JournalRepository.hardDelete(localEntry.local_id);
+          await JournalRepository.hardDelete(localEntry.localId);
           result.count++;
         }
       }
@@ -560,8 +560,8 @@ class SyncEngineClass {
     }
 
     // Update local entry with server data (direct write, no re-enqueue)
-    if (localEntry.sync_status === SyncStatus.SYNCED || !conflict) {
-      await JournalRepository.applyServerUpdate(localEntry.local_id, {
+    if (localEntry.syncStatus === SyncStatus.SYNCED || !conflict) {
+      await JournalRepository.applyServerUpdate(localEntry.localId, {
         contentBlocks: mapped.contentBlocks,
         location: mapped.location,
         visibility: mapped.visibility,

@@ -72,19 +72,19 @@ class ConflictResolverClass {
    */
   detectConflict(localEntry, serverEntry) {
     // No local changes since last sync - no conflict
-    if (localEntry.sync_status === SyncStatus.SYNCED) {
+    if (localEntry.syncStatus === SyncStatus.SYNCED) {
       return null;
     }
 
     // Local was deleted
-    if (localEntry.sync_status === SyncStatus.DELETED) {
+    if (localEntry.syncStatus === SyncStatus.DELETED) {
       // Server was also modified
-      if (new Date(serverEntry.updatedAt) > new Date(localEntry.synced_at || localEntry.created_at)) {
+      if (new Date(serverEntry.updatedAt) > new Date(localEntry.syncedAt || localEntry.createdAt)) {
         return {
           type: ConflictType.UPDATE_DELETE,
           localEntry,
           serverEntry,
-          localModified: localEntry.updated_at,
+          localModified: localEntry.updatedAt,
           serverModified: serverEntry.updatedAt,
         };
       }
@@ -92,10 +92,10 @@ class ConflictResolverClass {
     }
 
     // Local was modified
-    if (localEntry.sync_status === SyncStatus.PENDING) {
-      const localModified = new Date(localEntry.updated_at);
+    if (localEntry.syncStatus === SyncStatus.PENDING) {
+      const localModified = new Date(localEntry.updatedAt);
       const serverModified = new Date(serverEntry.updatedAt);
-      const lastSync = localEntry.synced_at ? new Date(localEntry.synced_at) : null;
+      const lastSync = localEntry.syncedAt ? new Date(localEntry.syncedAt) : null;
 
       // Server was modified after our last sync
       if (!lastSync || serverModified > lastSync) {
@@ -103,7 +103,7 @@ class ConflictResolverClass {
           type: ConflictType.UPDATE_UPDATE,
           localEntry,
           serverEntry,
-          localModified: localEntry.updated_at,
+          localModified: localEntry.updatedAt,
           serverModified: serverEntry.updatedAt,
           timeDifference: Math.abs(localModified - serverModified),
         };
@@ -129,7 +129,7 @@ class ConflictResolverClass {
     console.log('[ConflictResolver] Resolving conflict:', {
       type: conflict.type,
       strategy: resolveStrategy,
-      localId: conflict.localEntry.local_id,
+      localId: conflict.localEntry.localId,
     });
 
     switch (resolveStrategy) {
@@ -201,7 +201,7 @@ class ConflictResolverClass {
 
     // Apply server data locally and mark SYNCED WITHOUT re-enqueuing a push
     // (we are accepting the server version, not producing a new change).
-    await JournalRepository.applyServerUpdate(localEntry.local_id, {
+    await JournalRepository.applyServerUpdate(localEntry.localId, {
       contentBlocks: serverEntry.contentBlocks || [],
       visibility: serverEntry.visibility,
     });
@@ -216,6 +216,19 @@ class ConflictResolverClass {
 
   /**
    * Attempt to merge changes (best effort)
+   *
+   * ⚠️ UNVERIFIED — reads fields that exist on neither shape.
+   *
+   * `latitude`, `longitude`, `location_name` and `tags` are on neither the object the
+   * repository returns (which carries `location: {lat, lng, name}` and no tags at all) nor
+   * the server entry. Each reads undefined, so a merge would quietly blank the location and
+   * drop tags rather than combining anything.
+   *
+   * Left as it stands rather than repaired blind: MERGE is not the default strategy
+   * (LAST_WRITE_WINS is, and nothing calls setStrategy), so this does not run today.
+   * Rewriting conflict resolution that cannot be exercised is a good way to turn a dormant
+   * bug into a live one that loses entries. Fix it when merge is actually wanted, and test
+   * it against a real conflict.
    */
   async _resolveMerge(conflict) {
     const { localEntry, serverEntry } = conflict;
@@ -225,17 +238,17 @@ class ConflictResolverClass {
     
     const merged = {
       // Keep server ID
-      server_id: serverEntry.id || localEntry.server_id,
-      local_id: localEntry.local_id,
+      server_id: serverEntry.id || localEntry.serverId,
+      local_id: localEntry.localId,
       
       // Use most recently modified title
-      title: new Date(localEntry.updated_at) > new Date(serverEntry.updatedAt)
+      title: new Date(localEntry.updatedAt) > new Date(serverEntry.updatedAt)
         ? localEntry.title
         : serverEntry.title,
       
       // Merge content blocks (combine unique blocks)
       content_blocks: this._mergeContentBlocks(
-        this._parseJson(localEntry.content_blocks),
+        this._parseJson(localEntry.contentBlocks),
         serverEntry.contentBlocks || []
       ),
       
@@ -247,13 +260,13 @@ class ConflictResolverClass {
       weather: localEntry.weather || serverEntry.weather,
       
       // Use most recent location
-      latitude: new Date(localEntry.updated_at) > new Date(serverEntry.updatedAt)
+      latitude: new Date(localEntry.updatedAt) > new Date(serverEntry.updatedAt)
         ? localEntry.latitude
         : serverEntry.latitude,
-      longitude: new Date(localEntry.updated_at) > new Date(serverEntry.updatedAt)
+      longitude: new Date(localEntry.updatedAt) > new Date(serverEntry.updatedAt)
         ? localEntry.longitude
         : serverEntry.longitude,
-      location_name: new Date(localEntry.updated_at) > new Date(serverEntry.updatedAt)
+      location_name: new Date(localEntry.updatedAt) > new Date(serverEntry.updatedAt)
         ? localEntry.location_name
         : serverEntry.locationName,
       
@@ -268,7 +281,7 @@ class ConflictResolverClass {
     };
 
     // Update local database with merged entry
-    await JournalRepository.update(localEntry.local_id, {
+    await JournalRepository.update(localEntry.localId, {
       ...merged,
       content_blocks: JSON.stringify(merged.content_blocks),
       tags: JSON.stringify(merged.tags),
@@ -400,7 +413,7 @@ class ConflictResolverClass {
       if (!conflict) {
         results.push({
           serverId: serverConflict.id,
-          localId: localEntry.local_id,
+          localId: localEntry.localId,
           result: ResolutionResult.NO_CONFLICT,
         });
         continue;
@@ -410,7 +423,7 @@ class ConflictResolverClass {
       const resolution = await this.resolveConflict(conflict);
       results.push({
         serverId: serverConflict.id,
-        localId: localEntry.local_id,
+        localId: localEntry.localId,
         ...resolution,
       });
     }

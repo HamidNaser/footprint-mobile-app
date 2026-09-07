@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * SQL statements to create all tables
@@ -131,6 +131,8 @@ export const CREATE_TABLES = {
       priority INTEGER DEFAULT 0,
       retry_count INTEGER DEFAULT 0,
       last_error TEXT,
+      result TEXT,
+      conflict_data TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT,
       completed_at TEXT

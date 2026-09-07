@@ -74,6 +74,26 @@ export const migrations = [
       'DROP TABLE IF EXISTS sync_queue;',
     ],
   },
+  {
+    version: 3,
+    description: 'Add the sync_queue columns v2 missed: result and conflict_data',
+    up: [
+      // v2 rebuilt this table from SyncQueue.js's INSERT statements and stopped there. The
+      // UPDATEs use two more columns that no insert mentions: `result`, written when an
+      // operation succeeds, and `conflict_data`, written when one conflicts. So enqueueing
+      // worked and completing did not -- an operation would push, succeed, and then fail to
+      // record that it had, leaving it to be retried forever.
+      //
+      // Added rather than rebuilt: unlike v2 there are now real rows here, and they are
+      // pending sync operations. Dropping the table would discard work the user has done
+      // and believes is saved. ALTER TABLE ADD COLUMN is safe for nullable columns.
+      'ALTER TABLE sync_queue ADD COLUMN result TEXT;',
+      'ALTER TABLE sync_queue ADD COLUMN conflict_data TEXT;',
+    ],
+    down: [
+      // SQLite cannot drop columns without a table rebuild; leaving them is harmless.
+    ],
+  },
   // Future migrations will be added here
   // {
   //   version: 2,
