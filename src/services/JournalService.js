@@ -710,7 +710,10 @@ class JournalServiceClass {
       }
 
       await this.dbService.queueMedia({
-        localId: item.id,
+        // Falls back to a value derived from the file itself. Media saved before this
+        // path worked may carry no id, and a null primary key would let the same file be
+        // queued again on every sync instead of being recognised as already there.
+        localId: item.id || `${entryLocalId}:${localPath}`,
         entryLocalId,
         filePath: localPath,
         mediaType,

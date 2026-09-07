@@ -320,7 +320,10 @@ class DatabaseServiceClass {
     const db = await this.getDb();
     
     await db.runAsync(
-      `INSERT INTO media_queue (
+      // OR IGNORE so re-queueing the same media is a no-op rather than a constraint
+      // error. The backfill below re-walks every entry on each sync, and without this the
+      // first already-queued item would throw and abandon the rest of the scan.
+      `INSERT OR IGNORE INTO media_queue (
         local_id, entry_local_id, file_path, media_type, file_size,
         width, height, duration, thumbnail_path, upload_status, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

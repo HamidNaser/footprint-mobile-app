@@ -13,6 +13,7 @@ import { JournalApi } from '../api/JournalApi';
 import { MediaApi } from '../api/MediaApi';
 import { ApiError } from '../api/ApiClient';
 import { JournalRepository } from '../repositories';
+import { JournalService } from '../services/JournalService';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { DatabaseService } from '../services/DatabaseService';
 import { SyncStatus } from '../database/schema';
@@ -577,8 +578,41 @@ class SyncEngineClass {
   /**
    * Upload pending media files
    */
+  /**
+   * Queue any media an entry holds that has not been uploaded and is not already queued.
+   *
+   * Queueing happens when an entry is created, so anything created while that path was
+   * broken -- which it was, for every entry ever made with a photo -- has media on disk
+   * that nothing will ever pick up. Fixing the creation path only helps entries made
+   * afterwards; these would sit unsynced forever with no indication why.
+   *
+   * Re-walked on every sync rather than run once. It is cheap, the insert ignores
+   * duplicates, and a one-shot migration would miss anything left behind by a future gap
+   * of the same kind.
+   */
+  async _backfillMediaQueue() {
+    try {
+      // Pending and failed entries: exactly the ones that have not made it to the server,
+      // which is where unqueued media will be.
+      const candidates = await DatabaseService.getPendingSyncEntries();
+
+      for (const entry of candidates) {
+        await JournalService._queueMediaForUpload(entry);
+      }
+
+      if (candidates.length > 0) {
+        console.log('[SyncEngine] Backfilled media queue from', candidates.length, 'entries');
+      }
+    } catch (error) {
+      // Never fail a sync over this; the upload step below simply finds nothing.
+      console.warn('[SyncEngine] Media backfill failed:', error?.message);
+    }
+  }
+
   async _uploadPendingMedia() {
     const result = { uploaded: 0, failed: 0 };
+
+    await this._backfillMediaQueue();
 
     // Get pending media from queue
     const mediaQueue = await DatabaseService.getMediaQueue();
