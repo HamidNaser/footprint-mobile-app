@@ -133,6 +133,27 @@ export default function LoginScreen() {
       return;
     }
 
+    // Checked here so a malformed address is named as one. The server answers a bad
+    // address with 400 "One or more validation errors occurred", which is
+    // indistinguishable on screen from a rejected password -- and sends people off to
+    // reset a password that was never wrong.
+    //
+    // The value in state is not always what the field appears to show: an autofilled or
+    // partially-committed entry can leave a fragment behind, and a fragment without an @
+    // fails validation while the field still looks correct. So this reports the value it
+    // is actually about to send.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      console.warn(
+        `[LoginScreen] Email failed local validation: ${cleanEmail.length} chars, ` +
+        `has @: ${cleanEmail.includes('@')}, has dot after @: ${/@[^\s@]*\./.test(cleanEmail)}`
+      );
+      setError(
+        `That does not look like a complete email address (“${cleanEmail}”). ` +
+        `Clear the field and type it again rather than using a suggestion.`
+      );
+      return;
+    }
+
     if (isSignUp && !cleanName) {
       setError('Please enter your name');
       return;
