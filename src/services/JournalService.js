@@ -659,8 +659,18 @@ class JournalServiceClass {
    * @param {object} entry - Journal entry
    */
   async _queueMediaForUpload(entry) {
-    for (const block of entry.contentBlocks) {
-      if ([ContentBlockType.IMAGE, ContentBlockType.VIDEO, ContentBlockType.AUDIO].includes(block.type)) {
+    // PHOTOS, not IMAGE. ContentBlockType has no IMAGE member, so this list contained
+    // `undefined` and matched nothing -- no media was ever queued, nothing was ever
+    // uploaded, and every entry carrying a photo was then pushed with local file paths
+    // where the server requires a url. It answered 400 and the entry retried forever.
+    const MEDIA_TYPES = [
+      ContentBlockType.PHOTOS,
+      ContentBlockType.VIDEO,
+      ContentBlockType.AUDIO,
+    ];
+
+    for (const block of entry.contentBlocks || []) {
+      if (MEDIA_TYPES.includes(block?.type)) {
         await this._queueMediaBlockForUpload(entry.localId, block);
       }
     }
@@ -672,47 +682,45 @@ class JournalServiceClass {
    * @param {object} block - Media content block
    */
   async _queueMediaBlockForUpload(entryLocalId, block) {
-    // Skip if already has server URL (already uploaded)
-    if (block.serverUrl) return;
+    // A block holds an array of media, not one file. This read block.localPath and
+    // block.id -- fields that live on each media item, not on the block -- so even once
+    // the type check above matched, it returned immediately on the missing path.
+    const items = Array.isArray(block.media) ? block.media : [];
+    if (items.length === 0) return;
 
-    // Skip if no local path
-    if (!block.localPath) return;
+    const mediaType = {
+      [ContentBlockType.PHOTOS]: MediaType.IMAGE,
+      [ContentBlockType.VIDEO]: MediaType.VIDEO,
+      [ContentBlockType.AUDIO]: MediaType.AUDIO,
+    }[block.type];
 
-    // Get file info
-    const fileInfo = await this.fileService.getFileInfo(block.localPath);
-    if (!fileInfo) {
-      console.warn(`Media file not found: ${block.localPath}`);
-      return;
+    if (!mediaType) return;
+
+    for (const item of items) {
+      // Already uploaded: nothing to do.
+      if (item?.serverUrl) continue;
+
+      const localPath = item?.localPath || item?.uri;
+      if (!localPath) continue;
+
+      const fileInfo = await this.fileService.getFileInfo(localPath);
+      if (!fileInfo) {
+        console.warn(`[JournalService] Media file not found: ${localPath}`);
+        continue;
+      }
+
+      await this.dbService.queueMedia({
+        localId: item.id,
+        entryLocalId,
+        filePath: localPath,
+        mediaType,
+        fileSize: fileInfo.size || 0,
+        width: item.width,
+        height: item.height,
+        duration: item.duration ?? block.duration,
+        thumbnailPath: item.thumbnailPath || item.thumbnailUri,
+      });
     }
-
-    // Determine media type
-    let mediaType;
-    switch (block.type) {
-      case ContentBlockType.IMAGE:
-        mediaType = MediaType.IMAGE;
-        break;
-      case ContentBlockType.VIDEO:
-        mediaType = MediaType.VIDEO;
-        break;
-      case ContentBlockType.AUDIO:
-        mediaType = MediaType.AUDIO;
-        break;
-      default:
-        return;
-    }
-
-    // Queue for upload
-    await this.dbService.queueMedia({
-      localId: block.id,
-      entryLocalId,
-      filePath: block.localPath,
-      mediaType,
-      fileSize: fileInfo.size || 0,
-      width: block.width,
-      height: block.height,
-      duration: block.duration,
-      thumbnailPath: block.thumbnailPath,
-    });
   }
 
   /**

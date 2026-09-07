@@ -231,21 +231,26 @@ class SyncEngineClass {
     };
 
     try {
-      // Step 1: Process outgoing queue (push local changes)
+      // Step 1: Upload pending media.
+      //
+      // Before pushing, not after. An entry carrying a photo can only be pushed once its
+      // media has a url the server can resolve -- push first and the payload still holds
+      // local file paths, which the server rejects as invalid, and the entry burns a retry
+      // on every sync while its media sits waiting for a step that runs afterwards.
+      const mediaResult = await this._uploadPendingMedia();
+      results.mediaUploaded = mediaResult.uploaded;
+      results.errors += mediaResult.failed;
+
+      // Step 2: Process outgoing queue (push local changes)
       const pushResult = await this._pushLocalChanges();
       results.pushed = pushResult.succeeded;
       results.errors += pushResult.failed;
       results.conflicts += pushResult.conflicts;
 
-      // Step 2: Pull remote changes
+      // Step 3: Pull remote changes
       const pullResult = await this._pullRemoteChanges();
       results.pulled = pullResult.count;
       results.conflicts += pullResult.conflicts;
-
-      // Step 3: Upload pending media
-      const mediaResult = await this._uploadPendingMedia();
-      results.mediaUploaded = mediaResult.uploaded;
-      results.errors += mediaResult.failed;
 
       const duration = Date.now() - startTime;
       console.log('[SyncEngine] Sync completed in', duration, 'ms', results);
