@@ -8,6 +8,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { JournalService, EntryVisibility, ContentBlockType, MediaType } from '../services/JournalService';
+import { mergeEntries } from '../utils/mergeEntries';
 
 /**
  * Hook for managing journal entries
@@ -15,6 +16,8 @@ import { JournalService, EntryVisibility, ContentBlockType, MediaType } from '..
  * @param {object} options - Hook options
  * @returns {object} Journal state and operations
  */
+
+
 export function useJournal(journalId, options = {}) {
   const { 
     autoFetch = true,
@@ -72,7 +75,7 @@ export function useJournal(journalId, options = {}) {
       if (reset) {
         setEntries(fetchedEntries);
       } else {
-        setEntries(prev => [...prev, ...fetchedEntries]);
+        setEntries(prev => mergeEntries(prev, fetchedEntries));
       }
 
       offsetRef.current = offset + fetchedEntries.length;
@@ -130,7 +133,7 @@ export function useJournal(journalId, options = {}) {
       console.log('[useJournal] createEntry success:', { localId: entry.localId, date: entry.date });
 
       // Optimistic update - add to beginning of list
-      setEntries(prev => [entry, ...prev]);
+      setEntries(prev => mergeEntries([entry], prev));
 
       return entry;
     } catch (err) {
