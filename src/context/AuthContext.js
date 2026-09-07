@@ -59,6 +59,42 @@ export function AuthProvider({ children }) {
     loadStoredAuth();
   }, []);
 
+  /**
+   * Keep this context's stored copy of the tokens in step with ApiClient's.
+   *
+   * The two keep separate copies under different storage keys, and until now only login
+   * wrote this one. ApiClient refreshes on its own schedule and updated only its own copy,
+   * so this one stayed frozen at whatever login produced -- and the next time it was
+   * bridged across, it handed back a refresh token the server had already rotated. A
+   * rotated token is rejected, and ApiClient clears the session on a rejected refresh, so
+   * the user was silently signed out mid-use with no way back but signing in again.
+   *
+   * Persisting only. The tokens in React state are not updated from here: nothing renders
+   * from them, and setting state on every refresh would re-run the sync effect below for
+   * no reason.
+   */
+  useEffect(() => {
+    return ApiClient.onTokensChanged(async ({ accessToken: freshAccess, refreshToken: freshRefresh }) => {
+      try {
+        const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
+        // Cleared tokens are a sign-out, and sign-out removes this key itself. Writing a
+        // half-empty record back here would resurrect it.
+        if (!storedData || !freshAccess) return;
+
+        const parsed = JSON.parse(storedData);
+        if (parsed.accessToken === freshAccess && parsed.refreshToken === freshRefresh) return;
+
+        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+          ...parsed,
+          accessToken: freshAccess,
+          refreshToken: freshRefresh ?? parsed.refreshToken,
+        }));
+      } catch (error) {
+        console.warn('[AuthContext] Failed to persist refreshed tokens:', error?.message);
+      }
+    });
+  }, []);
+
   // Activate the offline-first sync stack once authenticated (idempotent).
   // Pass the user id so the sync stack can detect an account switch and wipe
   // any local data left behind by a previous user before pulling.

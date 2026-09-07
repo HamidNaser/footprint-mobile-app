@@ -71,6 +71,36 @@ class ApiClientClass {
     this._refreshPromise = null;
     this._requestQueue = [];
     this._initialized = false;
+    // Notified whenever the tokens change, so the other holder of them can keep its own
+    // copy current. See onTokensChanged.
+    this._tokenListeners = new Set();
+  }
+
+  /**
+   * Subscribe to token changes.
+   *
+   * AuthContext persists its own copy of the tokens under a different key, and only login
+   * used to write it. A refresh updated this client and left that copy behind, so the next
+   * time AuthContext bridged its tokens over it handed back a refresh token the server had
+   * already rotated -- which is rejected, and a rejected refresh clears the session. The
+   * user is silently logged out mid-use, with no way back but signing in again.
+   *
+   * @param {(tokens: {accessToken: string|null, refreshToken: string|null}) => void} listener
+   * @returns {() => void} unsubscribe
+   */
+  onTokensChanged(listener) {
+    this._tokenListeners.add(listener);
+    return () => this._tokenListeners.delete(listener);
+  }
+
+  _emitTokensChanged() {
+    for (const listener of this._tokenListeners) {
+      try {
+        listener({ accessToken: this._accessToken, refreshToken: this._refreshToken });
+      } catch (error) {
+        console.warn('[ApiClient] Token listener failed:', error?.message);
+      }
+    }
   }
 
   /**
@@ -119,20 +149,28 @@ class ApiClientClass {
    */
   async setTokens({ accessToken, refreshToken, expiresIn }) {
     this._accessToken = accessToken;
-    this._refreshToken = refreshToken;
-    
+    // A caller that does not supply one must not erase the one we have. Losing the refresh
+    // token is not recoverable in-session: every later call reports "no refresh token" and
+    // the session simply ends.
+    this._refreshToken = refreshToken ?? this._refreshToken;
+
     // Calculate expiry time (with 60 second buffer)
     const expiryTime = Date.now() + (expiresIn * 1000) - 60000;
     this._tokenExpiry = expiryTime;
 
-    // Persist tokens
-    await Promise.all([
+    // Persist tokens. setItem rejects a non-string, so a missing refresh token would
+    // otherwise reject the whole batch and leave the three keys inconsistent.
+    const writes = [
       AsyncStorage.setItem(TOKEN_KEYS.ACCESS_TOKEN, accessToken),
-      AsyncStorage.setItem(TOKEN_KEYS.REFRESH_TOKEN, refreshToken),
       AsyncStorage.setItem(TOKEN_KEYS.TOKEN_EXPIRY, expiryTime.toString()),
-    ]);
+    ];
+    if (this._refreshToken) {
+      writes.push(AsyncStorage.setItem(TOKEN_KEYS.REFRESH_TOKEN, this._refreshToken));
+    }
+    await Promise.all(writes);
 
     console.log('[ApiClient] Tokens set, expires:', new Date(expiryTime).toISOString());
+    this._emitTokensChanged();
   }
 
   /**
@@ -150,6 +188,7 @@ class ApiClientClass {
     ]);
 
     console.log('[ApiClient] Tokens cleared');
+    this._emitTokensChanged();
   }
 
   /**
