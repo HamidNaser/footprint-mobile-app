@@ -76,11 +76,16 @@ export const MediaPreview = ({
     mediaType === PreviewMediaType.VIDEO && media?.uri ? { uri: media.uri } : null
   );
 
+  // Literal initial values, not `player.playing` / `player.status`. This component also
+  // renders images and audio, so the hook above is called with a null source on those
+  // passes -- and reading a property of a player with no native object behind it throws
+  // NotFoundException from expo-modules-core. The literals cost nothing: the real values
+  // arrive with the first event.
   const { isPlaying: playerIsPlaying } = useEvent(
-    player, 'playingChange', { isPlaying: player.playing }
+    player, 'playingChange', { isPlaying: false }
   );
   const { status: playerStatus } = useEvent(
-    player, 'statusChange', { status: player.status }
+    player, 'statusChange', { status: 'idle' }
   );
 
   useEffect(() => {
@@ -107,6 +112,8 @@ export const MediaPreview = ({
    * Toggle video playback
    */
   const togglePlayback = () => {
+    if (mediaType !== PreviewMediaType.VIDEO || !media?.uri) return;
+
     if (player.playing) {
       player.pause();
     } else {

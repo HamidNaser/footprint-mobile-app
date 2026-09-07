@@ -347,6 +347,9 @@ const InterviewModeScreen = ({
       // The failure is invisible: the UI counts up and the file is empty.
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 
+      // Required before every recording: stop() invalidates the recorder. Skipping it
+      // yields a uri that names no usable file, which is silent until the upload fails.
+      await recorder.prepareToRecordAsync();
       recorder.record();
       setIsRecording(true);
       setRecordingDuration(0);

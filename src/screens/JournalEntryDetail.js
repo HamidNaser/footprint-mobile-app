@@ -147,7 +147,12 @@ const VideoPlayerModal = ({ visible, video, onClose }) => {
 
   // Play when opened, pause when dismissed -- otherwise a closed modal keeps playing.
   useEffect(() => {
-    if (visible && video) {
+    // Only touch the player when there is something loaded in it. This modal stays mounted
+    // with `video` null for the life of the screen, and calling pause() on a player with no
+    // source throws NotFoundException rather than doing nothing.
+    if (!video) return;
+
+    if (visible) {
       player.play();
     } else {
       player.pause();

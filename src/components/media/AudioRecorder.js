@@ -202,6 +202,11 @@ export const AudioRecorder = ({
     try {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 
+      // Required before every recording, not just the first. expo-audio invalidates the
+      // recorder on stop() -- without this, record() appears to work and the counter runs,
+      // but the file it names is never a valid recording and the copy that follows fails
+      // with E_FILE_NOT_COPIED. expo-av had no equivalent step.
+      await recorder.prepareToRecordAsync();
       recorder.record();
 
       setRecordingState(RecordingState.RECORDING);

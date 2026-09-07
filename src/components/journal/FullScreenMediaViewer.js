@@ -52,7 +52,7 @@ const VideoItem = memo(({ video, width, isActive }) => {
     { uri: video.localPath || video.serverUrl },
     (p) => { p.loop = true; }
   );
-  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
+  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: false });
 
   const togglePlayPause = useCallback(() => {
     if (isPlaying) {
