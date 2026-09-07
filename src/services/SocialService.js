@@ -219,11 +219,19 @@ export async function getUserEntries(accessToken, userId) {
  *
  * @param {string} accessToken
  * @param {object} [options]
+ * @param {string} [options.memberId] - which family-tree node to build the unit around, so a
+ *   father's or grandfather's branch can be shown the same way. Omitted means your own.
  * @param {number} [options.limit] - max entries per member section
  * @returns {Promise<Array>} `{ memberId, relation, name, avatarUrl, entries }[]`
  */
-export async function getFamilySummary(accessToken, { limit } = {}) {
-  const query = limit ? `?limit=${encodeURIComponent(limit)}` : '';
+export async function getFamilySummary(accessToken, { memberId, limit } = {}) {
+  const params = [];
+  // A tree-node id, not a user id: the server only ever consults the caller's own tree, so
+  // an account id does not resolve -- and it does not fail either, it answers with the
+  // caller's own household. Omitted means "my own", which is the correct default.
+  if (memberId) params.push(`memberId=${encodeURIComponent(memberId)}`);
+  if (limit) params.push(`limit=${encodeURIComponent(limit)}`);
+  const query = params.length ? `?${params.join('&')}` : '';
   const data = await authFetch(`/feed/family-summary${query}`, accessToken);
 
   return (data?.sections || []).map((section) => ({

@@ -14,7 +14,7 @@
  * persistence, which does not exist on either client yet.
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -31,12 +31,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
 import { useAuth } from '../context/AuthContext';
 import { getFamilySummary } from '../services/SocialService';
+import { familySummaryToDays } from '../utils/familySummaryDays';
+import DayRoster from '../components/DayRoster';
 
-const RELATION_LABELS = {
-  head: 'You',
-  spouse: 'Spouse',
-  child: 'Child',
-};
 
 /** First and last initials, matching how the tree renders someone with no photograph. */
 function initialsFor(name) {
@@ -47,46 +44,53 @@ function initialsFor(name) {
   return (first + last).toUpperCase();
 }
 
-function SectionHeader({ section }) {
-  return (
-    <View style={styles.sectionHeader}>
-      {section.avatarUrl ? (
-        <Image source={{ uri: section.avatarUrl }} style={styles.avatar} />
-      ) : (
-        <View style={[styles.avatar, styles.avatarFallback]}>
-          <Text style={styles.avatarInitials}>{initialsFor(section.name)}</Text>
-        </View>
-      )}
-      <View style={styles.identity}>
-        <Text style={styles.name}>{section.name}</Text>
-        <Text style={styles.relation}>
-          {RELATION_LABELS[section.relation] || section.relation}
-        </Text>
-      </View>
-    </View>
-  );
-}
 
-export default function FamilySummaryScreen({ navigation }) {
+export default function FamilySummaryScreen({ navigation, route }) {
   const { user, accessToken } = useAuth();
+  // Which household. A tree-node id, absent when it is your own.
+  const memberId = route?.params?.memberId;
+  const title = route?.params?.title || 'Family Journal';
   const [sections, setSections] = useState([]);
   const [status, setStatus] = useState('loading'); // 'loading' | 'ready' | 'error'
   const [refreshing, setRefreshing] = useState(false);
+  const listRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const result = await getFamilySummary(accessToken);
+      const result = await getFamilySummary(accessToken, { memberId });
       setSections(result || []);
       setStatus('ready');
     } catch (err) {
       console.warn('[FamilySummaryScreen] failed to load family summary:', err.message);
       setStatus('error');
     }
-  }, [accessToken]);
+  }, [accessToken, memberId]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Carry the reader to the entry a face is about. Only ever called for somebody who
+  // recorded that day, so the entry is present in the list by construction; the guard is
+  // for a list that has since been refreshed out from under the press.
+  const handleJumpToEntry = useCallback((entryId) => {
+    if (!entryId) return;
+
+    for (let s = 0; s < listSections.length; s += 1) {
+      const index = listSections[s].data.findIndex(
+        (item) => (item.serverId || item.localId) === entryId
+      );
+      if (index >= 0) {
+        listRef.current?.scrollToLocation({
+          sectionIndex: s,
+          itemIndex: index,
+          viewPosition: 0.2,
+          animated: true,
+        });
+        return;
+      }
+    }
+  }, [listSections]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -94,13 +98,16 @@ export default function FamilySummaryScreen({ navigation }) {
     setRefreshing(false);
   }, [load]);
 
-  // SectionList wants `data`; an empty section stays in the list with an empty array so the
-  // member still gets a header, and the empty state renders beneath it (spec FR-010).
-  // Dropping them would make this screen quietly disagree with the tree it was opened from.
-  const listSections = sections.map((section) => ({
-    ...section,
-    data: section.entries,
-  }));
+  // Grouped by day, not by person. The endpoint answers by member -- that is how it says
+  // who is in this family -- but every other journal surface in the app is read by day, and
+  // this screen alone arriving as five separate stacks meant "what happened on Sunday" had
+  // to be assembled by eye. See familySummaryDays.
+  //
+  // 002 kept a member with nothing recorded in the list so they still got a header and the
+  // screen could not disagree with the tree it was opened from. Grouped by day there is
+  // nowhere to hang that header; the roster above the list carries it instead, drawing
+  // everyone and dimming whoever recorded nothing.
+  const listSections = useMemo(() => familySummaryToDays(sections), [sections]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -112,7 +119,7 @@ export default function FamilySummaryScreen({ navigation }) {
         >
           <Ionicons name="chevron-back" size={24} color="#4a453f" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Family Journal</Text>
+        <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
         <View style={styles.backButton} />
       </View>
 
@@ -143,16 +150,25 @@ export default function FamilySummaryScreen({ navigation }) {
 
       {status === 'ready' && listSections.length > 0 && (
         <SectionList
+          ref={listRef}
           sections={listSections}
+          onScrollToIndexFailed={() => {}}
           keyExtractor={(item, index) => item.serverId || item.localId || String(index)}
-          renderSectionHeader={({ section }) => <SectionHeader section={section} />}
-          renderSectionFooter={({ section }) =>
-            section.data.length === 0 ? (
-              <Text style={styles.emptySection}>No entries yet.</Text>
-            ) : null
-          }
+          renderSectionHeader={({ section }) => (
+            <View style={styles.dayBlock}>
+              <Text style={styles.dayHeading}>{section.title}</Text>
+              {/* Per day, not per screen: a roster drawn once at the top would describe
+                  whichever day happened to be first and be wrong for every other. */}
+              <DayRoster
+                sections={sections}
+                day={section.key === 'undated' ? null : section.key}
+                dateText={section.title}
+                onJumpToEntry={handleJumpToEntry}
+              />
+            </View>
+          )}
           renderItem={({ item }) => (
-            <JournalEntryCard entry={item} currentUserId={user?.id} showAuthor={false} />
+            <JournalEntryCard entry={item} currentUserId={user?.id} showAuthor />
           )}
           contentContainerStyle={styles.listContent}
           stickySectionHeadersEnabled={false}
@@ -198,11 +214,16 @@ const styles = StyleSheet.create({
   identity: { flexDirection: 'column' },
   name: { fontSize: 15, fontWeight: '600', color: '#4a453f' },
   relation: { fontSize: 12, color: '#948e86' },
-  emptySection: {
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+  dayHeading: {
     fontSize: 13,
-    fontStyle: 'italic',
-    color: '#948e86',
+    fontWeight: '700',
+    color: '#6b635a',
+    letterSpacing: 0.3,
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 8,
+  },
+  dayBlock: {
+    backgroundColor: '#fbf8f4',
   },
 });

@@ -1,41 +1,62 @@
-import { routeForHeadTap } from '../familyTapRouting';
+import { routeForHeadTap, summaryMemberId } from '../familyTapRouting';
 
 /**
- * Which screen a head-card tap opens (spec 002, User Story 3).
+ * Which screen a head-card tap opens, and which household it asks for.
  *
- * The consolidated summary is reachable only by tapping your *own* head card. Everything
- * else — another family's head, a relative with no account, a session that hasn't resolved
- * yet — must keep going to PersonJournal exactly as it did before this feature existed.
- * These are the cases where a loose comparison would quietly show someone a "family
- * summary" built from a family that isn't theirs.
+ * **Rewritten for spec 003 (2026-09-06).** Under 002 the summary was reachable only from
+ * your own head card, and these tests pinned that: every other head went to the group
+ * journal. That was not a bug in the rule, it was the rule — but it left the summary
+ * request carrying no member at all, so tapping your father's card showed your own family
+ * under his name. 003 widens it: a head card is a household, and tapping one opens that
+ * household's summary.
+ *
+ * The case worth guarding now is the second function. `memberId` is a tree-node id, and a
+ * head card carries an account id right beside it. Sending the wrong one does not fail —
+ * the server falls back to the caller's own household — so the screen looks like it works
+ * and quietly describes the wrong family. That is the failure this file exists to catch.
  */
 describe('routeForHeadTap', () => {
   const me = 'user_manal';
 
-  it('opens the family summary when you tap your own head card', () => {
-    expect(routeForHeadTap({ linkedUserId: me }, me)).toBe('FamilySummary');
+  it('opens the family summary for your own head card', () => {
+    expect(routeForHeadTap({ id: 'node_1', linkedUserId: me })).toBe('FamilySummary');
   });
 
-  it('opens the group journal for any other head card', () => {
-    expect(routeForHeadTap({ linkedUserId: 'user_someone_else' }, me)).toBe('PersonJournal');
+  it('opens the family summary for any other head card', () => {
+    // The change from 002: this used to be PersonJournal, which is why the summary was
+    // always the caller's own.
+    expect(routeForHeadTap({ id: 'node_2', linkedUserId: 'user_someone_else' }))
+      .toBe('FamilySummary');
   });
 
-  it('opens the group journal for a head card with no linked account', () => {
-    // A tree-only ancestor. Without the null guard this would compare null against a
-    // missing id and could route to a summary that is not this user's family.
-    expect(routeForHeadTap({ linkedUserId: null }, me)).toBe('PersonJournal');
+  it('opens the family summary for a head with no linked account', () => {
+    // A tree-only grandfather. His branch is still a household; the summary is built from
+    // the tree, not from accounts.
+    expect(routeForHeadTap({ id: 'node_3', linkedUserId: null })).toBe('FamilySummary');
   });
 
-  it('opens the group journal when the session has no user yet', () => {
-    expect(routeForHeadTap({ linkedUserId: me }, undefined)).toBe('PersonJournal');
-  });
-
-  it('does not treat a missing id on both sides as a match', () => {
-    expect(routeForHeadTap({ linkedUserId: null }, undefined)).toBe('PersonJournal');
-    expect(routeForHeadTap({}, undefined)).toBe('PersonJournal');
+  it('falls back to the group journal for a head with no node id', () => {
+    expect(routeForHeadTap({ linkedUserId: me })).toBe('PersonJournal');
   });
 
   it('tolerates a missing head without throwing', () => {
-    expect(routeForHeadTap(undefined, me)).toBe('PersonJournal');
+    expect(routeForHeadTap(undefined)).toBe('PersonJournal');
+    expect(routeForHeadTap(null)).toBe('PersonJournal');
+  });
+});
+
+describe('summaryMemberId', () => {
+  it('sends the tree-node id, never the account id', () => {
+    // The whole point. An account id resolves to nothing and the server answers with the
+    // caller's own household instead of failing, so this cannot be caught by looking.
+    const head = { id: 'node_7', linkedUserId: 'user_manal' };
+
+    expect(summaryMemberId(head)).toBe('node_7');
+    expect(summaryMemberId(head)).not.toBe(head.linkedUserId);
+  });
+
+  it('means "my own household" when there is no node', () => {
+    expect(summaryMemberId(undefined)).toBeUndefined();
+    expect(summaryMemberId({})).toBeUndefined();
   });
 });

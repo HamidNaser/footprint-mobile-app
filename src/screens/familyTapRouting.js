@@ -2,27 +2,46 @@
  * Where a tap on the family tree should go.
  *
  * Pulled out of FamilyScreen as a plain function with no React Native imports, so the rule
- * can be tested directly. This repo has no React Native testing library and this feature
- * adds no dependencies, so a rule left inline in the component would be untestable — and
- * this particular rule is exactly the one worth guarding: it decides whether tapping your
- * own head card shows your whole family or silently falls through to the old group journal.
+ * can be tested directly. This repo has no React Native testing library, so a rule left
+ * inline in the component would be untestable — and this is exactly the rule worth
+ * guarding, because getting it wrong shows somebody a family that is not the one they
+ * tapped.
+ *
+ * **Widened by spec 003 (2026-09-06).** It used to open the summary only for your *own*
+ * head card; every other household fell through to the group journal, and the summary
+ * request carried no member at all, so it always described the caller's household whoever
+ * had been tapped. Tapping your father's card showed your own family under his name.
+ *
+ * A head card *is* a household, so tapping one now opens that household's summary — yours
+ * or anybody else's — matching web, where `useFamilySummary` has taken a `memberId` all
+ * along. Individual people are unaffected: they are reached by tapping a member rather
+ * than a head, and still open that person's own journal.
  */
 
 /**
  * @param {object} head - the tapped head card (a family unit's head)
- * @param {string|undefined} currentUserId - the signed-in user's account id
  * @returns {'FamilySummary'|'PersonJournal'} the screen to navigate to
  */
-export function routeForHeadTap(head, currentUserId) {
-  // Both sides must be real before they can match. A tree node with no linked account has
-  // `linkedUserId == null`, and a signed-out or still-loading session has no id — comparing
-  // those loosely would make `null === undefined` route somebody to a summary of a family
-  // that isn't theirs.
-  if (head?.linkedUserId && currentUserId && head.linkedUserId === currentUserId) {
-    return 'FamilySummary';
-  }
+export function routeForHeadTap(head) {
+  // The summary is built from the family tree, so what identifies a household is the tree
+  // node — not an account. A grandfather who never used the app has no `linkedUserId` and
+  // his branch is still his.
+  return head?.id ? 'FamilySummary' : 'PersonJournal';
+}
 
-  return 'PersonJournal';
+/**
+ * The household to summarise, as the API identifies it.
+ *
+ * A **tree-node id, not a user id**. The server only ever consults the caller's own tree,
+ * so a node id resolves and an account id does not — silently, returning the caller's own
+ * household as though nothing were wrong. The two live side by side on every head card,
+ * which is what makes the mistake easy.
+ *
+ * @param {object} head
+ * @returns {string|undefined} the node id, or undefined to mean "my own household"
+ */
+export function summaryMemberId(head) {
+  return head?.id ?? undefined;
 }
 
 export default routeForHeadTap;

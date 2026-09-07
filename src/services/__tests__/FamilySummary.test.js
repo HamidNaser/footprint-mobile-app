@@ -97,4 +97,44 @@ describe('getFamilySummary', () => {
       expect.any(Object),
     );
   });
+
+  /**
+   * Which household is being asked about (spec 003, FR-004).
+   *
+   * Omitting the member does not fail -- the server answers with the caller's own
+   * household -- so a screen that forgets to send it looks entirely correct while
+   * describing the wrong family under somebody else's name. That is the whole reason
+   * these two tests exist rather than a manual look.
+   */
+  it('asks for a specific household when one is given', async () => {
+    respondWith({ sections: [] });
+
+    await getFamilySummary(token, { memberId: 'node_7' });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('memberId=node_7'),
+      expect.any(Object),
+    );
+  });
+
+  it('asks for no member at all when none is given, meaning your own', async () => {
+    respondWith({ sections: [] });
+
+    await getFamilySummary(token);
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.not.stringContaining('memberId'),
+      expect.any(Object),
+    );
+  });
+
+  it('sends both the member and the limit when both are given', async () => {
+    respondWith({ sections: [] });
+
+    await getFamilySummary(token, { memberId: 'node_7', limit: 5 });
+
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toContain('memberId=node_7');
+    expect(url).toContain('limit=5');
+  });
 });

@@ -21,7 +21,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
-import { routeForHeadTap } from './familyTapRouting';
+import { routeForHeadTap, summaryMemberId } from './familyTapRouting';
 import { useFamilyTree } from '../hooks/useFamilyTree';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -316,8 +316,11 @@ export default function FamilyScreen({ navigation }) {
     // different view from the group journal: sections per person rather than one merged
     // stream, and scoped to spouse and children rather than whatever unit was tapped.
     // Every other branch keeps today's exact behaviour.
-    if (routeForHeadTap(head, user?.id) === 'FamilySummary') {
-      navigation.navigate('FamilySummary');
+    if (routeForHeadTap(head) === 'FamilySummary') {
+      navigation.navigate('FamilySummary', {
+        memberId: summaryMemberId(head),
+        title: head?.name ? `${head.name.split(' ')[0]}'s Family` : undefined,
+      });
       return;
     }
     
