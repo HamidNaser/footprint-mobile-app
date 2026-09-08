@@ -42,6 +42,7 @@ import {
   adjacentDateKey,
   isSameDay as isSameCivilDay,
 } from '../utils/journalDate';
+import { syncBadgeStatus, SyncBadgeStatus } from '../utils/syncStatus';
 import { 
   DateSwipeContainer,
   QuickCaptureBar,
@@ -55,7 +56,7 @@ import { useJournalRealtime } from '../hooks/useJournalRealtime';
 import { useJournal } from '../hooks/useJournal';
 
 // Context
-import { useRealtime } from '../context';
+import { useRealtime, useSync } from '../context';
 import { useAuth } from '../context/AuthContext';
 
 // Services
@@ -106,8 +107,23 @@ const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
 /**
  * Sync status indicator
  */
-const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
-  if (pendingCount === 0 && isOnline) {
+const SyncStatusIndicator = ({ pendingCount, failedCount = 0, isOnline }) => {
+  const status = syncBadgeStatus({ pendingCount, failedCount, isOnline });
+
+  // Failures are not a backlog: they will not retry themselves and must not be
+  // reported as either "pending" or "Synced".
+  if (status === SyncBadgeStatus.FAILED) {
+    return (
+      <View style={styles.syncStatus}>
+        <Ionicons name="alert-circle" size={16} color="#FF3B30" />
+        <Text style={[styles.syncText, { color: '#FF3B30' }]}>
+          {failedCount === 1 ? '1 not sent' : `${failedCount} not sent`}
+        </Text>
+      </View>
+    );
+  }
+
+  if (status === SyncBadgeStatus.SYNCED) {
     return (
       <View style={styles.syncStatus}>
         <Ionicons name="cloud-done" size={16} color="#34C759" />
@@ -116,7 +132,7 @@ const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
     );
   }
 
-  if (pendingCount > 0) {
+  if (status === SyncBadgeStatus.PENDING) {
     return (
       <View style={styles.syncStatus}>
         <Ionicons name="cloud-upload" size={16} color="#FF9500" />
@@ -182,6 +198,9 @@ export default function JournalScreen({ navigation }) {
 
   // Real-time context
   const { isConnected, unreadNotificationCount } = useRealtime();
+
+  // Sync context
+  const { pendingCount, failedCount } = useSync();
   
   // Real-time journal updates
   const {
@@ -370,8 +389,10 @@ export default function JournalScreen({ navigation }) {
     return user;
   }, [user]);
   
-  // Calculate pending count from entries
-  const pendingCount = displayEntries.filter(e => e.syncStatus === 'pending').length;
+  // Pending work comes from the sync queue, not from the entries on screen. Counting
+  // rendered entries missed two whole categories: queued media uploads, which are not
+  // entries at all, and entries outside the current day's view. Photos could sit
+  // unsent indefinitely while this read "Synced".
   const isOnline = isConnected;
 
   /**
@@ -744,7 +765,11 @@ export default function JournalScreen({ navigation }) {
       {/* Top Header - Avatar in top-right */}
       <View style={styles.topHeader}>
         <View style={styles.topHeaderLeft}>
-          <SyncStatusIndicator pendingCount={pendingCount} isOnline={isOnline} />
+          <SyncStatusIndicator
+            pendingCount={pendingCount}
+            failedCount={failedCount}
+            isOnline={isOnline}
+          />
           {/* Only offered when there is something to find. A filter that always returns
               nothing reads as broken rather than as good news. */}
           {noStoryEntries.length > 0 && (

@@ -27,6 +27,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSync, SyncState } from '../../context';
+import { syncBadgeStatus, SyncBadgeStatus } from '../../utils/syncStatus';
 
 /**
  * Sync status configuration
@@ -88,17 +89,38 @@ export function SyncStatusBadge({
   onPress,
   style,
 }) {
-  const { 
-    syncState, 
-    isSyncing, 
+  const {
+    syncState,
+    isSyncing,
     lastSyncTime,
     triggerSync,
     isInitialized,
+    pendingCount,
+    failedCount,
   } = useSync();
 
-  // Get status config for current state
-  const config = STATUS_CONFIG[syncState] || STATUS_CONFIG[SyncState.IDLE];
+  // The queue decides, not syncState alone -- IDLE means "no sync running", which is
+  // not the same as "nothing left to send".
+  const status = syncBadgeStatus({ syncState, pendingCount, failedCount });
+  const config =
+    status === SyncBadgeStatus.PENDING
+      ? {
+          color: '#FF9500', // Amber: waiting, not broken
+          icon: 'cloud-upload-outline',
+          text: `${pendingCount} pending`,
+        }
+      : status === SyncBadgeStatus.FAILED && failedCount > 0
+      ? {
+          color: '#FF3B30',
+          icon: 'alert-circle',
+          text: failedCount === 1 ? '1 not sent' : `${failedCount} not sent`,
+        }
+      : STATUS_CONFIG[syncState] || STATUS_CONFIG[SyncState.IDLE];
   const { color, icon, text, showSpinner } = config;
+
+  // Queued or failed work is exactly what the banner exists to surface, so it must
+  // stay visible even though the engine is sitting idle.
+  const hasUnsentWork = pendingCount > 0 || failedCount > 0;
 
   // Handle retry/manual sync
   const handleRetry = async () => {
@@ -164,8 +186,9 @@ export function SyncStatusBadge({
 
   // Banner variant - full width banner
   if (variant === 'banner') {
-    // Don't show banner when idle/synced
-    if (syncState === SyncState.IDLE && !showLastSync) {
+    // Don't show banner when idle/synced -- but idle with work still queued is not
+    // synced, and hiding it there is what made the backlog invisible.
+    if (syncState === SyncState.IDLE && !showLastSync && !hasUnsentWork) {
       return null;
     }
 
@@ -186,7 +209,7 @@ export function SyncStatusBadge({
             )}
           </View>
         </View>
-        {showRetryButton && syncState === SyncState.ERROR && (
+        {showRetryButton && (syncState === SyncState.ERROR || hasUnsentWork) && (
           <TouchableOpacity
             style={[styles.retryButton, { backgroundColor: color }]}
             onPress={handleRetry}
