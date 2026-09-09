@@ -69,12 +69,25 @@ export function AuthProvider({ children }) {
    * rotated token is rejected, and ApiClient clears the session on a rejected refresh, so
    * the user was silently signed out mid-use with no way back but signing in again.
    *
-   * Persisting only. The tokens in React state are not updated from here: nothing renders
-   * from them, and setting state on every refresh would re-run the sync effect below for
-   * no reason.
+   * Both the React state and the stored copy move with the refresh.
+   *
+   * An earlier version persisted only, on the stated reasoning that nothing rendered from
+   * the state. That was simply wrong. RealtimeContext hands `accessToken` to SignalR, and
+   * fetchProfile and updateProfile use it for raw fetches that have no refresh-and-retry
+   * of their own. Freezing the state at whatever login produced meant all three kept
+   * presenting a token the server had already stopped accepting -- SignalR negotiate
+   * answered 401, and the profile screen failed to load -- while ApiClient's own calls
+   * carried on working, which made it look like anything but an auth problem.
    */
   useEffect(() => {
     return ApiClient.onTokensChanged(async ({ accessToken: freshAccess, refreshToken: freshRefresh }) => {
+      // State first, and not contingent on the storage write below: a consumer holding a
+      // stale token is the exact failure this exists to prevent.
+      if (freshAccess) {
+        setAccessToken(freshAccess);
+        if (freshRefresh) setRefreshToken(freshRefresh);
+      }
+
       try {
         const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
         // Cleared tokens are a sign-out, and sign-out removes this key itself. Writing a

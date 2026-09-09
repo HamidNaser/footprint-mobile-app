@@ -89,12 +89,17 @@ class SignalRServiceClass {
       return false;
     }
 
+    // Take the token before the early return below. accessTokenFactory reads this field
+    // at negotiate time, including on an automatic reconnect hours later -- so a
+    // connection that was live when the token refreshed would otherwise reconnect with
+    // the expired one and be rejected with 401.
+    this._accessToken = accessToken;
+
     if (this._connection && this._connectionState === ConnectionState.CONNECTED) {
       console.log('[SignalR] Already connected');
       return true;
     }
 
-    this._accessToken = accessToken;
     this._isManualDisconnect = false;
     this._reconnectAttempts = 0;
 
