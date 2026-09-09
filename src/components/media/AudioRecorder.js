@@ -77,6 +77,34 @@ const formatDuration = (millis) => {
 };
 
 /**
+ * Polls the recorder and reports its state upward.
+ *
+ * This exists purely so the polling can be *unmounted*. `useAudioRecorderState` polls the
+ * native recorder for as long as it is mounted, and expo-audio frees that native object
+ * when recording ends and this screen closes. A poll landing in the gap throws
+ *
+ *   FunctionCallException: Calling the 'get' function has failed
+ *   -> NotFoundException: Unable to find the native shared object associated with given
+ *      JavaScript object
+ *
+ * as an uncaught promise rejection with no call site anywhere in our own code, which is
+ * what made it look like a failure to save. It was not: it fired *after* the recording
+ * had been written, the entry created and the media queued, every single time -- because
+ * finishing a recording is precisely what tears this component down.
+ *
+ * Mounting the poll only while recording leaves nothing running to land late.
+ */
+const RecorderStatePoll = ({ recorder, onState }) => {
+  const state = useAudioRecorderState(recorder, 100);
+
+  useEffect(() => {
+    onState(state);
+  }, [state, onState]);
+
+  return null;
+};
+
+/**
  * AudioRecorder component
  */
 export const AudioRecorder = ({
@@ -102,7 +130,11 @@ export const AudioRecorder = ({
   // declared here and driven from the handlers below. `useAudioRecorderState` polls it for
   // duration and metering, replacing the two intervals expo-av needed.
   const recorder = useAudioRecorder(RecordingQuality[quality] || RecordingQuality.MEDIUM);
-  const recorderState = useAudioRecorderState(recorder, 100);
+
+  // Polling lives in a child so it can be unmounted the instant recording stops; see
+  // RecorderStatePoll. Nothing below needs this state when idle -- the one effect that
+  // reads it returns early unless isRecording.
+  const [recorderState, setRecorderState] = useState(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   // Request permissions on mount
@@ -382,6 +414,12 @@ export const AudioRecorder = ({
 
   return (
     <View style={[styles.container, style]}>
+      {/* Renders nothing; polls the recorder only while there is one to poll. */}
+      {(recordingState === RecordingState.RECORDING ||
+        recordingState === RecordingState.PAUSED) && (
+        <RecorderStatePoll recorder={recorder} onState={setRecorderState} />
+      )}
+
       {/* Waveform */}
       {renderWaveform()}
 
