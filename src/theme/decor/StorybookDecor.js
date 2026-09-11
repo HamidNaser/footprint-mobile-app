@@ -68,7 +68,10 @@ function Vines({ height, flip }) {
  * Full-bleed storybook page: paper gradient, distant skyline, edge vines and
  * the burgundy/gold double border from mobile-background.svg.
  */
-export function StorybookScreenBackground({ children }) {
+export function StorybookScreenBackground({ children, variant = 'full' }) {
+  // 'minimal' keeps the paper and the frame but drops the scenery, so a
+  // calendar grid or a map has its full width back.
+  const showScenery = variant !== 'minimal';
   const [size, setSize] = useState({ width: 0, height: 0 });
 
   const onLayout = useCallback((e) => {
@@ -106,7 +109,7 @@ export function StorybookScreenBackground({ children }) {
 
           {/* Distant skyline. The device aspect is within ~1% of the source
               viewBox, so stretching it is imperceptible at 16% opacity. */}
-          <Svg
+          {showScenery && <Svg
             style={StyleSheet.absoluteFill}
             width={width}
             height={height}
@@ -118,15 +121,19 @@ export function StorybookScreenBackground({ children }) {
                 <Path key={i} d={d} />
               ))}
             </G>
-          </Svg>
+          </Svg>}
 
           {/* Edge vines, aspect preserved */}
-          <View style={[styles.vine, { left: -width * 0.02 }]} pointerEvents="none">
-            <Vines height={height} />
-          </View>
-          <View style={[styles.vine, { right: -width * 0.02 }]} pointerEvents="none">
-            <Vines height={height} flip />
-          </View>
+          {showScenery && (
+            <>
+              <View style={[styles.vine, { left: -width * 0.02 }]} pointerEvents="none">
+                <Vines height={height} />
+              </View>
+              <View style={[styles.vine, { right: -width * 0.02 }]} pointerEvents="none">
+                <Vines height={height} flip />
+              </View>
+            </>
+          )}
 
           {/* Double border */}
           <View

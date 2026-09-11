@@ -39,45 +39,56 @@ import MemoryDetailModal from '../components/places/MemoryDetailModal';
 import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 import PlaceMapPreview from '../components/map/PlaceMapPreview';
+import {
+  useTheme,
+  useThemedStyles,
+  ThemeAvatar,
+  ThemeBackground,
+  ThemeHeader,
+  ThemeIcon,
+} from '../theme';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Theme colors
-const PRIMARY_COLOR = '#4361ee';
-const SURFACE_COLOR = '#FFFFFF';
-const TEXT_COLOR = '#333333';
-const TEXT_MUTED = '#666666';
-const BORDER_COLOR = '#e0e0e0';
-const BACKGROUND_COLOR = '#F0F4FF';
 
 /**
  * Header with search and avatar
  */
 const Header = memo(({ user, searchQuery, onSearchChange, onAvatarPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.header}>
-      <View style={styles.headerTop}>
-        <Text style={styles.headerTitle}>Places</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.headerIcon}>
-            <Ionicons name="notifications-outline" size={24} color="#333" />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={onAvatarPress}>
-            <Image
-              source={{ uri: user?.avatarUrl || 'https://randomuser.me/api/portraits/women/47.jpg' }}
-              style={styles.headerAvatar}
-            />
-          </TouchableOpacity>
-        </View>
-      </View>
-      
+      <ThemeHeader
+        title="Places"
+        right={
+          <>
+            <TouchableOpacity
+              style={styles.headerIcon}
+              accessibilityRole="button"
+              accessibilityLabel="Notifications"
+            >
+              <ThemeIcon name="notification" size={24} color={theme.colors.textPrimary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={onAvatarPress}
+              accessibilityRole="button"
+              accessibilityLabel="Profile"
+            >
+              <ThemeAvatar uri={user?.avatarUrl} name={user?.name} size={36} />
+            </TouchableOpacity>
+          </>
+        }
+      />
+
       {/* Search Box */}
       <View style={styles.searchContainer}>
-        <Ionicons name="search" size={18} color={TEXT_MUTED} style={styles.searchIcon} />
+        <ThemeIcon name="search" size={18} color={theme.colors.textSecondary} />
         <TextInput
           style={styles.searchInput}
           placeholder="Search for a place..."
-          placeholderTextColor={TEXT_MUTED}
+          placeholderTextColor={theme.colors.textSecondary}
           value={searchQuery}
           onChangeText={onSearchChange}
         />
@@ -90,6 +101,8 @@ const Header = memo(({ user, searchQuery, onSearchChange, onAvatarPress }) => {
  * Filter tab bar
  */
 const FilterTabs = memo(({ activeFilter, onFilterChange }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.filterContainer}>
       <ScrollView 
@@ -109,7 +122,7 @@ const FilterTabs = memo(({ activeFilter, onFilterChange }) => {
             <Ionicons 
               name={filter.icon} 
               size={16} 
-              color={activeFilter === filter.id ? '#FFF' : TEXT_MUTED} 
+              color={activeFilter === filter.id ? '#FFF' : theme.colors.textSecondary} 
             />
             <Text 
               style={[
@@ -130,6 +143,8 @@ const FilterTabs = memo(({ activeFilter, onFilterChange }) => {
  * Avatar group for year visitors
  */
 const AvatarGroup = memo(({ avatars, maxVisible = 4 }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const visibleAvatars = avatars.slice(0, maxVisible);
   const extraCount = avatars.length - maxVisible;
 
@@ -158,6 +173,8 @@ const AvatarGroup = memo(({ avatars, maxVisible = 4 }) => {
  * Year row showing year and visitors
  */
 const YearRow = memo(({ year, avatars, memoryCount, hasUntoldStory, onPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <TouchableOpacity style={styles.yearRow} onPress={onPress}>
       <View style={styles.yearLabelContainer}>
@@ -180,6 +197,8 @@ const YearRow = memo(({ year, avatars, memoryCount, hasUntoldStory, onPress }) =
  * Place card with image, name, and years panel
  */
 const PlaceCard = memo(({ place, isSelected, onPress, onYearPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.placeCardContainer}>
       {/* Place Info Card */}
@@ -227,6 +246,8 @@ const PlaceCard = memo(({ place, isSelected, onPress, onYearPress }) => {
  * Image carousel for place detail
  */
 const ImageCarousel = memo(({ photos }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const handleScroll = (event) => {
@@ -274,6 +295,8 @@ const ImageCarousel = memo(({ photos }) => {
  * Place detail modal
  */
 const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   // Before the early return: hooks cannot sit behind a conditional.
   const [tab, setTab] = useState('timeline');
   const [selectedPeopleIds, setSelectedPeopleIds] = useState([]);
@@ -309,7 +332,7 @@ const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
         {/* Modal Header */}
         <View style={styles.modalHeader}>
           <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn}>
-            <Ionicons name="close" size={24} color={TEXT_COLOR} />
+            <Ionicons name="close" size={24} color={theme.colors.textPrimary} />
           </TouchableOpacity>
           <Text style={styles.modalTitle}>{place.name}</Text>
           <View style={{ width: 40 }} />
@@ -328,11 +351,11 @@ const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
               </View>
               <View style={styles.statsRow}>
                 <View style={styles.statItem}>
-                  <Ionicons name="images-outline" size={18} color={PRIMARY_COLOR} />
+                  <Ionicons name="images-outline" size={18} color={theme.colors.primary} />
                   <Text style={styles.statText}>{totalMemories}</Text>
                 </View>
                 <View style={styles.statItem}>
-                  <Ionicons name="people-outline" size={18} color={PRIMARY_COLOR} />
+                  <Ionicons name="people-outline" size={18} color={theme.colors.primary} />
                   <Text style={styles.statText}>{totalVisitors}</Text>
                 </View>
               </View>
@@ -364,7 +387,7 @@ const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
                   <Ionicons
                     name={t.icon}
                     size={16}
-                    color={tab === t.id ? PRIMARY_COLOR : TEXT_MUTED}
+                    color={tab === t.id ? theme.colors.primary : theme.colors.textSecondary}
                   />
                   <Text style={[styles.tabText, tab === t.id && styles.tabTextActive]}>
                     {t.label}
@@ -406,6 +429,8 @@ const PlaceDetailModal = memo(({ place, visible, onClose, onOpenMemory }) => {
  * PlacesScreen component
  */
 export default function PlacesScreen() {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const navigation = useNavigation();
   const { user } = useAuth();
   
@@ -611,7 +636,7 @@ export default function PlacesScreen() {
   }, []);
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <ThemeBackground edges={['top']} variant="minimal">
       {/* Header with Search */}
       <Header 
         user={user} 
@@ -635,14 +660,14 @@ export default function PlacesScreen() {
           <RefreshControl
             refreshing={isRefreshing}
             onRefresh={handlePullToRefresh}
-            tintColor={PRIMARY_COLOR}
-            colors={[PRIMARY_COLOR]}
+            tintColor={theme.colors.primary}
+            colors={[theme.colors.primary]}
           />
         }
       >
         {isLoadingPlaces ? (
           <View style={styles.emptyState}>
-            <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+            <ActivityIndicator size="large" color={theme.colors.primary} />
           </View>
         ) : filteredPlaces.length > 0 ? (
           filteredPlaces.map((place, index) => (
@@ -671,7 +696,7 @@ export default function PlacesScreen() {
           </View>
         ) : (
           <View style={styles.emptyState}>
-            <Ionicons name="location-outline" size={48} color={TEXT_MUTED} />
+            <Ionicons name="location-outline" size={48} color={theme.colors.textSecondary} />
             <Text style={styles.emptyStateText}>No places yet</Text>
             <Text style={styles.emptyStateSubtext}>
               {searchQuery
@@ -738,23 +763,24 @@ export default function PlacesScreen() {
         suggestedPeople={potentialRequestRecipients.slice(0, 4)}
         onClose={() => setShowShareSheet(false)}
       />
-    </SafeAreaView>
+    </ThemeBackground>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme) =>
+  StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: BACKGROUND_COLOR,
+    backgroundColor: theme.colors.background,
   },
 
   // Header
   header: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     paddingHorizontal: 16,
     paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: BORDER_COLOR,
+    borderBottomColor: theme.colors.border,
   },
   headerTop: {
     flexDirection: 'row',
@@ -765,7 +791,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 24,
     fontWeight: '700',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   headerRight: {
     flexDirection: 'row',
@@ -780,7 +806,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 18,
     borderWidth: 2,
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
   },
 
   // Search
@@ -798,12 +824,12 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 14,
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
 
   // Filter Tabs
   filterContainer: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     paddingVertical: 8,
   },
   filterScroll: {
@@ -820,12 +846,12 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   filterTabActive: {
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
   },
   filterTabText: {
     fontSize: 13,
     fontWeight: '500',
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
   },
   filterTabTextActive: {
     color: '#FFF',
@@ -849,15 +875,15 @@ const styles = StyleSheet.create({
   // Place Card
   placeCard: {
     width: 90,
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 12,
     padding: 10,
     alignItems: 'center',
     borderWidth: 2,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   placeCardSelected: {
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
     backgroundColor: '#F7FAFF',
   },
   placeImageWrapper: {
@@ -869,7 +895,7 @@ const styles = StyleSheet.create({
     height: 50,
     borderRadius: 25,
     borderWidth: 2,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   placeBadge: {
     position: 'absolute',
@@ -877,7 +903,7 @@ const styles = StyleSheet.create({
     right: -4,
     width: 20,
     height: 20,
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
@@ -887,12 +913,12 @@ const styles = StyleSheet.create({
   placeName: {
     fontSize: 12,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
     textAlign: 'center',
   },
   placeSubtitle: {
     fontSize: 10,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     textAlign: 'center',
   },
 
@@ -900,18 +926,18 @@ const styles = StyleSheet.create({
   horizontalConnector: {
     width: 16,
     height: 2,
-    backgroundColor: BORDER_COLOR,
+    backgroundColor: theme.colors.border,
     marginTop: 35,
   },
 
   // Years Panel
   yearsPanel: {
     flex: 1,
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 10,
     padding: 8,
     borderWidth: 1,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   yearsPanelSelected: {
     borderColor: '#BCD8FF',
@@ -930,7 +956,7 @@ const styles = StyleSheet.create({
   yearLabel: {
     fontSize: 12,
     fontWeight: '600',
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
     minWidth: 36,
   },
 
@@ -955,7 +981,7 @@ const styles = StyleSheet.create({
   avatarExtraText: {
     fontSize: 10,
     fontWeight: '600',
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
   },
 
   // Memory Badge
@@ -968,7 +994,7 @@ const styles = StyleSheet.create({
   memoryBadgeText: {
     fontSize: 11,
     fontWeight: '600',
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
   },
 
   // Empty State
@@ -980,12 +1006,12 @@ const styles = StyleSheet.create({
   emptyStateText: {
     fontSize: 16,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
     marginTop: 12,
   },
   emptyStateSubtext: {
     fontSize: 13,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     marginTop: 4,
     textAlign: 'center',
     paddingHorizontal: 24,
@@ -995,7 +1021,7 @@ const styles = StyleSheet.create({
   // screenshot rather than needing a debugger attached.
   errorDetail: {
     fontSize: 12,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     marginTop: 6,
     fontVariant: ['tabular-nums'],
   },
@@ -1008,7 +1034,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 20,
     borderRadius: 20,
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
   },
 
   retryButtonText: {
@@ -1020,7 +1046,7 @@ const styles = StyleSheet.create({
   // Modal
   modalContainer: {
     flex: 1,
-    backgroundColor: BACKGROUND_COLOR,
+    backgroundColor: theme.colors.background,
   },
   modalHeader: {
     flexDirection: 'row',
@@ -1028,9 +1054,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderBottomWidth: 1,
-    borderBottomColor: BORDER_COLOR,
+    borderBottomColor: theme.colors.border,
   },
   modalCloseBtn: {
     padding: 4,
@@ -1038,7 +1064,7 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   modalContent: {
     flex: 1,
@@ -1064,10 +1090,10 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: BORDER_COLOR,
+    backgroundColor: theme.colors.border,
   },
   dotActive: {
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     width: 18,
   },
 
@@ -1084,11 +1110,11 @@ const styles = StyleSheet.create({
   placeInfoName: {
     fontSize: 22,
     fontWeight: '700',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   placeInfoSubtitle: {
     fontSize: 14,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     marginTop: 2,
   },
   statsRow: {
@@ -1107,7 +1133,7 @@ const styles = StyleSheet.create({
   statText: {
     fontSize: 13,
     fontWeight: '600',
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
   },
 
   // Map Preview
@@ -1120,7 +1146,7 @@ const styles = StyleSheet.create({
   },
   mapPreviewText: {
     fontSize: 12,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     marginTop: 8,
   },
 
@@ -1138,28 +1164,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: BORDER_COLOR,
-    backgroundColor: SURFACE_COLOR,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface,
   },
   tabActive: {
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
     backgroundColor: '#eef2ff',
   },
-  tabText: { fontSize: 13, fontWeight: '600', color: TEXT_MUTED },
-  tabTextActive: { color: PRIMARY_COLOR },
+  tabText: { fontSize: 13, fontWeight: '600', color: theme.colors.textSecondary },
+  tabTextActive: { color: theme.colors.primary },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
     marginBottom: 12,
   },
   timelineYear: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 10,
     padding: 12,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   timelineYearHeader: {
     flexDirection: 'row',
@@ -1170,11 +1196,11 @@ const styles = StyleSheet.create({
   timelineYearLabel: {
     fontSize: 16,
     fontWeight: '700',
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
   },
   timelineMemoryCount: {
     fontSize: 12,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
   },
 
   // Year label with story indicator

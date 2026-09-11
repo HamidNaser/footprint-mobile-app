@@ -13,18 +13,30 @@ import { getTimelineCandidates, getLifeline, getLifelineYear, mockLifeline } fro
 import { useAuth } from '../context/AuthContext';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
+import {
+  useTheme,
+  useThemedStyles,
+  ThemeBackground,
+  ThemeHeader,
+  ThemeIcon,
+} from '../theme';
 
-const C = {
-  bg: '#0a1424',
-  surface: '#111f36',
-  surface2: '#16263f',
-  border: '#1f3355',
-  text: '#e8eefc',
-  textMuted: '#8ea3c7',
-  accent: '#3b82f6',
-  gold: '#e0b978',
-  pink: '#ec4899',
-};
+/**
+ * This screen was authored against a fixed dark palette. Rather than rewrite
+ * every reference, the same shape is now derived from the active theme, so the
+ * timeline follows whichever theme is selected instead of fighting it.
+ */
+const paletteFor = (theme) => ({
+  bg: theme.colors.background,
+  surface: theme.colors.surface,
+  surface2: theme.colors.surfaceAlt,
+  border: theme.colors.border,
+  text: theme.colors.textPrimary,
+  textMuted: theme.colors.textSecondary,
+  accent: theme.colors.primary,
+  gold: theme.colors.accent,
+  pink: theme.colors.borderAccent,
+});
 
 // How many year-nodes are visible on the axis at once.
 const WINDOW = 5;
@@ -41,6 +53,9 @@ const monthYear = (iso) =>
     : '';
 
 function Avatar({ src, name, size = 32, style }) {
+  const theme = useTheme();
+  const C = paletteFor(theme);
+  const styles = useThemedStyles(makeStyles);
   const initial = (name || '?').trim().charAt(0).toUpperCase();
   const dim = { width: size, height: size, borderRadius: size / 2 };
   if (src) {
@@ -59,6 +74,9 @@ function Avatar({ src, name, size = 32, style }) {
  * "no recording yet" state otherwise. Playback wiring can attach to `url` later.
  */
 function AudioBar({ url }) {
+  const theme = useTheme();
+  const C = paletteFor(theme);
+  const styles = useThemedStyles(makeStyles);
   const [playing, setPlaying] = useState(false);
   if (!url) {
     return (
@@ -88,6 +106,9 @@ function AudioBar({ url }) {
  * `years` is newest-first, so paging left reveals older years.
  */
 function TimelineAxis({ years, activeYear, onSelect, windowStart, onPageLeft, onPageRight }) {
+  const theme = useTheme();
+  const C = paletteFor(theme);
+  const styles = useThemedStyles(makeStyles);
   const visible = years.slice(windowStart, windowStart + WINDOW);
   const canLeft = windowStart + WINDOW < years.length; // older years further in the list
   const canRight = windowStart > 0;
@@ -148,6 +169,9 @@ function TimelineAxis({ years, activeYear, onSelect, windowStart, onPageLeft, on
  * (photos + videos) at the bottom. A lineage lane keeps the generational story.
  */
 export default function TimelineScreen({ navigation }) {
+  const theme = useTheme();
+  const C = paletteFor(theme);
+  const styles = useThemedStyles(makeStyles);
   const { user } = useAuth();
   const [personId, setPersonId] = useState(null); // null = current user
   const [year, setYear] = useState(null);
@@ -265,7 +289,7 @@ export default function TimelineScreen({ navigation }) {
   const headerTitle = person?.isSelf ? `Your ${ordinal(age)} year` : person?.name || '';
 
   return (
-    <View style={styles.root}>
+    <ThemeBackground edges={['top']} variant="minimal">
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerTop}>
@@ -454,11 +478,13 @@ export default function TimelineScreen({ navigation }) {
           </ScrollView>
         )}
       </View>
-    </View>
+    </ThemeBackground>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme) => {
+  const C = paletteFor(theme);
+  return StyleSheet.create({
   milestones: {
     marginTop: 12,
     gap: 8,
@@ -616,6 +642,7 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingVertical: 28, gap: 8 },
   emptyText: { color: C.textMuted, fontSize: 13 },
 
-  avatarFallback: { backgroundColor: '#3a527a', alignItems: 'center', justifyContent: 'center' },
-  avatarFallbackText: { color: '#fff', fontWeight: '700' },
-});
+  avatarFallback: { backgroundColor: C.surface2, alignItems: 'center', justifyContent: 'center' },
+    avatarFallbackText: { color: C.text, fontWeight: '700' },
+  });
+};

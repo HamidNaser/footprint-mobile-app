@@ -36,6 +36,14 @@ import { ConnectionStatusIndicator } from '../components/common/ConnectionStatus
 import { NotificationBadge } from '../components/common/NotificationBadge';
 import { SyncStatusBadge } from '../components/common/SyncStatusBadge';
 import {
+  useTheme,
+  useThemedStyles,
+  ThemeAvatar,
+  ThemeBackground,
+  ThemeHeader,
+  ThemeIcon,
+} from '../theme';
+import {
   toDateKey,
   parseDateKey,
   adjacentDateKey,
@@ -72,12 +80,13 @@ import { entriesNeedingStory } from '../utils/entryNarrative';
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Primary color
-const PRIMARY_COLOR = '#4361ee';
 
 /**
  * Date selector component
  */
 const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const formattedDate = useMemo(() => {
     const d = new Date(date);
     return d.toLocaleDateString(undefined, {
@@ -106,6 +115,8 @@ const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
  * Sync status indicator
  */
 const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (pendingCount === 0 && isOnline) {
     return (
       <View style={styles.syncStatus}>
@@ -137,22 +148,28 @@ const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
 /**
  * Empty state component
  */
-const EmptyFeed = () => (
+const EmptyFeed = () => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
+  return (
   <View style={styles.emptyState}>
     <View style={styles.emptyIcon}>
-      <Ionicons name="book-outline" size={48} color={PRIMARY_COLOR} />
+      <Ionicons name="book-outline" size={48} color={theme.colors.primary} />
     </View>
     <Text style={styles.emptyTitle}>No entries yet</Text>
     <Text style={styles.emptySubtitle}>
       Start journaling your thoughts, photos, and memories
     </Text>
   </View>
-);
+  );
+};
 
 /**
  * Main JournalScreen component
  */
 export default function JournalScreen({ navigation }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   // Auth context for user info
   const { user: authUser, isAuthenticated } = useAuth();
   
@@ -703,7 +720,7 @@ export default function JournalScreen({ navigation }) {
         }}
         onReact={handleReact}
         onAddResponse={handleAddResponse}
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
     );
   }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
@@ -733,14 +750,37 @@ export default function JournalScreen({ navigation }) {
         onLocationPress={(location) => {
           console.log('Open map:', location);
         }}
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
     );
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Top Header - Avatar in top-right */}
+    <ThemeBackground edges={['top']} variant="minimal">
+      <ThemeHeader
+        title="Journal"
+        right={
+          <>
+            <TouchableOpacity
+              style={styles.headerIcon}
+              accessibilityRole="button"
+              accessibilityLabel="Notifications"
+            >
+              <ThemeIcon name="notification" size={24} color={theme.colors.textPrimary} />
+              {unreadNotificationCount > 0 && <NotificationBadge size="small" />}
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => navigation.navigate('Profile')}
+              accessibilityRole="button"
+              accessibilityLabel="Profile"
+            >
+              <ThemeAvatar uri={user.avatarUrl} name={user.name} size={36} />
+            </TouchableOpacity>
+          </>
+        }
+      />
+
+      {/* Sync state and filters */}
       <View style={styles.topHeader}>
         <View style={styles.topHeaderLeft}>
           <SyncStatusIndicator pendingCount={pendingCount} isOnline={isOnline} />
@@ -757,27 +797,13 @@ export default function JournalScreen({ navigation }) {
               <Ionicons
                 name="mic-outline"
                 size={13}
-                color={noStoryOnly ? '#FFF' : PRIMARY_COLOR}
+                color={noStoryOnly ? '#FFF' : theme.colors.primary}
               />
               <Text style={[styles.noStoryChipText, noStoryOnly && styles.noStoryChipTextActive]}>
                 No story yet · {noStoryEntries.length}
               </Text>
             </TouchableOpacity>
           )}
-        </View>
-        <View style={styles.topHeaderRight}>
-          <TouchableOpacity style={styles.headerIcon}>
-            <Ionicons name="notifications-outline" size={24} color="#333" />
-            {unreadNotificationCount > 0 && (
-              <NotificationBadge size="small" />
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-            <Image
-              source={{ uri: user.avatarUrl }}
-              style={styles.headerAvatar}
-            />
-          </TouchableOpacity>
         </View>
       </View>
 
@@ -825,7 +851,7 @@ export default function JournalScreen({ navigation }) {
       >
         {isInitializing || loading ? (
           <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+            <ActivityIndicator size="large" color={theme.colors.primary} />
             <Text style={styles.loadingText}>Loading journal...</Text>
           </View>
         ) : (
@@ -839,7 +865,7 @@ export default function JournalScreen({ navigation }) {
               <RefreshControl
                 refreshing={refreshing}
                 onRefresh={handleRefresh}
-                tintColor={PRIMARY_COLOR}
+                tintColor={theme.colors.primary}
               />
             }
             onEndReached={loadMore}
@@ -855,7 +881,7 @@ export default function JournalScreen({ navigation }) {
         onCameraPress={handleQuickCamera}
         onMicPress={handleQuickMic}
         placeholder="Message..."
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
 
       {/* Entry Gallery Modal - Shows map + photos/videos for a specific entry */}
@@ -868,7 +894,7 @@ export default function JournalScreen({ navigation }) {
         }}
         onPhotoPress={handleGalleryPhotoPress}
         onVideoPress={handleGalleryVideoPress}
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
 
       {/* Full Screen Media Viewer */}
@@ -889,7 +915,7 @@ export default function JournalScreen({ navigation }) {
         onClose={() => setShowComposeModal(false)}
         onSave={handleSaveEntry}
         initialMode={composeMode}
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
 
       {/* Calendar Picker Modal */}
@@ -899,13 +925,14 @@ export default function JournalScreen({ navigation }) {
         onSelectDate={(date) => setSelectedDate(date)}
         onClose={() => setShowCalendarPicker(false)}
         markedDates={markedDates}
-        primaryColor={PRIMARY_COLOR}
+        primaryColor={theme.colors.primary}
       />
-    </SafeAreaView>
+    </ThemeBackground>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme) =>
+  StyleSheet.create({
   noStoryChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -915,14 +942,14 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
     backgroundColor: '#FFF',
   },
   noStoryChipActive: {
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
   },
   noStoryChipText: {
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
     fontSize: 12,
     fontWeight: '600',
   },
@@ -939,7 +966,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     paddingVertical: 10,
     paddingHorizontal: 16,
     gap: 8,
@@ -976,7 +1003,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 18,
     borderWidth: 2,
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
   },
 
   // Sync status
@@ -1030,7 +1057,7 @@ const styles = StyleSheet.create({
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: PRIMARY_COLOR + '15',
+    backgroundColor: theme.colors.primary + '15',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
