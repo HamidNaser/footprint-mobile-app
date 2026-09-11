@@ -2,7 +2,6 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Ionicons } from '@expo/vector-icons';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
 
 // Screen imports
@@ -24,45 +23,30 @@ import EventFormScreen from '../screens/EventFormScreen';
 // Auth context
 import { useAuth } from '../context/AuthContext';
 
+// Theme
+import { useTheme, ThemeBottomNavigation } from '../theme';
+
+/**
+ * Route -> semantic icon name. The active theme decides what each one looks
+ * like, so adding a theme never touches this map.
+ */
+const ROUTE_ICONS = {
+  Home: 'home',
+  Journal: 'journal',
+  Family: 'family',
+  Friends: 'friends',
+  Places: 'places',
+  Timeline: 'timeline',
+};
+
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
 function MainTabs() {
   return (
     <Tab.Navigator
-      screenOptions={({ route }) => ({
-        tabBarIcon: ({ focused, color, size }) => {
-          let iconName;
-
-          switch (route.name) {
-            case 'Home':
-              iconName = focused ? 'home' : 'home-outline';
-              break;
-            case 'Journal':
-              iconName = focused ? 'book' : 'book-outline';
-              break;
-            case 'Family':
-              iconName = focused ? 'people' : 'people-outline';
-              break;
-            case 'Friends':
-              iconName = focused ? 'person-add' : 'person-add-outline';
-              break;
-            case 'Places':
-              iconName = focused ? 'map' : 'map-outline';
-              break;
-            case 'Timeline':
-              iconName = focused ? 'git-branch' : 'git-branch-outline';
-              break;
-            default:
-              iconName = 'ellipse';
-          }
-
-          return <Ionicons name={iconName} size={size} color={color} />;
-        },
-        tabBarActiveTintColor: '#2B7DE9',
-        tabBarInactiveTintColor: 'gray',
-        headerShown: false,
-      })}
+      screenOptions={{ headerShown: false }}
+      tabBar={(props) => <ThemeBottomNavigation {...props} routeIcons={ROUTE_ICONS} />}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Journal" component={JournalScreen} />
@@ -76,12 +60,13 @@ function MainTabs() {
 
 export default function AppNavigator() {
   const { isAuthenticated, isLoading } = useAuth();
+  const theme = useTheme();
 
   // Show loading screen while checking auth status
   if (isLoading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#2B7DE9" />
+      <View style={[styles.loadingContainer, { backgroundColor: theme.colors.background }]}>
+        <ActivityIndicator size="large" color={theme.colors.primary} />
       </View>
     );
   }
@@ -163,6 +148,5 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#fff',
   },
 });

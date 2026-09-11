@@ -19,55 +19,37 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { FRIENDS_LIST_DATA, FRIENDS_TREE_DATA } from '../data/friendsData';
 import { useAuth } from '../context/AuthContext';
 import { getFriends } from '../services/SocialService';
+import {
+  useTheme,
+  useThemedStyles,
+  ThemeAvatar,
+  ThemeBackground,
+  ThemeFloatingButton,
+  ThemeHeader,
+  ThemeIcon,
+  ThemeTabBar,
+} from '../theme';
 
-// Theme colors
-const PRIMARY_COLOR = '#4361ee';
-const BORDER_COLOR = '#e0e0e0';
-const TEXT_COLOR = '#333';
-const TEXT_MUTED = '#888';
-const SURFACE_COLOR = '#fff';
-const LINK_COLOR = '#2563eb';
-
-/**
- * View Toggle Component
- */
-const ViewToggle = memo(({ activeView, onViewChange }) => {
-  return (
-    <View style={styles.toggleContainer}>
-      <TouchableOpacity
-        style={[styles.toggleButton, activeView === 'list' && styles.toggleButtonActive]}
-        onPress={() => onViewChange('list')}
-      >
-        <Text style={[styles.toggleText, activeView === 'list' && styles.toggleTextActive]}>
-          List
-        </Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={[styles.toggleButton, activeView === 'tree' && styles.toggleButtonActive]}
-        onPress={() => onViewChange('tree')}
-      >
-        <Text style={[styles.toggleText, activeView === 'tree' && styles.toggleTextActive]}>
-          Tree
-        </Text>
-      </TouchableOpacity>
-    </View>
-  );
-});
+const VIEW_TABS = [
+  { key: 'list', label: 'List' },
+  { key: 'tree', label: 'Tree' },
+];
 
 /**
  * Friend Detail Row - Shows icon + label + value
  */
 const FriendDetailRow = memo(({ iconName, label, value, isLink }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (!value) return null;
 
   return (
     <View style={styles.detailRow}>
-      <Ionicons name={iconName} size={14} color={TEXT_MUTED} style={styles.detailIcon} />
+      <Ionicons name={iconName} size={14} color={theme.colors.textSecondary} style={styles.detailIcon} />
       <Text style={styles.detailLabel}>{label}</Text>
       <Text style={[styles.detailValue, isLink && styles.detailValueLink]} numberOfLines={1}>
         {value}
@@ -80,6 +62,8 @@ const FriendDetailRow = memo(({ iconName, label, value, isLink }) => {
  * Friend List Card - Detailed card for list view
  */
 const FriendListCard = memo(({ friend, isSelected, onPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <TouchableOpacity
       style={[styles.friendListCard, isSelected && styles.friendListCardSelected]}
@@ -91,7 +75,7 @@ const FriendListCard = memo(({ friend, isSelected, onPress }) => {
         <Image source={{ uri: friend.avatar }} style={styles.friendListAvatar} />
         <Text style={styles.friendListName} numberOfLines={1}>{friend.name}</Text>
         <TouchableOpacity style={styles.addButton}>
-          <Ionicons name="person-add" size={14} color="#fff" />
+          <ThemeIcon name="add-person" size={14} color={theme.colors.onPrimary} active />
         </TouchableOpacity>
       </View>
 
@@ -131,10 +115,12 @@ const FriendListCard = memo(({ friend, isSelected, onPress }) => {
  * List View - Detailed friend cards
  */
 const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshing, onRefresh }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   if (loading && (!data || data.length === 0)) {
     return (
       <View style={styles.centerFill}>
-        <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+        <ActivityIndicator size="large" color={theme.colors.primary} />
       </View>
     );
   }
@@ -144,7 +130,7 @@ const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshin
       style={styles.listScrollView}
       showsVerticalScrollIndicator={false}
       refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={PRIMARY_COLOR} />
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.primary} />
       }
     >
       <View style={styles.listContainer}>
@@ -165,6 +151,8 @@ const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshin
  * Friend Card - Small card for tree view
  */
 const FriendCard = memo(({ friend, onPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <TouchableOpacity
       style={styles.friendCard}
@@ -177,7 +165,7 @@ const FriendCard = memo(({ friend, onPress }) => {
         <Text style={styles.friendCardLocation} numberOfLines={1}>{friend.location}</Text>
       </View>
       <TouchableOpacity style={styles.friendCardAction}>
-        <Ionicons name="person-circle-outline" size={20} color={PRIMARY_COLOR} />
+        <Ionicons name="person-circle-outline" size={20} color={theme.colors.primary} />
       </TouchableOpacity>
     </TouchableOpacity>
   );
@@ -189,6 +177,8 @@ const FriendCard = memo(({ friend, onPress }) => {
  * - Tap individual friend = view that friend's journal
  */
 const OrganizationPanel = memo(({ org, onOrgPress, onFriendPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.orgPanel}>
       {/* Org Header - Tap for group journal */}
@@ -199,7 +189,7 @@ const OrganizationPanel = memo(({ org, onOrgPress, onFriendPress }) => {
       >
         <Image source={{ uri: org.logo }} style={styles.orgLogo} resizeMode="contain" />
         <Text style={styles.orgName}>{org.name}</Text>
-        <Ionicons name="chevron-forward" size={16} color={TEXT_MUTED} />
+        <Ionicons name="chevron-forward" size={16} color={theme.colors.textSecondary} />
       </TouchableOpacity>
 
       {/* Friends */}
@@ -216,11 +206,13 @@ const OrganizationPanel = memo(({ org, onOrgPress, onFriendPress }) => {
  * Category Icon Card - Left side showing category icon (like FamilyHeadCard)
  */
 const CategoryIconCard = memo(({ category, isLast }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.categoryIconWrapper}>
       {/* Category Icon Circle */}
       <View style={styles.categoryIconCircle}>
-        <Ionicons name={category.icon} size={18} color="#fff" />
+        <Ionicons name={category.icon} size={18} color={theme.colors.onPrimary} />
       </View>
 
       {/* Vertical connector to next category (dashed line) */}
@@ -233,6 +225,8 @@ const CategoryIconCard = memo(({ category, isLast }) => {
  * Category Organizations - Right side showing organizations (like FamilyBranchMembers)
  */
 const CategoryOrganizations = memo(({ organizations, onOrgPress, onFriendPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.categoryOrgsContainer}>
       {/* Horizontal connector line */}
@@ -257,6 +251,8 @@ const CategoryOrganizations = memo(({ organizations, onOrgPress, onFriendPress }
  * Mirrors FamilyHeadGroup structure
  */
 const CategorySection = memo(({ category, isLast, onOrgPress, onFriendPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <View style={styles.categoryGroup}>
       <CategoryIconCard category={category} isLast={isLast} />
@@ -274,6 +270,8 @@ const CategorySection = memo(({ category, isLast, onOrgPress, onFriendPress }) =
  * Mirrors FamilyScreen BranchView structure
  */
 const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   return (
     <ScrollView style={styles.treeScrollView} showsVerticalScrollIndicator={false}>
       <View style={styles.treeContainer}>
@@ -285,7 +283,7 @@ const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
               <View style={styles.userAvatarWrapper}>
                 <Image source={{ uri: data.user.avatar }} style={styles.userAvatar} />
                 <View style={styles.userBadge}>
-                  <Ionicons name="people" size={12} color="#fff" />
+                  <ThemeIcon name="family" size={12} color={theme.colors.onPrimary} active />
                 </View>
               </View>
               <Text style={styles.userName}>{data.user.name}</Text>
@@ -317,18 +315,20 @@ const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
 /**
  * Location FAB
  */
-const LocationFAB = memo(({ onPress }) => {
-  return (
-    <TouchableOpacity style={styles.fab} onPress={onPress}>
-      <Ionicons name="location" size={24} color="#fff" />
-    </TouchableOpacity>
-  );
-});
+const LocationFAB = memo(({ onPress }) => (
+  <ThemeFloatingButton
+    icon="location"
+    onPress={onPress}
+    accessibilityLabel="Show friends on map"
+  />
+));
 
 /**
  * Main FriendsScreen Component
  */
 export default function FriendsScreen({ navigation }) {
+  const theme = useTheme();
+  const styles = useThemedStyles(makeStyles);
   const { user, accessToken } = useAuth();
   const [activeView, setActiveView] = useState('list');
   const [selectedFriend, setSelectedFriend] = useState(null);
@@ -409,25 +409,35 @@ export default function FriendsScreen({ navigation }) {
   }, []);
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Header with Avatar */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Friends</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.headerIcon}>
-            <Ionicons name="notifications-outline" size={24} color="#333" />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-            <Image
-              source={{ uri: user?.avatarUrl }}
-              style={styles.headerAvatar}
-            />
-          </TouchableOpacity>
-        </View>
-      </View>
+    <ThemeBackground edges={['top']} variant="full">
+      <ThemeHeader
+        title="Friends"
+        right={
+          <>
+            <TouchableOpacity
+              style={styles.headerIcon}
+              accessibilityRole="button"
+              accessibilityLabel="Notifications"
+            >
+              <ThemeIcon name="notification" size={24} color={theme.colors.textPrimary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => navigation.navigate('Profile')}
+              accessibilityRole="button"
+              accessibilityLabel="Profile"
+            >
+              <ThemeAvatar uri={user?.avatarUrl} name={user?.name} size={36} />
+            </TouchableOpacity>
+          </>
+        }
+      />
 
-      {/* View Toggle */}
-      <ViewToggle activeView={activeView} onViewChange={setActiveView} />
+      <ThemeTabBar
+        tabs={VIEW_TABS}
+        value={activeView}
+        onChange={setActiveView}
+        style={styles.viewToggle}
+      />
 
       {/* Content */}
       {activeView === 'list' ? (
@@ -449,11 +459,16 @@ export default function FriendsScreen({ navigation }) {
 
       {/* Location FAB */}
       <LocationFAB onPress={handleLocationPress} />
-    </SafeAreaView>
+    </ThemeBackground>
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (theme) =>
+  StyleSheet.create({
+    viewToggle: {
+      marginHorizontal: theme.spacing.lg,
+      marginBottom: theme.spacing.lg,
+    },
   container: {
     flex: 1,
     backgroundColor: '#f8f9fa',
@@ -470,7 +485,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   headerRight: {
     flexDirection: 'row',
@@ -485,7 +500,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 18,
     borderWidth: 2,
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
   },
 
   // View Toggle
@@ -504,7 +519,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   toggleButtonActive: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
@@ -514,10 +529,10 @@ const styles = StyleSheet.create({
   toggleText: {
     fontSize: 14,
     fontWeight: '500',
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
   },
   toggleTextActive: {
-    color: PRIMARY_COLOR,
+    color: theme.colors.primary,
   },
 
   // List View
@@ -536,15 +551,15 @@ const styles = StyleSheet.create({
 
   // Friend List Card
   friendListCard: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
     padding: 12,
     marginBottom: 12,
   },
   friendListCardSelected: {
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
   },
   friendListCardHeader: {
     flexDirection: 'row',
@@ -556,20 +571,20 @@ const styles = StyleSheet.create({
     height: 48,
     borderRadius: 24,
     borderWidth: 2,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   friendListName: {
     flex: 1,
     fontSize: 16,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
     marginLeft: 12,
   },
   addButton: {
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -588,16 +603,16 @@ const styles = StyleSheet.create({
   },
   detailLabel: {
     fontSize: 12,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     width: 60,
   },
   detailValue: {
     flex: 1,
     fontSize: 12,
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   detailValueLink: {
-    color: LINK_COLOR,
+    color: theme.colors.primary,
   },
 
   // Tree View - mirrors Family screen structure
@@ -621,10 +636,10 @@ const styles = StyleSheet.create({
 
   // User Profile Card
   userProfileCard: {
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: PRIMARY_COLOR,
+    borderColor: theme.colors.primary,
     padding: 12,
     alignItems: 'center',
     width: 100,
@@ -638,7 +653,7 @@ const styles = StyleSheet.create({
     height: 60,
     borderRadius: 30,
     borderWidth: 2,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   userBadge: {
     position: 'absolute',
@@ -647,21 +662,21 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: SURFACE_COLOR,
+    borderColor: theme.colors.surface,
   },
   userName: {
     fontSize: 14,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
     textAlign: 'center',
   },
   userBirth: {
     fontSize: 12,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
     marginTop: 2,
   },
 
@@ -670,7 +685,7 @@ const styles = StyleSheet.create({
     width: 2,
     height: 24,
     borderLeftWidth: 2,
-    borderLeftColor: BORDER_COLOR,
+    borderLeftColor: theme.colors.border,
     borderStyle: 'dashed',
   },
 
@@ -696,7 +711,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: PRIMARY_COLOR,
+    backgroundColor: theme.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -706,7 +721,7 @@ const styles = StyleSheet.create({
     width: 2,
     flex: 1,
     minHeight: 24,
-    backgroundColor: BORDER_COLOR,
+    backgroundColor: theme.colors.border,
   },
 
   // Category Organizations Container (like branchMembersContainer in Family)
@@ -720,7 +735,7 @@ const styles = StyleSheet.create({
   categoryHorizontalConnector: {
     width: 16,
     height: 2,
-    backgroundColor: BORDER_COLOR,
+    backgroundColor: theme.colors.border,
     marginTop: 17, // Center with icon (36/2 - 1)
   },
 
@@ -733,10 +748,10 @@ const styles = StyleSheet.create({
   // Organization Panel
   orgPanel: {
     flex: 1,
-    backgroundColor: SURFACE_COLOR,
+    backgroundColor: theme.colors.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
     padding: 12,
   },
   orgHeader: {
@@ -745,7 +760,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     paddingBottom: 8,
     borderBottomWidth: 1,
-    borderBottomColor: BORDER_COLOR,
+    borderBottomColor: theme.colors.border,
   },
   orgLogo: {
     width: 24,
@@ -755,7 +770,7 @@ const styles = StyleSheet.create({
   orgName: {
     fontSize: 14,
     fontWeight: '600',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   orgFriends: {
     gap: 8,
@@ -772,7 +787,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderRadius: 18,
     borderWidth: 1,
-    borderColor: BORDER_COLOR,
+    borderColor: theme.colors.border,
   },
   friendCardInfo: {
     flex: 1,
@@ -781,11 +796,11 @@ const styles = StyleSheet.create({
   friendCardName: {
     fontSize: 13,
     fontWeight: '500',
-    color: TEXT_COLOR,
+    color: theme.colors.textPrimary,
   },
   friendCardLocation: {
     fontSize: 11,
-    color: TEXT_MUTED,
+    color: theme.colors.textSecondary,
   },
   friendCardAction: {
     padding: 4,

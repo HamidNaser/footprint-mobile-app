@@ -29,6 +29,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 
 import SettingsService, { StorageMode, Theme } from '../services/SettingsService';
+import { useThemeControls } from '../theme';
 import { SettingsApi, LOCATION_PRECISION_OPTIONS } from '../api';
 import { useAuth } from '../context/AuthContext';
 
@@ -290,6 +291,8 @@ export default function SettingsScreen({ navigation }) {
   // State
   const [storageMode, setStorageMode] = useState(StorageMode.CLOUD_SYNC);
   const [theme, setTheme] = useState(Theme.SYSTEM);
+  // Visual theme (skin) -- separate from the light/dark appearance mode above.
+  const { themeKey, setThemeKey, options: themeOptions } = useThemeControls();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
   const [lastSyncStatus, setLastSyncStatus] = useState('');
@@ -445,6 +448,16 @@ export default function SettingsScreen({ navigation }) {
       setShowStorageModal(false);
     }
   }, []);
+
+  /**
+   * Cycle the visual theme (skin). Reads the registry rather than a hardcoded
+   * list, so a newly registered theme shows up here without a code change.
+   */
+  const handleAppThemeChange = useCallback(() => {
+    const keys = themeOptions.map((o) => o.key);
+    const next = keys[(keys.indexOf(themeKey) + 1) % keys.length];
+    setThemeKey(next);
+  }, [themeKey, themeOptions, setThemeKey]);
 
   /**
    * Handle theme change
@@ -755,6 +768,15 @@ export default function SettingsScreen({ navigation }) {
             title="Theme"
             value={themeConfig.title}
             onPress={handleThemeChange}
+          />
+          <SettingsRow
+            icon="color-wand"
+            iconColor="#AF52DE"
+            title="Style"
+            value={
+              (themeOptions.find((o) => o.key === themeKey) || themeOptions[0]).label
+            }
+            onPress={handleAppThemeChange}
           />
         </View>
 
