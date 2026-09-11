@@ -1,6 +1,6 @@
 # FootPrint Mobile App
 
-Expo / React Native app (SDK 54). Ships to TestFlight and the App Store.
+Expo / React Native app (SDK 57). Ships to TestFlight and the App Store.
 
 ## Working style — read this first
 
@@ -38,7 +38,10 @@ If a change needs a build to validate, say so in the PR and stop there.
   Do not add `ios.buildNumber` or `android.versionCode` back to `app.json` —
   they are ignored and EAS warns about them. `version` (marketing) is manual.
 - **Native modules need a real build.** Anything touching native code cannot be
-  validated locally or shipped as an OTA update.
+  validated locally or shipped as an OTA update. Expo Go is worse than useless
+  here: it carries its own native modules and will happily satisfy a dependency
+  the app never declared, so the thing works on a phone and ships broken. See
+  [docs/TESTING.md](docs/TESTING.md) for the preview-build loop that catches it.
 - **Web has separate variants.** `*.web.js` files exist alongside native ones.
   Metro is configured so iOS does not resolve `.web.js` over native modules —
   do not add web extensions to `sourceExts`.
