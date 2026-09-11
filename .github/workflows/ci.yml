@@ -9,7 +9,10 @@ on:
     branches: [main]
 
 env:
-  NODE_VERSION: '20'
+  # Matched to release.yml, which had to move to 22 for eas-cli. Nothing here needs
+  # 22 yet, but two workflows disagreeing about the runtime is how a job passes in CI
+  # and then fails in the release -- and GitHub is deprecating Node 20 regardless.
+  NODE_VERSION: '22'
 
 concurrency:
   # A newer push to the same ref makes the in-flight run irrelevant.

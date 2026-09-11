@@ -39,7 +39,12 @@ on:
         type: boolean
 
 env:
-  NODE_VERSION: '20'
+  # 22, not 20. eas-cli pulls @oclif/plugin-autocomplete, which declares
+  # "node": ">=22.0.0" -- so on 20 the release failed while *installing the CLI*,
+  # before it had seen a line of the app. Nothing in the build had gone wrong; the
+  # toolchain simply could not be assembled. GitHub is also deprecating Node 20 on
+  # its runners, so this was going to arrive on its own shortly.
+  NODE_VERSION: '22'
 
 concurrency:
   # Never let two releases race -- build numbers and store uploads are not
