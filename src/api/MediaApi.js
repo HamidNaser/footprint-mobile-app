@@ -115,22 +115,21 @@ class MediaApiClass {
       size: fileInfo.size,
     });
 
-    // Step 2: Upload to S3 using presigned URL
+    // Step 2: Upload to S3 using presigned URL. Signed content type, not our own guess.
     await this._uploadToS3(
       presignedData.uploadUrl,
       localUri,
-      mimeType,
+      presignedData.contentType || mimeType,
       fileInfo.size,
       onProgress
     );
 
     // Step 3: Notify backend that upload is complete
     const result = await this._completeUpload({
-      uploadId: presignedData.uploadId,
-      entryId,
-      type,
-      filename: actualFilename,
-      size: fileInfo.size,
+      s3Key: presignedData.s3Key,
+      width: mediaInfo.width,
+      height: mediaInfo.height,
+      duration: mediaInfo.duration,
     });
 
     console.log('[MediaApi] Upload complete:', result);
@@ -239,18 +238,26 @@ class MediaApiClass {
   async _requestUploadUrl(params) {
     const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.REQUEST_UPLOAD_URL);
     
+    // The server's UploadMediaRequest is (Type, FileName, FileSize). This sent mediaType
+    // and size, which match nothing -- .NET binds case-insensitively but not by synonym --
+    // so Type and FileSize arrived empty on a non-nullable record and every upload was
+    // rejected with 400 before a byte was sent. entryId and contentType are not on the
+    // contract at all and are dropped rather than sent to be ignored.
     const response = await ApiClient.post(url, {
-      mediaType: params.type,
-      entryId: params.entryId,
-      filename: params.filename,
-      contentType: params.contentType,
-      size: params.size,
+      type: params.type,
+      fileName: params.filename,
+      fileSize: params.size,
     });
 
     return {
       uploadUrl: response.uploadUrl,
-      uploadId: response.uploadId,
+      // s3Key, not uploadId -- the latter does not exist in the response, so completing an
+      // upload was sending undefined.
+      s3Key: response.s3Key,
       expiresAt: response.expiresAt,
+      // The exact Content-Type the URL was signed with. S3 rejects the PUT on a signature
+      // mismatch, so this must be sent verbatim rather than derived a second time.
+      contentType: response.contentType,
     };
   }
 
@@ -305,12 +312,13 @@ class MediaApiClass {
   async _completeUpload(params) {
     const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.COMPLETE_UPLOAD);
 
+    // CompleteUploadRequest is (S3Key, Width, Height, Duration). Everything previously
+    // sent here was invented.
     const response = await ApiClient.post(url, {
-      uploadId: params.uploadId,
-      entryId: params.entryId,
-      mediaType: params.type,
-      filename: params.filename,
-      size: params.size,
+      s3Key: params.s3Key,
+      width: params.width ?? null,
+      height: params.height ?? null,
+      duration: params.duration ?? null,
     });
 
     return {

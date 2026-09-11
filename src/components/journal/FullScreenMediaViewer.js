@@ -22,7 +22,8 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Video, ResizeMode } from 'expo-av';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import { useEvent } from 'expo';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -43,26 +44,30 @@ const PhotoItem = memo(({ photo, width }) => (
  * Single video item with playback controls
  */
 const VideoItem = memo(({ video, width, isActive }) => {
-  const videoRef = useRef(null);
-  const [status, setStatus] = useState({});
   const [showControls, setShowControls] = useState(true);
 
-  const togglePlayPause = useCallback(async () => {
-    if (!videoRef.current) return;
-    
-    if (status.isPlaying) {
-      await videoRef.current.pauseAsync();
+  // expo-video replaces expo-av's ref-and-status pattern with a player object that
+  // owns its own state. Position and duration are seconds here, not milliseconds.
+  const player = useVideoPlayer(
+    { uri: video.localPath || video.serverUrl },
+    (p) => { p.loop = true; }
+  );
+  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: false });
+
+  const togglePlayPause = useCallback(() => {
+    if (isPlaying) {
+      player.pause();
     } else {
-      await videoRef.current.playAsync();
+      player.play();
     }
-  }, [status.isPlaying]);
+  }, [isPlaying, player]);
 
   // Pause when not active
   React.useEffect(() => {
-    if (!isActive && videoRef.current && status.isPlaying) {
-      videoRef.current.pauseAsync();
+    if (!isActive && isPlaying) {
+      player.pause();
     }
-  }, [isActive, status.isPlaying]);
+  }, [isActive, isPlaying, player]);
 
   return (
     <TouchableOpacity 
@@ -70,14 +75,11 @@ const VideoItem = memo(({ video, width, isActive }) => {
       activeOpacity={1}
       onPress={() => setShowControls(!showControls)}
     >
-      <Video
-        ref={videoRef}
-        source={{ uri: video.localPath || video.serverUrl }}
+      <VideoView
+        player={player}
         style={styles.fullVideo}
-        resizeMode={ResizeMode.CONTAIN}
-        shouldPlay={false}
-        isLooping
-        onPlaybackStatusUpdate={setStatus}
+        contentFit="contain"
+        nativeControls={false}
       />
       
       {/* Play/Pause overlay */}
@@ -89,7 +91,7 @@ const VideoItem = memo(({ video, width, isActive }) => {
         >
           <View style={styles.playButton}>
             <Ionicons 
-              name={status.isPlaying ? 'pause' : 'play'} 
+              name={isPlaying ? 'pause' : 'play'} 
               size={48} 
               color="#FFF" 
             />
@@ -98,13 +100,13 @@ const VideoItem = memo(({ video, width, isActive }) => {
       )}
 
       {/* Progress bar */}
-      {status.durationMillis > 0 && (
+      {player.duration > 0 && (
         <View style={styles.progressContainer}>
           <View 
             style={[
               styles.progressBar, 
               { 
-                width: `${(status.positionMillis / status.durationMillis) * 100}%` 
+                width: `${(player.currentTime / player.duration) * 100}%` 
               }
             ]} 
           />

@@ -13,6 +13,7 @@ import { JournalApi } from '../api/JournalApi';
 import { MediaApi } from '../api/MediaApi';
 import { ApiError } from '../api/ApiClient';
 import { JournalRepository } from '../repositories';
+import { JournalService } from '../services/JournalService';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { DatabaseService } from '../services/DatabaseService';
 import { SyncStatus } from '../database/schema';
@@ -231,21 +232,26 @@ class SyncEngineClass {
     };
 
     try {
-      // Step 1: Process outgoing queue (push local changes)
+      // Step 1: Upload pending media.
+      //
+      // Before pushing, not after. An entry carrying a photo can only be pushed once its
+      // media has a url the server can resolve -- push first and the payload still holds
+      // local file paths, which the server rejects as invalid, and the entry burns a retry
+      // on every sync while its media sits waiting for a step that runs afterwards.
+      const mediaResult = await this._uploadPendingMedia();
+      results.mediaUploaded = mediaResult.uploaded;
+      results.errors += mediaResult.failed;
+
+      // Step 2: Process outgoing queue (push local changes)
       const pushResult = await this._pushLocalChanges();
       results.pushed = pushResult.succeeded;
       results.errors += pushResult.failed;
       results.conflicts += pushResult.conflicts;
 
-      // Step 2: Pull remote changes
+      // Step 3: Pull remote changes
       const pullResult = await this._pullRemoteChanges();
       results.pulled = pullResult.count;
       results.conflicts += pullResult.conflicts;
-
-      // Step 3: Upload pending media
-      const mediaResult = await this._uploadPendingMedia();
-      results.mediaUploaded = mediaResult.uploaded;
-      results.errors += mediaResult.failed;
 
       const duration = Date.now() - startTime;
       console.log('[SyncEngine] Sync completed in', duration, 'ms', results);
@@ -353,7 +359,16 @@ class SyncEngineClass {
           await this._processSingleOperation(op);
           result.succeeded++;
         } catch (opError) {
-          console.error('[SyncEngine] Operation failed:', op.id, opError.message);
+          // The response body, not just the status. A 400 here says the server rejected
+          // the payload and nothing else; without the body there is no way to tell which
+          // field it objected to, and the operation retries against the same objection
+          // until it exhausts its attempts. Logged rather than surfaced -- this is for
+          // diagnosis, and the queue's own handling is unchanged.
+          const detail = opError?.data ? JSON.stringify(opError.data).slice(0, 500) : null;
+          console.error(
+            '[SyncEngine] Operation failed:', op.id, op.type, opError.message,
+            detail ? `| server said: ${detail}` : '| server sent no body'
+          );
           await SyncQueue.markFailed(op.id, opError.message);
           result.failed++;
         }
@@ -377,19 +392,40 @@ class SyncEngineClass {
       return;
     }
 
+    // The queued payload is a snapshot taken when the operation was enqueued, and the
+    // entry can change afterwards -- a media upload rewrites its blocks with real urls
+    // precisely while the create sits waiting. Pushing the snapshot would send the local
+    // file paths again and be rejected for the same reason as before. Read the row as it
+    // stands, falling back to the snapshot if it has since been deleted.
+    const currentEntry = operation.entityId
+      ? await DatabaseService.getEntryByLocalId(operation.entityId).catch(() => null)
+      : null;
+    const payload = currentEntry || operation.data;
+
     switch (operation.type) {
       case SyncOperationType.CREATE_ENTRY: {
-        const response = await JournalApi.createEntry(operation.data);
+        const response = await JournalApi.createEntry(payload);
         await this._handleCreateSuccess(operation, response.serverId);
         await SyncQueue.markCompleted(operation.id, { serverId: response.serverId });
         break;
       }
 
       case SyncOperationType.UPDATE_ENTRY: {
+        // Without a server id there is nothing to update: the entry has never been
+        // created remotely, so a PUT goes to a path that does not accept one and comes
+        // back 405. Its pending create carries the change instead, now that the push
+        // reads the row fresh.
+        const serverId = operation.serverId || currentEntry?.serverId;
+        if (!serverId) {
+          console.log('[SyncEngine] Skipping update for an entry not yet on the server:', operation.entityId);
+          await SyncQueue.markCompleted(operation.id);
+          break;
+        }
+
         const response = await JournalApi.updateEntry(
-          operation.serverId,
-          operation.data,
-          operation.data.updated_at
+          serverId,
+          payload,
+          payload.updatedAt || operation.data?.updated_at
         );
         
         if (response.type === 'conflict') {
@@ -449,7 +485,7 @@ class SyncEngineClass {
       type: 'update_update',
       localEntry,
       serverEntry: response.serverVersion,
-      localModified: localEntry.updated_at,
+      localModified: localEntry.updatedAt,
       serverModified: response.serverVersion.updatedAt,
     };
 
@@ -501,7 +537,7 @@ class SyncEngineClass {
       for (const deletedId of changes.deletedIds) {
         const localEntry = await JournalRepository.getByServerId(deletedId);
         if (localEntry) {
-          await JournalRepository.hardDelete(localEntry.local_id);
+          await JournalRepository.hardDelete(localEntry.localId);
           result.count++;
         }
       }
@@ -560,8 +596,8 @@ class SyncEngineClass {
     }
 
     // Update local entry with server data (direct write, no re-enqueue)
-    if (localEntry.sync_status === SyncStatus.SYNCED || !conflict) {
-      await JournalRepository.applyServerUpdate(localEntry.local_id, {
+    if (localEntry.syncStatus === SyncStatus.SYNCED || !conflict) {
+      await JournalRepository.applyServerUpdate(localEntry.localId, {
         contentBlocks: mapped.contentBlocks,
         location: mapped.location,
         visibility: mapped.visibility,
@@ -572,12 +608,111 @@ class SyncEngineClass {
   /**
    * Upload pending media files
    */
+  /**
+   * Queue any media an entry holds that has not been uploaded and is not already queued.
+   *
+   * Queueing happens when an entry is created, so anything created while that path was
+   * broken -- which it was, for every entry ever made with a photo -- has media on disk
+   * that nothing will ever pick up. Fixing the creation path only helps entries made
+   * afterwards; these would sit unsynced forever with no indication why.
+   *
+   * Re-walked on every sync rather than run once. It is cheap, the insert ignores
+   * duplicates, and a one-shot migration would miss anything left behind by a future gap
+   * of the same kind.
+   */
+  async _backfillMediaQueue() {
+    try {
+      // Pending and failed entries: exactly the ones that have not made it to the server,
+      // which is where unqueued media will be.
+      const candidates = await DatabaseService.getPendingSyncEntries();
+
+      for (const entry of candidates) {
+        await JournalService._queueMediaForUpload(entry);
+      }
+
+      if (candidates.length > 0) {
+        console.log('[SyncEngine] Backfilled media queue from', candidates.length, 'entries');
+      }
+    } catch (error) {
+      // Never fail a sync over this; the upload step below simply finds nothing.
+      console.warn('[SyncEngine] Media backfill failed:', error?.message);
+    }
+  }
+
+  /**
+   * Write an uploaded url onto the media item inside its entry, and re-queue the entry.
+   *
+   * Matched on file path rather than id: media saved before ids were assigned carries a
+   * synthesised one, and the path is the field that is always present and always unique
+   * within an entry.
+   */
+  async _applyUploadedMediaToEntry(media, uploadResult) {
+    const entryLocalId = media.entry_id;
+    if (!entryLocalId) return;
+
+    const entry = await DatabaseService.getEntryByLocalId(entryLocalId);
+    if (!entry) return;
+
+    let changed = false;
+
+    const contentBlocks = (entry.contentBlocks || []).map((block) => {
+      if (!Array.isArray(block?.media)) return block;
+
+      const items = block.media.map((item) => {
+        const localPath = item?.localPath || item?.uri;
+        if (localPath !== media.local_uri) return item;
+
+        changed = true;
+        return {
+          ...item,
+          id: uploadResult.mediaId || item.id,
+          serverUrl: uploadResult.url,
+          url: uploadResult.url,
+          thumbnailUrl: uploadResult.thumbnailUrl || item.thumbnailUrl,
+        };
+      });
+
+      return { ...block, media: items };
+    });
+
+    if (!changed) return;
+
+    // Marked pending again so the entry is pushed with the url it now carries. Without
+    // this the entry keeps whatever it was pushed with the first time.
+    await DatabaseService.updateEntry(entryLocalId, {
+      contentBlocks,
+      syncStatus: 'pending',
+    });
+
+    // Only when the entry exists remotely. If it does not, its create is still queued and
+    // will now pick up these blocks when it reads the row at push time -- enqueueing an
+    // update would PUT to a path with no id behind it and take a 405.
+    if (entry.serverId) {
+      await SyncQueue.enqueue({
+        type: SyncOperationType.UPDATE_ENTRY,
+        entityId: entryLocalId,
+        serverId: entry.serverId,
+        data: { ...entry, contentBlocks },
+      });
+    }
+  }
+
   async _uploadPendingMedia() {
     const result = { uploaded: 0, failed: 0 };
 
+    await this._backfillMediaQueue();
+
     // Get pending media from queue
     const mediaQueue = await DatabaseService.getMediaQueue();
-    const pending = mediaQueue.filter(m => m.status === 'pending');
+    // 'failed' included deliberately. A failed upload used to be terminal: the filter took
+    // only 'pending', so anything rejected once was never offered again -- and every upload
+    // was rejected while the request contract was wrong, leaving a queue of files that
+    // would never be retried no matter how many syncs ran.
+    //
+    // 'uploading' too: that status is written before the attempt, so an app closed
+    // mid-upload leaves items stranded in it forever.
+    const RETRYABLE = ['pending', 'failed', 'uploading'];
+    const pending = mediaQueue.filter(m => RETRYABLE.includes(m.status));
 
     if (pending.length === 0) {
       return result;
@@ -604,6 +739,12 @@ class SyncEngineClass {
           server_url: uploadResult.url,
           server_id: uploadResult.mediaId,
         });
+
+        // Put the url on the entry itself. Recording it only in the queue left the entry
+        // still pointing at a local file path, so it was pushed referencing something no
+        // other device can read -- the phone reported everything synced and the web app
+        // showed entries with no pictures in them.
+        await this._applyUploadedMediaToEntry(media, uploadResult);
 
         result.uploaded++;
         this._emit(SyncEvent.MEDIA_UPLOADED, {

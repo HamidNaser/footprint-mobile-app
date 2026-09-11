@@ -6,7 +6,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { SyncEngine, SyncState, SyncEvent } from '../sync';
+import { SyncEngine, SyncQueue, SyncState, SyncEvent } from '../sync';
 import { useAuth } from './AuthContext';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { SignalRService, SignalREvents } from '../services/SignalRService';
@@ -20,6 +20,25 @@ export function SyncProvider({ children }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState(null);
   const [isInitialized, setIsInitialized] = useState(false);
+
+  // Queue depth, read from the queue rather than inferred from syncState. These are
+  // different questions: syncState answers "is a sync running right now", and the
+  // queue answers "is there anything still unsent". Conflating them is what let the
+  // app show "Synced" beside eight pending operations.
+  const [pendingCount, setPendingCount] = useState(0);
+  const [failedCount, setFailedCount] = useState(0);
+
+  const refreshQueueCounts = useCallback(async () => {
+    try {
+      const stats = await SyncQueue.getStats();
+      // In-progress work is still unsent, so it counts as pending. Conflicts count as
+      // failures: both need a person, and neither clears on its own.
+      setPendingCount(stats.pending + stats.inProgress);
+      setFailedCount(stats.failed + stats.conflict);
+    } catch (error) {
+      console.error('[SyncContext] Could not read queue counts:', error);
+    }
+  }, []);
 
   // Initialize SyncEngine when authenticated
   useEffect(() => {
@@ -106,6 +125,34 @@ export function SyncProvider({ children }) {
     };
   }, [isInitialized]);
 
+  // Track queue depth
+  useEffect(() => {
+    if (!isInitialized) return;
+
+    let cancelled = false;
+    let scheduled = false;
+
+    // The queue notifies on every status change, so a sync of twenty operations fires
+    // dozens of these in a burst. Coalesce them into one read per tick rather than
+    // running a COUNT per event.
+    const schedule = () => {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        scheduled = false;
+        if (!cancelled) refreshQueueCounts();
+      }, 250);
+    };
+
+    refreshQueueCounts();
+    const unsubscribe = SyncQueue.addListener(schedule);
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [isInitialized, refreshQueueCounts]);
+
   // Listen for SignalR sync notifications
   useEffect(() => {
     if (!isInitialized) return;
@@ -134,6 +181,8 @@ export function SyncProvider({ children }) {
       setIsInitialized(false);
       setSyncState(SyncState.IDLE);
       setLastSyncTime(null);
+      setPendingCount(0);
+      setFailedCount(0);
     }
   }, [isAuthenticated, isInitialized]);
 
@@ -168,15 +217,20 @@ export function SyncProvider({ children }) {
     isSyncing,
     syncProgress,
     isInitialized,
-    
+    pendingCount,
+    failedCount,
+
     // Computed
     isOnline: syncState !== SyncState.OFFLINE,
     isSyncEnabled: syncState !== SyncState.DISABLED,
-    
+    // "Everything is saved on the server" — the only honest basis for saying Synced.
+    isFullySynced: pendingCount === 0 && failedCount === 0,
+
     // Actions
     triggerSync,
     startAutoSync,
     stopAutoSync,
+    refreshQueueCounts,
   };
 
   return (

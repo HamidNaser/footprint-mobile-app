@@ -31,6 +31,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import SettingsService, { StorageMode, Theme } from '../services/SettingsService';
 import { SettingsApi, LOCATION_PRECISION_OPTIONS } from '../api';
 import { useAuth } from '../context/AuthContext';
+import { useSync } from '../context';
+import { syncBadgeStatus, SyncBadgeStatus } from '../utils/syncStatus';
 
 const PRIMARY_COLOR = '#4361ee';
 
@@ -254,14 +256,20 @@ PrecisionSelector.displayName = 'PrecisionSelector';
 /**
  * Sync status indicator
  */
-const SyncStatusIndicator = memo(({ pendingCount, lastSyncStatus, isOnline }) => {
+const SyncStatusIndicator = memo(({ pendingCount, failedCount = 0, lastSyncStatus, isOnline }) => {
+  const status = syncBadgeStatus({ pendingCount, failedCount, isOnline });
   let icon, color, text;
 
-  if (!isOnline) {
+  if (status === SyncBadgeStatus.OFFLINE) {
     icon = 'cloud-offline';
     color = '#8E8E93';
     text = 'Offline';
-  } else if (pendingCount > 0) {
+  } else if (status === SyncBadgeStatus.FAILED) {
+    // Ahead of the pending count: these will not clear on their own.
+    icon = 'alert-circle';
+    color = '#FF3B30';
+    text = failedCount === 1 ? '1 not sent' : `${failedCount} not sent`;
+  } else if (status === SyncBadgeStatus.PENDING) {
     icon = 'cloud-upload';
     color = '#FF9500';
     text = `${pendingCount} pending`;
@@ -286,14 +294,31 @@ SyncStatusIndicator.displayName = 'SyncStatusIndicator';
  */
 export default function SettingsScreen({ navigation }) {
   const { user, logout } = useAuth();
-  
+
+  // Queue depth is owned by the sync context, which reads it from the queue and keeps
+  // it current as operations complete.
+  const { pendingCount, failedCount, isSyncing, triggerSync } = useSync();
+
+  /**
+   * "Sync Now" was a no-op button -- it rendered, it depressed, and nothing happened.
+   * `force` matters here: this is someone looking at a stalled queue and asking for it
+   * to go now, which is exactly the case the throttle would otherwise swallow.
+   */
+  const handleSyncNow = useCallback(async () => {
+    try {
+      await triggerSync({ force: true });
+    } catch (error) {
+      console.error('[SettingsScreen] Manual sync failed:', error);
+      Alert.alert('Sync failed', 'Could not sync right now. Please try again.');
+    }
+  }, [triggerSync]);
+
   // State
   const [storageMode, setStorageMode] = useState(StorageMode.CLOUD_SYNC);
   const [theme, setTheme] = useState(Theme.SYSTEM);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [autoBackup, setAutoBackup] = useState(true);
   const [lastSyncStatus, setLastSyncStatus] = useState('');
-  const [pendingCount, setPendingCount] = useState(0);
   const [isOnline, setIsOnline] = useState(true);
   const [showStorageModal, setShowStorageModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -334,9 +359,6 @@ export default function SettingsScreen({ navigation }) {
       setNotificationsEnabled(notifications);
       setAutoBackup(backup);
       setLastSyncStatus(syncStatus);
-      
-      // TODO: Get actual pending count from SyncEngine
-      setPendingCount(0);
     } catch (error) {
       console.error('[SettingsScreen] Error loading settings:', error);
     }
@@ -649,14 +671,18 @@ export default function SettingsScreen({ navigation }) {
           <View style={styles.syncStatusCard}>
             <SyncStatusIndicator
               pendingCount={pendingCount}
+              failedCount={failedCount}
               lastSyncStatus={lastSyncStatus}
               isOnline={isOnline}
             />
             <TouchableOpacity
               style={styles.syncButton}
-              onPress={() => {/* TODO: Trigger manual sync */}}
+              onPress={handleSyncNow}
+              disabled={isSyncing}
             >
-              <Text style={styles.syncButtonText}>Sync Now</Text>
+              <Text style={styles.syncButtonText}>
+                {isSyncing ? 'Syncing…' : 'Sync Now'}
+              </Text>
             </TouchableOpacity>
           </View>
         )}

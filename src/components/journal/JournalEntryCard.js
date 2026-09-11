@@ -8,6 +8,7 @@
  */
 
 import React, { memo, useState, useCallback } from 'react';
+import Avatar from '../Avatar';
 import {
   View,
   Text,
@@ -403,13 +404,10 @@ export const JournalEntryCard = memo(({
     <View style={[styles.card, style]}>
       {/* Header */}
       <View style={styles.header}>
-        <Image
-          source={{ uri: user?.avatarUrl || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&h=150&fit=crop&crop=face' }}
-          style={styles.avatar}
-        />
+        <Avatar src={user?.avatarUrl} name={user?.name} style={styles.avatar} />
         <View style={styles.headerInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.userName}>{user?.name || 'Alex Johnson'}</Text>
+            <Text style={styles.userName}>{user?.name || 'Unknown'}</Text>
             {showSyncStatus && <SyncStatusBadge status={entry.syncStatus} />}
           </View>
           <View style={styles.timestampRow}>

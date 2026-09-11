@@ -267,7 +267,13 @@ const NavigationButtons = memo(({
  * Import TextInput
  */
 import { TextInput } from 'react-native';
-import { Audio } from 'expo-av';
+import {
+  useAudioRecorder,
+  createAudioPlayer,
+  setAudioModeAsync,
+  requestRecordingPermissionsAsync,
+  RecordingPresets,
+} from 'expo-audio';
 import * as ImagePicker from 'expo-image-picker';
 import MediaApi from '../api/MediaApi';
 import { createInterviewSession } from '../utils/interviewSession';
@@ -292,9 +298,9 @@ const InterviewModeScreen = ({
   const [busy, setBusy] = useState(null);
   const [saveError, setSaveError] = useState(null);
 
-  // The live expo-av recording, held in a ref because it is a device handle rather than
-  // rendered state.
-  const recordingRef = useRef(null);
+  // expo-audio's recorder is a hook rather than a handle you create when recording starts,
+  // so it is declared up front and driven from the handlers below.
+  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
   // The server side of this interview. Answers used to live in component state and be
   // discarded on close; this is what makes them outlive the screen.
@@ -329,7 +335,7 @@ const InterviewModeScreen = ({
   const handleStartRecording = async () => {
     setSaveError(null);
     try {
-      const permission = await Audio.requestPermissionsAsync();
+      const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
         // Say what happened rather than appearing to record and capturing nothing, which
         // is what this screen did before.
@@ -339,12 +345,12 @@ const InterviewModeScreen = ({
 
       // Recording is silent on an iPhone with the ringer switch off unless this is set.
       // The failure is invisible: the UI counts up and the file is empty.
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      recordingRef.current = recording;
+      // Required before every recording: stop() invalidates the recorder. Skipping it
+      // yields a uri that names no usable file, which is silent until the upload fails.
+      await recorder.prepareToRecordAsync();
+      recorder.record();
       setIsRecording(true);
       setRecordingDuration(0);
     } catch (e) {
@@ -355,14 +361,11 @@ const InterviewModeScreen = ({
   const handleStopRecording = async () => {
     setIsRecording(false);
 
-    const recording = recordingRef.current;
-    recordingRef.current = null;
-    if (!recording) return;
-
     let uri = null;
     try {
-      await recording.stopAndUnloadAsync();
-      uri = recording.getURI();
+      await recorder.stop();
+      // Read after stop resolves; the uri is null until the file is finalised.
+      uri = recorder.uri;
     } catch (e) {
       setSaveError(e?.message || 'Could not save that recording.');
       return;
@@ -399,11 +402,12 @@ const InterviewModeScreen = ({
     if (!answer?.url) return;
 
     try {
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
-      const { sound } = await Audio.Sound.createAsync({ uri: answer.url }, { shouldPlay: true });
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      const sound = createAudioPlayer({ uri: answer.url });
+      sound.play();
       // Freed once it finishes, rather than held open for the life of the screen.
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.didJustFinish) sound.unloadAsync();
+      sound.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) sound.remove();
       });
     } catch (e) {
       setSaveError(e?.message || 'Could not play that recording.');

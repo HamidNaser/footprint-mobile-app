@@ -75,7 +75,10 @@ class JournalApiClass {
    */
   async updateJournal(journalId, data) {
     const url = buildUrl(this.baseUrl, JOURNAL_ENDPOINTS.UPDATE_JOURNAL, { id: journalId });
-    return ApiClient.put(url, data);
+    // PATCH, not PUT: the server declares [HttpPatch("{journalId}")]. A PUT is rejected by
+    // routing with 405 before any controller code runs, which is why nothing appears in
+    // the server logs when this fails.
+    return ApiClient.patch(url, data);
   }
 
   /**
@@ -165,7 +168,11 @@ class JournalApiClass {
     }
 
     try {
-      const response = await ApiClient.put(url, payload);
+      // PATCH, not PUT: the server declares [HttpPatch("entries/{entryId}")]. Sending PUT
+      // returns 405 from routing, before the controller is reached -- so the failure left
+      // no trace in the server logs at all, and every edit to an existing entry failed
+      // silently while its media uploaded perfectly well.
+      const response = await ApiClient.patch(url, payload);
       return {
         type: JournalApiResponseType.UPDATED,
         data: response,

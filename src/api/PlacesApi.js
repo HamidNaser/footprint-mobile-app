@@ -10,10 +10,6 @@
 import { ApiClient } from './ApiClient';
 import { API_CONFIG, buildUrl, buildUrlWithQuery } from '../config/api.config';
 
-// Shown when a place has no associated photo yet.
-const PLACEHOLDER_IMAGE =
-  'https://images.unsplash.com/photo-1502082553048-f009c37129b9?w=400&h=300&fit=crop';
-
 /**
  * Adapt a backend PlaceResponse to the shape the Places screen renders.
  * Fields the backend doesn't provide yet (photos carousel, map coords, memory
@@ -31,7 +27,10 @@ const adaptPlace = (place) => {
     id: place.id,
     name: place.name,
     subtitle: place.subtitle || '',
-    image: place.image || PLACEHOLDER_IMAGE,
+    // Null when nobody has photographed it. The card draws a monogram; this used to
+    // be an Unsplash travel shot, so an unphotographed place in Amman showed a
+    // stranger's picture of somewhere else beside a real family memory.
+    image: place.image || null,
     // Backend has no category concept; everything is visible under "everyone".
     category: 'everyone',
     // PlaceResponse (list) carries no IWasHere — only PlaceDetailResponse does.
@@ -135,7 +134,7 @@ const adaptPlaceDetail = (detail) => {
     id: detail.id,
     name: detail.name,
     subtitle: detail.subtitle || '',
-    image: detail.image || PLACEHOLDER_IMAGE,
+    image: detail.image || null,
     category: 'everyone',
     location:
       detail.lat || detail.lng ? { lat: detail.lat, lng: detail.lng } : null,

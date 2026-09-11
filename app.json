@@ -6,13 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "scheme": "footprint",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#2B7DE9"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aqrava.footprint",
@@ -30,7 +24,6 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#2B7DE9"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.aqrava.footprint",
       "permissions": [
         "CAMERA",
@@ -60,7 +53,19 @@
       "expo-sqlite",
       "expo-web-browser",
       "expo-font",
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#2B7DE9"
+        }
+      ],
+      "expo-audio",
+      "expo-video",
+      "expo-asset"
     ]
   }
 }

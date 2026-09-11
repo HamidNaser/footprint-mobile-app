@@ -120,12 +120,41 @@ export default function LoginScreen() {
   };
 
   const handleEmailAuth = async () => {
-    if (!email || !password) {
+    // Trimmed before anything looks at it. iOS appends a space after an autocomplete or
+    // autofill suggestion, and the server validates the address strictly -- so a login
+    // that looked exactly right was rejected as a malformed request rather than a wrong
+    // password, and the message said neither. The password is deliberately not trimmed:
+    // leading and trailing spaces are legitimate characters in one.
+    const cleanEmail = email.trim();
+    const cleanName = name.trim();
+
+    if (!cleanEmail || !password) {
       setError('Please fill in all fields');
       return;
     }
 
-    if (isSignUp && !name) {
+    // Checked here so a malformed address is named as one. The server answers a bad
+    // address with 400 "One or more validation errors occurred", which is
+    // indistinguishable on screen from a rejected password -- and sends people off to
+    // reset a password that was never wrong.
+    //
+    // The value in state is not always what the field appears to show: an autofilled or
+    // partially-committed entry can leave a fragment behind, and a fragment without an @
+    // fails validation while the field still looks correct. So this reports the value it
+    // is actually about to send.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      console.warn(
+        `[LoginScreen] Email failed local validation: ${cleanEmail.length} chars, ` +
+        `has @: ${cleanEmail.includes('@')}, has dot after @: ${/@[^\s@]*\./.test(cleanEmail)}`
+      );
+      setError(
+        `That does not look like a complete email address (“${cleanEmail}”). ` +
+        `Clear the field and type it again rather than using a suggestion.`
+      );
+      return;
+    }
+
+    if (isSignUp && !cleanName) {
       setError('Please enter your name');
       return;
     }
@@ -135,9 +164,9 @@ export default function LoginScreen() {
 
     try {
       if (isSignUp) {
-        await register(email, password, name);
+        await register(cleanEmail, password, cleanName);
       } else {
-        await login(email, password);
+        await login(cleanEmail, password);
       }
     } catch (err) {
       setError(err.message || (isSignUp ? 'Registration failed' : 'Login failed'));

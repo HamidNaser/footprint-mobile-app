@@ -41,6 +41,8 @@ import { useAuth } from '../context/AuthContext';
 
 // Live data
 import { getUserEntries } from '../services/SocialService';
+import DayRoster from '../components/DayRoster';
+import { toDateKey } from '../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -255,6 +257,26 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, [entries, selectedDate, isSameDay]);
 
   /**
+   * The group's roster, in the shape DayRoster reads.
+   *
+   * Only for a group: a single person's journal has nobody to be absent. Entries are
+   * attributed by `entry.userId`, the same key `getUserForEntry` uses below, so a face and
+   * the cards beneath it always agree about who recorded what.
+   */
+  const rosterSections = useMemo(() => {
+    if (!isGroup || !persons) return [];
+
+    return persons.map((p) => ({
+      memberId: p.id,
+      name: p.name,
+      avatarUrl: p.avatar ?? null,
+      // No relation in a group of friends, so the roster keeps the order the group lists
+      // its members in.
+      entries: entries.filter((entry) => entry.userId === p.id),
+    }));
+  }, [isGroup, persons, entries]);
+
+  /**
    * Dates that have journal entries - for calendar marking
    */
   const markedDates = useMemo(() => {
@@ -391,6 +413,22 @@ export default function PersonJournalScreen({ route, navigation }) {
           keyExtractor={keyExtractor}
           contentContainerStyle={styles.feedContent}
           showsVerticalScrollIndicator={false}
+          ListHeaderComponent={
+            // Everyone in the group, with whoever recorded nothing today dimmed and still
+            // present. Without it a day holding one entry reads as a broken screen rather
+            // than a quiet day -- and in a group the reader cannot even tell who else was
+            // in scope. Not drawn for a single person, who has nobody to be absent.
+            isGroup ? (
+              <DayRoster
+                sections={rosterSections}
+                day={toDateKey(selectedDate)}
+                dateText={selectedDate.toLocaleDateString(undefined, {
+                  day: 'numeric',
+                  month: 'long',
+                })}
+              />
+            ) : null
+          }
           refreshControl={
             <RefreshControl
               refreshing={refreshing}

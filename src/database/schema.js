@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 /**
  * SQL statements to create all tables
@@ -122,16 +122,20 @@ export const CREATE_TABLES = {
    */
   sync_queue: `
     CREATE TABLE IF NOT EXISTS sync_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT PRIMARY KEY,
       operation_type TEXT NOT NULL,
-      entity_type TEXT NOT NULL,
-      entity_local_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      server_id TEXT,
       payload TEXT NOT NULL,
       status TEXT DEFAULT 'pending',
+      priority INTEGER DEFAULT 0,
       retry_count INTEGER DEFAULT 0,
       last_error TEXT,
-      created_at INTEGER NOT NULL,
-      last_attempt_at INTEGER
+      result TEXT,
+      conflict_data TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT,
+      completed_at TEXT
     );
   `,
 
@@ -169,7 +173,7 @@ export const CREATE_INDEXES = [
   
   // Sync queue indexes
   'CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);',
-  'CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_type, entity_local_id);',
+  'CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_id);',
 ];
 
 /**

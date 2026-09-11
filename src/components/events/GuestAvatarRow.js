@@ -4,10 +4,9 @@
  */
 
 import React, { memo } from 'react';
-import { View, Text, Image, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { getStatusMeta } from '../../data/eventsData';
-
-const FALLBACK_AVATAR = 'https://randomuser.me/api/portraits/lego/1.jpg';
+import SharedAvatar from '../Avatar';
 
 const Avatar = memo(({ guest, index }) => {
   const meta = getStatusMeta(guest.status);
@@ -18,7 +17,7 @@ const Avatar = memo(({ guest, index }) => {
         { borderColor: meta.color, marginLeft: index === 0 ? 0 : -10 },
       ]}
     >
-      <Image source={{ uri: guest.avatar || FALLBACK_AVATAR }} style={styles.avatar} />
+      <SharedAvatar src={guest.avatar} name={guest.name} style={styles.avatar} />
     </View>
   );
 });

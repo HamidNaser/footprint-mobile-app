@@ -9,7 +9,7 @@
  * - Sync status
  */
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -25,7 +25,7 @@ import {
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { Video, ResizeMode } from 'expo-av';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
 
@@ -139,7 +139,25 @@ const ImageViewerModal = ({ visible, images, initialIndex, onClose }) => {
  * Video player modal
  */
 const VideoPlayerModal = ({ visible, video, onClose }) => {
-  const videoRef = useRef(null);
+  // Called unconditionally with a conditional source: the modal renders whether or not a
+  // video is selected, and a hook cannot be skipped on the empty pass.
+  const player = useVideoPlayer(
+    video ? { uri: video.localPath || video.serverUrl } : null
+  );
+
+  // Play when opened, pause when dismissed -- otherwise a closed modal keeps playing.
+  useEffect(() => {
+    // Only touch the player when there is something loaded in it. This modal stays mounted
+    // with `video` null for the life of the screen, and calling pause() on a player with no
+    // source throws NotFoundException rather than doing nothing.
+    if (!video) return;
+
+    if (visible) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [visible, video, player]);
 
   return (
     <Modal visible={visible} transparent animationType="fade">
@@ -155,13 +173,11 @@ const VideoPlayerModal = ({ visible, video, onClose }) => {
         </View>
 
         {video && (
-          <Video
-            ref={videoRef}
-            source={{ uri: video.localPath || video.serverUrl }}
+          <VideoView
+            player={player}
             style={styles.fullVideo}
-            resizeMode={ResizeMode.CONTAIN}
-            useNativeControls
-            shouldPlay
+            contentFit="contain"
+            nativeControls
           />
         )}
       </View>

@@ -174,6 +174,20 @@ class JournalServiceClass {
     // Queue media for upload if there are media blocks
     await this._queueMediaForUpload(entry);
 
+    // Push it now rather than waiting for the timer.
+    //
+    // Nothing triggered a sync on create, so a new entry sat in the queue until the
+    // five-minute auto-sync came round, the app was backgrounded and reopened, or the
+    // network changed. Post a photo and it could be minutes before it existed anywhere but
+    // the phone -- which reads as the app being broken rather than as a schedule, because
+    // every other app people use posts immediately.
+    //
+    // Deliberately not awaited: the entry is already saved locally and the screen should
+    // not wait on a network round trip to show it. Failures are the sync engine's to
+    // handle -- the operation stays queued and is retried -- so a rejection here is
+    // logged and dropped rather than surfaced as a save failure.
+    this._syncNow('createEntry');
+
     // NOTE: We don't emit 'entryCreated' here because the caller (useJournal hook)
     // already handles optimistic updates. The event is reserved for entries
     // arriving from external sources (e.g., SignalR sync from another device).
@@ -552,6 +566,9 @@ class JournalServiceClass {
 
     this._emit('entryUpdated', updatedEntry);
 
+    // Same reasoning as create: an edit should reach the server now, not in five minutes.
+    this._syncNow('updateEntry');
+
     return updatedEntry;
   }
 
@@ -570,6 +587,9 @@ class JournalServiceClass {
     }
 
     this._emit('entryUpdated', updatedEntry);
+
+    // Adding a block is a change like any other; push it now.
+    this._syncNow('addContentToEntry');
 
     return updatedEntry;
   }
@@ -655,12 +675,38 @@ class JournalServiceClass {
   // ============================================================
 
   /**
+   * Ask the sync engine to run now, without blocking the caller.
+   *
+   * Imported lazily to avoid a cycle: SyncEngine imports JournalService for the media
+   * backfill, so a top-level import here would close the loop.
+   */
+  _syncNow(reason) {
+    try {
+      const { SyncEngine } = require('../sync/SyncEngine');
+      Promise.resolve(SyncEngine.sync())
+        .catch((error) => console.log(`[JournalService] Immediate sync after ${reason} failed:`, error?.message));
+    } catch (error) {
+      console.log('[JournalService] Sync engine unavailable:', error?.message);
+    }
+  }
+
+  /**
    * Queue all media in an entry for upload
    * @param {object} entry - Journal entry
    */
   async _queueMediaForUpload(entry) {
-    for (const block of entry.contentBlocks) {
-      if ([ContentBlockType.IMAGE, ContentBlockType.VIDEO, ContentBlockType.AUDIO].includes(block.type)) {
+    // PHOTOS, not IMAGE. ContentBlockType has no IMAGE member, so this list contained
+    // `undefined` and matched nothing -- no media was ever queued, nothing was ever
+    // uploaded, and every entry carrying a photo was then pushed with local file paths
+    // where the server requires a url. It answered 400 and the entry retried forever.
+    const MEDIA_TYPES = [
+      ContentBlockType.PHOTOS,
+      ContentBlockType.VIDEO,
+      ContentBlockType.AUDIO,
+    ];
+
+    for (const block of entry.contentBlocks || []) {
+      if (MEDIA_TYPES.includes(block?.type)) {
         await this._queueMediaBlockForUpload(entry.localId, block);
       }
     }
@@ -672,47 +718,48 @@ class JournalServiceClass {
    * @param {object} block - Media content block
    */
   async _queueMediaBlockForUpload(entryLocalId, block) {
-    // Skip if already has server URL (already uploaded)
-    if (block.serverUrl) return;
+    // A block holds an array of media, not one file. This read block.localPath and
+    // block.id -- fields that live on each media item, not on the block -- so even once
+    // the type check above matched, it returned immediately on the missing path.
+    const items = Array.isArray(block.media) ? block.media : [];
+    if (items.length === 0) return;
 
-    // Skip if no local path
-    if (!block.localPath) return;
+    const mediaType = {
+      [ContentBlockType.PHOTOS]: MediaType.IMAGE,
+      [ContentBlockType.VIDEO]: MediaType.VIDEO,
+      [ContentBlockType.AUDIO]: MediaType.AUDIO,
+    }[block.type];
 
-    // Get file info
-    const fileInfo = await this.fileService.getFileInfo(block.localPath);
-    if (!fileInfo) {
-      console.warn(`Media file not found: ${block.localPath}`);
-      return;
+    if (!mediaType) return;
+
+    for (const item of items) {
+      // Already uploaded: nothing to do.
+      if (item?.serverUrl) continue;
+
+      const localPath = item?.localPath || item?.uri;
+      if (!localPath) continue;
+
+      const fileInfo = await this.fileService.getFileInfo(localPath);
+      if (!fileInfo) {
+        console.warn(`[JournalService] Media file not found: ${localPath}`);
+        continue;
+      }
+
+      await this.dbService.queueMedia({
+        // Falls back to a value derived from the file itself. Media saved before this
+        // path worked may carry no id, and a null primary key would let the same file be
+        // queued again on every sync instead of being recognised as already there.
+        localId: item.id || `${entryLocalId}:${localPath}`,
+        entryLocalId,
+        filePath: localPath,
+        mediaType,
+        fileSize: fileInfo.size || 0,
+        width: item.width,
+        height: item.height,
+        duration: item.duration ?? block.duration,
+        thumbnailPath: item.thumbnailPath || item.thumbnailUri,
+      });
     }
-
-    // Determine media type
-    let mediaType;
-    switch (block.type) {
-      case ContentBlockType.IMAGE:
-        mediaType = MediaType.IMAGE;
-        break;
-      case ContentBlockType.VIDEO:
-        mediaType = MediaType.VIDEO;
-        break;
-      case ContentBlockType.AUDIO:
-        mediaType = MediaType.AUDIO;
-        break;
-      default:
-        return;
-    }
-
-    // Queue for upload
-    await this.dbService.queueMedia({
-      localId: block.id,
-      entryLocalId,
-      filePath: block.localPath,
-      mediaType,
-      fileSize: fileInfo.size || 0,
-      width: block.width,
-      height: block.height,
-      duration: block.duration,
-      thumbnailPath: block.thumbnailPath,
-    });
   }
 
   /**

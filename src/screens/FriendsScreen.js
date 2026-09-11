@@ -8,7 +8,7 @@
  * Matches web app (footprint-web-app) functionality.
  */
 
-import React, { useState, memo, useCallback, useEffect } from 'react';
+import React, { useState, memo, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,7 +21,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { FRIENDS_LIST_DATA, FRIENDS_TREE_DATA } from '../data/friendsData';
+import { toTreeData, ungroupedFriends } from '../utils/friendGroups';
+import Avatar from '../components/Avatar';
 import { useAuth } from '../context/AuthContext';
 import { getFriends } from '../services/SocialService';
 
@@ -130,11 +131,34 @@ const FriendListCard = memo(({ friend, isSelected, onPress }) => {
 /**
  * List View - Detailed friend cards
  */
-const ListView = memo(({ data, selectedFriend, onFriendPress, loading, refreshing, onRefresh }) => {
+const ListView = memo(({ data, selectedFriend, onFriendPress, loading, failed, refreshing, onRefresh }) => {
   if (loading && (!data || data.length === 0)) {
     return (
       <View style={styles.centerFill}>
         <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+      </View>
+    );
+  }
+
+  // An empty list could not previously happen: it was replaced with a bundled set of
+  // invented friends. Failed and empty are kept apart because they read the same in the
+  // data and want opposite things -- one is an invitation, the other a retry.
+  if (!data || data.length === 0) {
+    return (
+      <View style={styles.centerFill}>
+        <Ionicons
+          name={failed ? 'cloud-offline-outline' : 'people-outline'}
+          size={34}
+          color="#9aa3ad"
+        />
+        <Text style={styles.emptyTitle}>
+          {failed ? 'Couldn’t load your friends' : 'No friends yet'}
+        </Text>
+        <Text style={styles.emptyHint}>
+          {failed
+            ? 'Check your connection and pull down to try again.'
+            : 'People you connect with will appear here.'}
+        </Text>
       </View>
     );
   }
@@ -197,8 +221,11 @@ const OrganizationPanel = memo(({ org, onOrgPress, onFriendPress }) => {
         onPress={() => onOrgPress?.(org)}
         activeOpacity={0.7}
       >
-        <Image source={{ uri: org.logo }} style={styles.orgLogo} resizeMode="contain" />
+        <Avatar src={org.logo} name={org.name} size={32} style={styles.orgLogo} />
         <Text style={styles.orgName}>{org.name}</Text>
+        <Text style={styles.orgCount}>
+          {org.friends.length} {org.friends.length === 1 ? 'friend' : 'friends'}
+        </Text>
         <Ionicons name="chevron-forward" size={16} color={TEXT_MUTED} />
       </TouchableOpacity>
 
@@ -273,9 +300,58 @@ const CategorySection = memo(({ category, isLast, onOrgPress, onFriendPress }) =
  * Tree View - Hierarchical view by organization
  * Mirrors FamilyScreen BranchView structure
  */
-const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
+const TreeView = memo(({
+  data, ungrouped, onOrgPress, onFriendPress, loading, failed, refreshing, onRefresh,
+}) => {
+  const categories = data?.categories ?? [];
+
+  if (loading && categories.length === 0) {
+    return (
+      <View style={styles.centerFill}>
+        <ActivityIndicator size="large" color={PRIMARY_COLOR} />
+      </View>
+    );
+  }
+
+  // Groups are derived, so this tab is empty in two different ways and they want
+  // opposite things on screen: nobody could be loaded, or friends were loaded and none
+  // of them has recorded a school or an employer. The second is not an error -- there is
+  // simply nothing to group by yet -- and saying "couldn't load" would be a lie.
+  if (categories.length === 0) {
+    const nothingLoaded = !ungrouped || ungrouped.length === 0;
+    return (
+      <View style={styles.centerFill}>
+        <Ionicons
+          name={failed ? 'cloud-offline-outline' : 'git-network-outline'}
+          size={34}
+          color="#9aa3ad"
+        />
+        <Text style={styles.emptyTitle}>
+          {failed
+            ? 'Couldn’t load your friends'
+            : nothingLoaded
+              ? 'No friends yet'
+              : 'Nothing to group by yet'}
+        </Text>
+        <Text style={styles.emptyHint}>
+          {failed
+            ? 'Check your connection and pull down to try again.'
+            : nothingLoaded
+              ? 'People you connect with will appear here.'
+              : 'Groups come from where your friends studied and work. None of them has recorded either yet.'}
+        </Text>
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={styles.treeScrollView} showsVerticalScrollIndicator={false}>
+    <ScrollView
+      style={styles.treeScrollView}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={PRIMARY_COLOR} />
+      }
+    >
       <View style={styles.treeContainer}>
         {/* User Profile Card with vertical connector */}
         <View style={styles.userGroup}>
@@ -283,13 +359,15 @@ const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
             {/* User Card */}
             <View style={styles.userProfileCard}>
               <View style={styles.userAvatarWrapper}>
-                <Image source={{ uri: data.user.avatar }} style={styles.userAvatar} />
+                <Avatar src={data.user.avatar} name={data.user.name} size={56} style={styles.userAvatar} />
                 <View style={styles.userBadge}>
                   <Ionicons name="people" size={12} color="#fff" />
                 </View>
               </View>
               <Text style={styles.userName}>{data.user.name}</Text>
-              <Text style={styles.userBirth}>{data.user.birthYear}</Text>
+              {data.user.birthYear ? (
+                <Text style={styles.userBirth}>Born {data.user.birthYear}</Text>
+              ) : null}
             </View>
 
             {/* Vertical connector from user to first category */}
@@ -299,16 +377,34 @@ const TreeView = memo(({ data, onOrgPress, onFriendPress }) => {
 
         {/* Categories */}
         <View style={styles.categoriesContainer}>
-          {data.categories.map((category, idx) => (
+          {categories.map((category, idx) => (
             <CategorySection
               key={category.id}
               category={category}
-              isLast={idx === data.categories.length - 1}
+              isLast={idx === categories.length - 1}
               onOrgPress={onOrgPress}
               onFriendPress={onFriendPress}
             />
           ))}
         </View>
+
+        {/* Friends who fit no group. Named rather than dropped -- they are still friends,
+            and silently missing from a tab is how somebody concludes the app lost them. */}
+        {ungrouped && ungrouped.length > 0 ? (
+          <View style={styles.ungroupedSection}>
+            <Text style={styles.ungroupedTitle}>
+              Not in a group ({ungrouped.length})
+            </Text>
+            <Text style={styles.ungroupedHint}>
+              No school or workplace recorded yet.
+            </Text>
+            <View style={styles.orgFriends}>
+              {ungrouped.map((friend) => (
+                <FriendCard key={friend.id} friend={friend} onPress={onFriendPress} />
+              ))}
+            </View>
+          </View>
+        ) : null}
       </View>
     </ScrollView>
   );
@@ -333,24 +429,33 @@ export default function FriendsScreen({ navigation }) {
   const [activeView, setActiveView] = useState('list');
   const [selectedFriend, setSelectedFriend] = useState(null);
 
-  // Live friends (network-first). Falls back to bundled mock data when there's
-  // no token or the account has no friends yet.
+  // Live friends only. This used to fall back to FRIENDS_LIST_DATA in three separate
+  // cases -- no token, no friends yet, and a failed request -- so somebody who had added
+  // nobody, and anybody whose request failed, were both shown a list of invented people
+  // with real-sounding names, indistinguishable from friends they had actually added.
   const [friends, setFriends] = useState([]);
+  // "We could not load them", as distinct from "there are none". Identical in the data,
+  // opposite on screen.
+  const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const loadFriends = useCallback(async () => {
     if (!accessToken) {
-      setFriends(FRIENDS_LIST_DATA);
+      setFriends([]);
+      setFailed(false);
       setLoading(false);
       return;
     }
     try {
       const live = await getFriends(accessToken);
-      setFriends(live.length > 0 ? live : FRIENDS_LIST_DATA);
+      setFriends(live);
+      setFailed(false);
     } catch (err) {
       console.warn('[FriendsScreen] Failed to load friends:', err.message);
-      setFriends((prev) => (prev.length > 0 ? prev : FRIENDS_LIST_DATA));
+      // The previously loaded list is kept rather than blanked -- a refresh that fails
+      // should not empty a list that was correct a moment ago.
+      setFailed(true);
     } finally {
       setLoading(false);
     }
@@ -359,6 +464,16 @@ export default function FriendsScreen({ navigation }) {
   useEffect(() => {
     loadFriends();
   }, [loadFriends]);
+
+  // The grouped view, derived from the friends actually loaded above. Groups are not
+  // records anywhere -- "MIT" exists because friends put it down -- so this re-derives on
+  // every fetch rather than being stored.
+  const treeData = useMemo(() => toTreeData(friends, user), [friends, user]);
+
+  // Friends with neither a school nor an employer cannot appear in any group. They are
+  // still friends, so the tab says so rather than letting them vanish; the List view is
+  // their way in.
+  const ungrouped = useMemo(() => ungroupedFriends(friends), [friends]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -370,9 +485,11 @@ export default function FriendsScreen({ navigation }) {
   const handleOrgPress = useCallback((org) => {
     console.log('Selected org:', org.name);
     
-    // Collect all friends from this organization
+    // The friend's real account id, unprefixed. The bundled sample used small integers,
+    // so a `friend_` prefix was harmless there; with live friends the id is what
+    // PersonJournal fetches entries by, and a prefix would return nobody's journal.
     const orgFriends = org.friends.map(friend => ({
-      id: `friend_${friend.id}`,
+      id: friend.id,
       name: friend.name,
       avatar: friend.avatar,
     }));
@@ -436,14 +553,20 @@ export default function FriendsScreen({ navigation }) {
           selectedFriend={selectedFriend}
           onFriendPress={handleFriendPress}
           loading={loading}
+          failed={failed}
           refreshing={refreshing}
           onRefresh={handleRefresh}
         />
       ) : (
-        <TreeView 
-          data={FRIENDS_TREE_DATA} 
+        <TreeView
+          data={treeData}
+          ungrouped={ungrouped}
           onOrgPress={handleOrgPress}
-          onFriendPress={handleFriendPress} 
+          onFriendPress={handleFriendPress}
+          loading={loading}
+          failed={failed}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
         />
       )}
 
@@ -457,6 +580,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8f9fa',
+  },
+  emptyTitle: { marginTop: 10, fontSize: 16, fontWeight: '600', color: '#4a545e' },
+  emptyHint: {
+    marginTop: 4,
+    fontSize: 13,
+    lineHeight: 19,
+    color: '#8a939d',
+    textAlign: 'center',
+    paddingHorizontal: 40,
   },
 
   // Header
@@ -748,17 +880,40 @@ const styles = StyleSheet.create({
     borderBottomColor: BORDER_COLOR,
   },
   orgLogo: {
-    width: 24,
-    height: 24,
     marginRight: 8,
   },
   orgName: {
     fontSize: 14,
     fontWeight: '600',
     color: TEXT_COLOR,
+    flex: 1,
+  },
+  orgCount: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    marginRight: 6,
   },
   orgFriends: {
     gap: 8,
+  },
+
+  // Friends who belong to no group
+  ungroupedSection: {
+    marginTop: 20,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: BORDER_COLOR,
+    gap: 8,
+  },
+  ungroupedTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: TEXT_COLOR,
+  },
+  ungroupedHint: {
+    fontSize: 12,
+    color: TEXT_MUTED,
+    marginBottom: 4,
   },
 
   // Friend Card (for tree view)

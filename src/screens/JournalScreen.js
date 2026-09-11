@@ -23,6 +23,7 @@ import {
   Platform,
   Animated,
   ActivityIndicator,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -41,6 +42,7 @@ import {
   adjacentDateKey,
   isSameDay as isSameCivilDay,
 } from '../utils/journalDate';
+import { syncBadgeStatus, SyncBadgeStatus } from '../utils/syncStatus';
 import { 
   DateSwipeContainer,
   QuickCaptureBar,
@@ -54,7 +56,7 @@ import { useJournalRealtime } from '../hooks/useJournalRealtime';
 import { useJournal } from '../hooks/useJournal';
 
 // Context
-import { useRealtime } from '../context';
+import { useRealtime, useSync } from '../context';
 import { useAuth } from '../context/AuthContext';
 
 // Services
@@ -105,8 +107,23 @@ const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
 /**
  * Sync status indicator
  */
-const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
-  if (pendingCount === 0 && isOnline) {
+const SyncStatusIndicator = ({ pendingCount, failedCount = 0, isOnline }) => {
+  const status = syncBadgeStatus({ pendingCount, failedCount, isOnline });
+
+  // Failures are not a backlog: they will not retry themselves and must not be
+  // reported as either "pending" or "Synced".
+  if (status === SyncBadgeStatus.FAILED) {
+    return (
+      <View style={styles.syncStatus}>
+        <Ionicons name="alert-circle" size={16} color="#FF3B30" />
+        <Text style={[styles.syncText, { color: '#FF3B30' }]}>
+          {failedCount === 1 ? '1 not sent' : `${failedCount} not sent`}
+        </Text>
+      </View>
+    );
+  }
+
+  if (status === SyncBadgeStatus.SYNCED) {
     return (
       <View style={styles.syncStatus}>
         <Ionicons name="cloud-done" size={16} color="#34C759" />
@@ -115,7 +132,7 @@ const SyncStatusIndicator = ({ pendingCount, isOnline }) => {
     );
   }
 
-  if (pendingCount > 0) {
+  if (status === SyncBadgeStatus.PENDING) {
     return (
       <View style={styles.syncStatus}>
         <Ionicons name="cloud-upload" size={16} color="#FF9500" />
@@ -181,6 +198,9 @@ export default function JournalScreen({ navigation }) {
 
   // Real-time context
   const { isConnected, unreadNotificationCount } = useRealtime();
+
+  // Sync context
+  const { pendingCount, failedCount } = useSync();
   
   // Real-time journal updates
   const {
@@ -369,8 +389,10 @@ export default function JournalScreen({ navigation }) {
     return user;
   }, [user]);
   
-  // Calculate pending count from entries
-  const pendingCount = displayEntries.filter(e => e.syncStatus === 'pending').length;
+  // Pending work comes from the sync queue, not from the entries on screen. Counting
+  // rendered entries missed two whole categories: queued media uploads, which are not
+  // entries at all, and entries outside the current day's view. Photos could sit
+  // unsent indefinitely while this read "Synced".
   const isOnline = isConnected;
 
   /**
@@ -743,7 +765,11 @@ export default function JournalScreen({ navigation }) {
       {/* Top Header - Avatar in top-right */}
       <View style={styles.topHeader}>
         <View style={styles.topHeaderLeft}>
-          <SyncStatusIndicator pendingCount={pendingCount} isOnline={isOnline} />
+          <SyncStatusIndicator
+            pendingCount={pendingCount}
+            failedCount={failedCount}
+            isOnline={isOnline}
+          />
           {/* Only offered when there is something to find. A filter that always returns
               nothing reads as broken rather than as good news. */}
           {noStoryEntries.length > 0 && (
@@ -849,14 +875,31 @@ export default function JournalScreen({ navigation }) {
         )}
       </DateSwipeContainer>
 
-      {/* WhatsApp-style Input Bar */}
-      <QuickCaptureBar
-        onSend={handleSendMessage}
-        onCameraPress={handleQuickCamera}
-        onMicPress={handleQuickMic}
-        placeholder="Message..."
-        primaryColor={PRIMARY_COLOR}
-      />
+      {/*
+        WhatsApp-style Input Bar.
+
+        Wrapped so the keyboard pushes it up rather than covering it. There was no keyboard
+        handling here at all: the bar is anchored to the bottom of the screen, and on iOS the
+        keyboard is drawn over anything it overlaps unless something moves it. So the moment
+        you started typing, the field you were typing into went behind the keyboard -- along
+        with the send button and the paste target.
+
+        `padding` on iOS, `height` on Android, which is the combination that behaves for a
+        bottom-anchored bar. The SafeAreaView above claims only the top edge, so there is no
+        bottom inset to offset against.
+      */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
+      >
+        <QuickCaptureBar
+          onSend={handleSendMessage}
+          onCameraPress={handleQuickCamera}
+          onMicPress={handleQuickMic}
+          placeholder="Message..."
+          primaryColor={PRIMARY_COLOR}
+        />
+      </KeyboardAvoidingView>
 
       {/* Entry Gallery Modal - Shows map + photos/videos for a specific entry */}
       <EntryGalleryModal

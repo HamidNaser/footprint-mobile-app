@@ -56,7 +56,12 @@ class JournalRepositoryClass extends BaseRepository {
       serverId: null,
       journalId: entryData.journalId,
       userId: entryData.userId,
-      date: entryData.date || this.formatDate(new Date()),
+      // Normalised, never passed through. A caller handing over a Date object used to be
+      // coerced somewhere between here and SQLite; expo-sqlite 57 rejects it outright with
+      // InvalidConvertibleException, which surfaced as "entry did not save" with no clue
+      // why. formatDate delegates to toDateKey, so an already-formatted YYYY-MM-DD passes
+      // through untouched rather than being re-parsed as UTC midnight and losing a day.
+      date: this.formatDate(entryData.date ?? new Date()),
       contentBlocks: entryData.contentBlocks || [],
       location: entryData.location || null,
       visibility: entryData.visibility || EntryVisibility.PRIVATE,

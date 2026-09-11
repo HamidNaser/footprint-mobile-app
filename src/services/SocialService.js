@@ -204,3 +204,41 @@ export async function getUserEntries(accessToken, userId) {
   const items = data?.items || [];
   return items.map((item) => adaptEntry(item.entry || item));
 }
+
+/**
+ * The signed-in user's own entries together with their spouse's and children's, already
+ * grouped into one section per family member and ordered self -> spouse -> children.
+ *
+ * The server derives who counts as immediate family from the caller's own tree, so this
+ * can never be pointed at somebody else's family, and it enforces per-entry visibility
+ * exactly as `getUserEntries` does — this is a new arrangement of what the viewer could
+ * already see, never a new grant.
+ *
+ * `limit` applies per section rather than across the view, so a relative who journals
+ * rarely can't be squeezed out by one who journals constantly.
+ *
+ * @param {string} accessToken
+ * @param {object} [options]
+ * @param {string} [options.memberId] - which family-tree node to build the unit around, so a
+ *   father's or grandfather's branch can be shown the same way. Omitted means your own.
+ * @param {number} [options.limit] - max entries per member section
+ * @returns {Promise<Array>} `{ memberId, relation, name, avatarUrl, entries }[]`
+ */
+export async function getFamilySummary(accessToken, { memberId, limit } = {}) {
+  const params = [];
+  // A tree-node id, not a user id: the server only ever consults the caller's own tree, so
+  // an account id does not resolve -- and it does not fail either, it answers with the
+  // caller's own household. Omitted means "my own", which is the correct default.
+  if (memberId) params.push(`memberId=${encodeURIComponent(memberId)}`);
+  if (limit) params.push(`limit=${encodeURIComponent(limit)}`);
+  const query = params.length ? `?${params.join('&')}` : '';
+  const data = await authFetch(`/feed/family-summary${query}`, accessToken);
+
+  return (data?.sections || []).map((section) => ({
+    memberId: section.memberId,
+    relation: section.relation,
+    name: section.name,
+    avatarUrl: section.avatarUrl ?? null,
+    entries: (section.entries || []).map(adaptEntry),
+  }));
+}

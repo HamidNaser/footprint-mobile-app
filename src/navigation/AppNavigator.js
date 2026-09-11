@@ -9,6 +9,7 @@ import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import HomeScreen from '../screens/HomeScreen';
 import JournalScreen from '../screens/JournalScreen';
 import PersonJournalScreen from '../screens/PersonJournalScreen';
+import FamilySummaryScreen from '../screens/FamilySummaryScreen';
 import FamilyScreen from '../screens/FamilyScreen';
 import FriendsScreen from '../screens/FriendsScreen';
 import PlacesScreen from '../screens/PlacesScreen';
@@ -117,6 +118,13 @@ export default function AppNavigator() {
             <Stack.Screen 
               name="PersonJournal" 
               component={PersonJournalScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen
+              name="FamilySummary"
+              component={FamilySummaryScreen}
               options={{
                 presentation: 'card',
               }}

@@ -59,6 +59,55 @@ export function AuthProvider({ children }) {
     loadStoredAuth();
   }, []);
 
+  /**
+   * Keep this context's stored copy of the tokens in step with ApiClient's.
+   *
+   * The two keep separate copies under different storage keys, and until now only login
+   * wrote this one. ApiClient refreshes on its own schedule and updated only its own copy,
+   * so this one stayed frozen at whatever login produced -- and the next time it was
+   * bridged across, it handed back a refresh token the server had already rotated. A
+   * rotated token is rejected, and ApiClient clears the session on a rejected refresh, so
+   * the user was silently signed out mid-use with no way back but signing in again.
+   *
+   * Both the React state and the stored copy move with the refresh.
+   *
+   * An earlier version persisted only, on the stated reasoning that nothing rendered from
+   * the state. That was simply wrong. RealtimeContext hands `accessToken` to SignalR, and
+   * fetchProfile and updateProfile use it for raw fetches that have no refresh-and-retry
+   * of their own. Freezing the state at whatever login produced meant all three kept
+   * presenting a token the server had already stopped accepting -- SignalR negotiate
+   * answered 401, and the profile screen failed to load -- while ApiClient's own calls
+   * carried on working, which made it look like anything but an auth problem.
+   */
+  useEffect(() => {
+    return ApiClient.onTokensChanged(async ({ accessToken: freshAccess, refreshToken: freshRefresh }) => {
+      // State first, and not contingent on the storage write below: a consumer holding a
+      // stale token is the exact failure this exists to prevent.
+      if (freshAccess) {
+        setAccessToken(freshAccess);
+        if (freshRefresh) setRefreshToken(freshRefresh);
+      }
+
+      try {
+        const storedData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
+        // Cleared tokens are a sign-out, and sign-out removes this key itself. Writing a
+        // half-empty record back here would resurrect it.
+        if (!storedData || !freshAccess) return;
+
+        const parsed = JSON.parse(storedData);
+        if (parsed.accessToken === freshAccess && parsed.refreshToken === freshRefresh) return;
+
+        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({
+          ...parsed,
+          accessToken: freshAccess,
+          refreshToken: freshRefresh ?? parsed.refreshToken,
+        }));
+      } catch (error) {
+        console.warn('[AuthContext] Failed to persist refreshed tokens:', error?.message);
+      }
+    });
+  }, []);
+
   // Activate the offline-first sync stack once authenticated (idempotent).
   // Pass the user id so the sync stack can detect an account switch and wipe
   // any local data left behind by a previous user before pulling.
@@ -166,7 +215,34 @@ export function AuthProvider({ children }) {
       }
 
       if (!response.ok) {
-        throw new Error(data.message || 'Login failed');
+        // Say what actually happened. "Login failed" covered 400, 401, 429 and 500
+        // identically, so a rejected password, a malformed request and a backend having a
+        // bad minute were indistinguishable -- from the screen and from the logs. The
+        // status is what separates "your password is wrong" from "this is not your fault".
+        // errors first: it names the field. `title` is ASP.NET's generic "One or more
+        // validation errors occurred", which says a field is wrong without saying which --
+        // exactly the information needed and the one part it omits.
+        const detail =
+          (data.errors && JSON.stringify(data.errors)) ||
+          data.message ||
+          data.title ||
+          null;
+
+        const reason =
+          response.status === 401 ? 'Email or password is incorrect'
+          : response.status === 400 ? 'The sign-in request was rejected'
+          : response.status === 429 ? 'Too many attempts — wait a moment and try again'
+          : response.status >= 500 ? 'The sign-in service is unavailable right now'
+          : 'Login failed';
+
+        console.error(
+          `[AuthContext] Login rejected: HTTP ${response.status}`,
+          detail ?? '(no message from server)'
+        );
+
+        const error = new Error(detail ? `${reason} (${detail})` : reason);
+        error.status = response.status;
+        throw error;
       }
 
       await saveAuth(data.user, { accessToken: data.accessToken, refreshToken: data.refreshToken });

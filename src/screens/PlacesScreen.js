@@ -188,7 +188,18 @@ const PlaceCard = memo(({ place, isSelected, onPress, onYearPress }) => {
         onPress={() => onPress(place)}
       >
         <View style={styles.placeImageWrapper}>
-          <Image source={{ uri: place.image }} style={styles.placeImage} />
+          {place.image ? (
+            <Image source={{ uri: place.image }} style={styles.placeImage} />
+          ) : (
+            // Nobody has photographed this place yet. A monogram from its own name,
+            // so a list of unphotographed places still reads as distinct places
+            // rather than a column of identical grey squares.
+            <View style={[styles.placeImage, styles.placeImageEmpty]}>
+              <Text style={styles.placeImageEmptyText}>
+                {(place.name || '').trim().charAt(0).toUpperCase() || '·'}
+              </Text>
+            </View>
+          )}
           <View style={styles.placeBadge}>
             <Ionicons name="location" size={12} color="#FFF" />
           </View>
@@ -870,6 +881,17 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     borderWidth: 2,
     borderColor: BORDER_COLOR,
+  },
+  // Worn by a View rather than an Image when the place has no photograph.
+  placeImageEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ece7df',
+  },
+  placeImageEmptyText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#8a7f6d',
   },
   placeBadge: {
     position: 'absolute',
