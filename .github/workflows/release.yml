@@ -124,6 +124,27 @@ jobs:
       # The number that identifies this build in TestFlight. appVersionSource is
       # "remote", so EAS owns the counter and app.json cannot tell us it.
       # Reporting only -- never allowed to fail a release that already built.
+      # Where the build actually landed.
+      #
+      # The summary used to say "install it from the build link below" and then link to the
+      # *list* of every build ever made -- so finding the one that had just been produced
+      # meant matching it by timestamp. An ad-hoc build is useless until it is on a phone,
+      # and the link is the only way it gets there, so it belongs in the run that made it.
+      #
+      # Read back from build:list rather than parsed out of the build command's own output:
+      # the build has just finished, so it is the most recent, and --json gives a shape that
+      # will not shift with the CLI's console formatting.
+      - name: Find the build
+        id: builtat
+        if: always()
+        continue-on-error: true
+        run: |
+          JSON="$(eas build:list --limit 1 --json --non-interactive 2>/dev/null || echo '[]')"
+          ID="$(node -p "try{JSON.parse(process.argv[1])[0].id||''}catch(e){''}" "$JSON")"
+          IPA="$(node -p "try{JSON.parse(process.argv[1])[0].artifacts.buildUrl||''}catch(e){''}" "$JSON")"
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "ipa=$IPA" >> $GITHUB_OUTPUT
+
       - name: Read build number
         id: buildnum
         if: always()
@@ -160,9 +181,28 @@ jobs:
             echo "| Submitted | \`${{ inputs.submit }}\` |"
             echo "| Triggered by | @${{ github.actor }} |"
             echo ""
+            PAGE=""
+            if [ -n "${{ steps.builtat.outputs.id }}" ]; then
+              PAGE="https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds/${{ steps.builtat.outputs.id }}"
+            fi
             if [ "${{ inputs.profile }}" = "preview" ]; then
-              echo "> This is an **ad-hoc** build. It will **not** appear in TestFlight —"
-              echo "> install it from the build link below."
+              echo "> This is an **ad-hoc** build. It will **not** appear in TestFlight."
+              echo ""
+              if [ -n "$PAGE" ]; then
+                echo "### Install it"
+                echo ""
+                echo "Open this **on the iPhone** and press Install:"
+                echo ""
+                echo "$PAGE"
+                echo ""
+                echo "Delete the existing FootPrint first — iOS will not replace an app"
+                echo "signed a different way, and deleting takes the local database with it,"
+                echo "so let sync finish before you do."
+              else
+                echo "> Could not read the build link; find it in the builds list below."
+              fi
+            elif [ -n "$PAGE" ]; then
+              echo "- This build: $PAGE"
             fi
             echo ""
             echo "- Builds (build number ↔ commit): https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds"
