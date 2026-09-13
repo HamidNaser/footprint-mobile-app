@@ -6,74 +6,111 @@
  * empty members would look tidier, pass every other test, and silently reintroduce the
  * exact confusion this module was written to answer — a thin day reading as a broken
  * screen.
+ *
+ * Membership now comes from `household` (Phase 2's `getJournalBook`), not from who wrote.
+ * `household` already arrives in reading order — head, then spouse, then children — so this
+ * module no longer sorts; it trusts the order it is given. `dayEntries` is already scoped to
+ * one day (the caller does that, via the journal book's day grouping), so this module no
+ * longer knows what a "day" is either.
  */
 
-import { rosterForDay, rosterCaption, dayOf } from './dayRoster';
+import { rosterForDay, rosterCaption } from './dayRoster';
 
-const at = (key) => new Date(`${key}T12:00:00`).getTime();
-
-const section = (memberId, relation, name, entries = []) => ({
+const member = (memberId, relation, name, overrides = {}) => ({
   memberId,
   relation,
   name,
   avatarUrl: null,
-  entries,
+  hasAccount: true,
+  ...overrides,
 });
 
-const entry = (id, createdAt) => ({ serverId: id, createdAt });
+const entry = (id, createdAt, memberId) => ({ serverId: id, createdAt, memberId });
 
 describe('rosterForDay', () => {
   const household = [
-    section('m1', 'head', 'Akram', [entry('a', at('2026-08-05'))]),
-    section('m2', 'spouse', 'Reem', []),
-    section('m3', 'child', 'Lina', [entry('b', at('2026-08-01'))]),
+    member('m1', 'head', 'Akram'),
+    member('m2', 'spouse', 'Reem'),
+    member('m3', 'child', 'Lina'),
   ];
 
   it('keeps everybody, including those who recorded nothing that day', () => {
-    const roster = rosterForDay(household, '2026-08-05');
+    const roster = rosterForDay(household, [entry('a', 1, 'm1')]);
 
     expect(roster.map((r) => r.name)).toEqual(['Akram', 'Reem', 'Lina']);
   });
 
-  it('counts only the entries on the day being read', () => {
-    const roster = rosterForDay(household, '2026-08-05');
-
-    expect(roster.map((r) => r.count)).toEqual([1, 0, 0]);
-  });
-
-  it('orders head, then spouse, then children whatever order the sections arrive in', () => {
-    const roster = rosterForDay(
-      [household[2], household[1], household[0]],
-      '2026-08-05'
-    );
-
-    expect(roster.map((r) => r.relation)).toEqual(['head', 'spouse', 'child']);
-  });
-
-  it('puts an unranked relation last, so a friends group keeps its own order', () => {
-    const roster = rosterForDay(
-      [section('f1', undefined, 'Ann'), section('f2', undefined, 'Ben')],
-      null
-    );
-
-    expect(roster.map((r) => r.name)).toEqual(['Ann', 'Ben']);
-  });
-
-  it('counts everything when no day is given', () => {
-    const roster = rosterForDay(household, null);
+  it('counts only the entries belonging to each member', () => {
+    const roster = rosterForDay(household, [
+      entry('a', 1, 'm1'),
+      entry('b', 2, 'm3'),
+    ]);
 
     expect(roster.map((r) => r.count)).toEqual([1, 0, 1]);
   });
 
+  // The critical regression test: seeded in an order no relation-based sort would produce
+  // (child, then head, then spouse — `head, spouse, child` and its reverse are the only two
+  // orderings a `rank()`-style sort could ever emit), so a reintroduced sort would visibly
+  // change the assertion below rather than accidentally agreeing with it.
+  it('keeps household order exactly as given, without re-sorting by relation', () => {
+    const outOfRelationOrder = [
+      member('m3', 'child', 'Lina'),
+      member('m1', 'head', 'Akram'),
+      member('m2', 'spouse', 'Reem'),
+    ];
+
+    const roster = rosterForDay(outOfRelationOrder, []);
+
+    expect(roster.map((r) => r.name)).toEqual(['Lina', 'Akram', 'Reem']);
+    expect(roster.map((r) => r.relation)).toEqual(['child', 'head', 'spouse']);
+  });
+
+  it('keeps a friends group in the order it lists its members, having no relation at all', () => {
+    const friends = [
+      member('f1', undefined, 'Ben'),
+      member('f2', undefined, 'Ann'),
+    ];
+
+    const roster = rosterForDay(friends, []);
+
+    expect(roster.map((r) => r.name)).toEqual(['Ben', 'Ann']);
+  });
+
+  it('counts whatever entries it is given, regardless of how many belong to one member', () => {
+    const roster = rosterForDay(household, [
+      entry('a', 1, 'm1'),
+      entry('b', 2, 'm1'),
+      entry('c', 3, 'm3'),
+    ]);
+
+    expect(roster.map((r) => r.count)).toEqual([2, 0, 1]);
+  });
+
   it('carries entry ids so a face can jump to what it is about', () => {
-    const roster = rosterForDay(household, '2026-08-05');
+    const roster = rosterForDay(household, [entry('a', 1, 'm1')]);
 
     expect(roster[0].entryIds).toEqual(['a']);
     expect(roster[1].entryIds).toEqual([]);
   });
 
+  it('carries hasAccount without acting on it', () => {
+    const roster = rosterForDay(
+      [member('m1', 'head', 'Akram', { hasAccount: true }), member('m2', 'child', 'Sami', { hasAccount: false })],
+      []
+    );
+
+    expect(roster.map((r) => r.hasAccount)).toEqual([true, false]);
+  });
+
+  it('guards a missing name rather than carrying undefined', () => {
+    const roster = rosterForDay([member('m1', 'child', undefined)], []);
+
+    expect(roster[0].name).toBe('');
+  });
+
   it('survives empty and missing input', () => {
-    expect(rosterForDay([], '2026-08-05')).toEqual([]);
+    expect(rosterForDay([], [])).toEqual([]);
     expect(rosterForDay(null, null)).toEqual([]);
   });
 });
@@ -102,18 +139,5 @@ describe('rosterCaption', () => {
 
   it('says nothing at all for an empty roster', () => {
     expect(rosterCaption([], '5 August')).toBe('');
-  });
-});
-
-describe('dayOf', () => {
-  it('keeps an already-formatted civil date rather than re-parsing it', () => {
-    // Re-parsing '2026-05-12' gives UTC midnight, which is 11 May west of Greenwich --
-    // the civil-date bug this codebase has already paid for more than once.
-    expect(dayOf({ date: '2026-05-12' })).toBe('2026-05-12');
-  });
-
-  it('returns null when there is no usable date', () => {
-    expect(dayOf({})).toBeNull();
-    expect(dayOf(null)).toBeNull();
   });
 });

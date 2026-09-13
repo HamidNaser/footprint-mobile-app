@@ -22,8 +22,8 @@ import { rosterForDay, rosterCaption } from '../utils/dayRoster';
  * counterpart is. A group of friends has no head or spouse, so the ordering falls through
  * to the order the group lists its members.
  */
-const DayRoster = memo(({ sections, day, dateText, onJumpToEntry }) => {
-  const roster = rosterForDay(sections, day);
+const DayRoster = memo(({ household, dayEntries, dateText, onJumpToEntry }) => {
+  const roster = rosterForDay(household, dayEntries);
   if (roster.length === 0) return null;
 
   const caption = rosterCaption(roster, dateText);

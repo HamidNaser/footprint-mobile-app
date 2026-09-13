@@ -9,10 +9,10 @@
  * Answering it needs the roster and the day together. The roster alone says who is
  * included; the roster *for this day* also says why the page is thin.
  *
- * Ported from `foot-print-web/src/utils/familyDayRoster.js`. Used in two places here, as on
- * web: above the family summary, and above a friends group's journal. A group of friends
- * has no head or spouse, so the relation ordering simply falls through to the order the
- * group lists its members.
+ * Ported from `foot-print-web/src/utils/familyDayRoster.js`. Used above the family summary,
+ * and above a friends group's journal. A group of friends has no head or spouse, so relying
+ * on list order rather than relation simply falls through to the order the group lists its
+ * members.
  *
  * This also carries something the day-grouped summary would otherwise lose. Grouped by
  * person, a member with nothing recorded still got a header, so the screen could not
@@ -20,62 +20,49 @@
  * nowhere to hang that header — so it lives here instead, which is a better place for it:
  * it is now per-day rather than per-screen, and says not just "these five are in scope" but
  * "these four had nothing to say today".
+ *
+ * Membership comes from the journal book's `household` list (Phase 2), which already
+ * arrives in reading order — head, then spouse, then children. Ordering that is now the
+ * server's job: this module trusts the order it is given rather than re-deriving it from a
+ * relation, so a member with no account still appears here rather than being inferred (and
+ * dropped) from who wrote.
  */
 
-import { toDateKey } from './journalDate';
-
-/** Head first, then spouse, then children — the order the sections already arrive in. */
-const RELATION_ORDER = { head: 0, self: 0, spouse: 1, child: 2 };
-
-function rank(relation) {
-  const r = RELATION_ORDER[relation];
-  return r === undefined ? Number.MAX_SAFE_INTEGER : r;
-}
-
 /**
- * The calendar day an entry belongs to.
- *
- * Delegates to `toDateKey`, which is this app's answer to the civil-date problem: an
- * already-formatted key passes through untouched rather than being re-parsed into a UTC
- * instant that lands a day earlier west of Greenwich.
- *
- * @param {object} entry
- * @returns {string|null} `YYYY-MM-DD`
- */
-export function dayOf(entry) {
-  return toDateKey(entry?.date ?? entry?.createdAt ?? entry?.recordedAt ?? null);
-}
-
-/**
- * One row per household member, in a fixed order, whether or not they recorded anything.
+ * One row per household member, in the order `household` is given, whether or not the
+ * member recorded anything.
  *
  * Nobody is ever dropped for having nothing. The people with nothing are the whole point:
  * they are the ones the reader is otherwise left guessing about.
  *
- * @param {Array} sections - the summary, one section per member
- * @param {string|null} day - the day on screen, `YYYY-MM-DD`; null counts everything
+ * @param {Array} household - `{ memberId, userId, relation, name, avatarUrl, hasAccount }[]`,
+ *   in reading order
+ * @param {Array} dayEntries - the day's entries, each carrying `memberId`; already scoped to
+ *   one day by the caller
  * @returns {Array<{memberId: string, name: string, avatar: string|null, relation: string,
- *   count: number, entryIds: Array<string>}>}
+ *   hasAccount: boolean, count: number, entryIds: Array<string>}>}
  */
-export function rosterForDay(sections, day) {
-  return (sections || [])
-    .map((section) => {
-      const onDay = (section.entries || []).filter(
-        (entry) => day == null || dayOf(entry) === day
-      );
+export function rosterForDay(household, dayEntries) {
+  const entries = dayEntries || [];
 
-      return {
-        memberId: section.memberId,
-        name: section.name,
-        avatar: section.avatarUrl ?? null,
-        relation: section.relation,
-        count: onDay.length,
-        // So a face can carry the reader to what it is about.
-        entryIds: onDay.map((entry) => entry.serverId || entry.localId || entry.id)
-          .filter(Boolean),
-      };
-    })
-    .sort((a, b) => rank(a.relation) - rank(b.relation));
+  return (household || []).map((member) => {
+    const onDay = entries.filter((entry) => entry.memberId === member.memberId);
+
+    return {
+      memberId: member.memberId,
+      // Family-tree nodes can lack a name; every consumer of this row treats it as a
+      // string, so it is guarded here rather than carrying `undefined` outward.
+      name: member.name || '',
+      avatar: member.avatarUrl ?? null,
+      relation: member.relation,
+      // Not acted on here — no dimming distinction, no filtering. That's Phase 3.
+      hasAccount: member.hasAccount,
+      count: onDay.length,
+      // So a face can carry the reader to what it is about.
+      entryIds: onDay.map((entry) => entry.serverId || entry.localId || entry.id)
+        .filter(Boolean),
+    };
+  });
 }
 
 /**
