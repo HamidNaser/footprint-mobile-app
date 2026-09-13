@@ -97,6 +97,28 @@ describe('getJournalBook', () => {
     ]);
   });
 
+  it('preserves the order the server lists the household in, member for member', async () => {
+    // Reading order -- head, spouse, then children -- is the server's job now, and this
+    // client is a pass-through. Seeded deliberately out of that order so a client-side
+    // re-sort, the thing this phase exists to remove the last copies of, would produce a
+    // different array and fail here rather than coincidentally agreeing.
+    respondWith({
+      household: [
+        { memberId: 'm3', userId: 'u3', relation: 'child', name: 'Lina', hasAccount: true },
+        { memberId: 'm1', userId: 'u1', relation: 'head', name: 'Akram', hasAccount: true },
+        { memberId: 'm2', userId: 'u2', relation: 'spouse', name: 'Reem', hasAccount: true },
+      ],
+      days: [],
+      oldestDate: null,
+      hasMore: false,
+    });
+
+    const book = await getJournalBook(token);
+
+    expect(book.household.map((m) => m.memberId)).toEqual(['m3', 'm1', 'm2']);
+    expect(book.household.map((m) => m.name)).toEqual(['Lina', 'Akram', 'Reem']);
+  });
+
   it('adapts each entry and tags it with its memberId', async () => {
     respondWith({
       household: [],

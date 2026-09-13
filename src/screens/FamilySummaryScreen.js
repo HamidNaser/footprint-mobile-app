@@ -113,7 +113,11 @@ export default function FamilySummaryScreen({ navigation, route }) {
     // Re-issues the same request the initial load makes, under the same epoch/ref guards.
     // A household is allowed to legitimately change on a full reload -- that's not the case
     // this file's paging guards exist for -- just never mid-page.
-    if (loadingRef.current) return;
+    // Guarded on `refreshing`, not `loadingRef`: a pull-to-refresh supersedes an in-flight
+    // page rather than being blocked by it. Bumping the epoch below already invalidates that
+    // page, and bailing instead would make the gesture silently do nothing -- the spinner
+    // snaps back with no request issued, because `setRefreshing(true)` is never reached.
+    if (refreshing) return;
     loadingRef.current = true;
     epochRef.current += 1;
     const myEpoch = epochRef.current;
@@ -138,7 +142,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
         setRefreshing(false);
       }
     }
-  }, [accessToken, memberId]);
+  }, [accessToken, memberId, refreshing]);
 
   const loadMore = useCallback(async () => {
     if (loadingRef.current || status !== 'ready' || !hasMore || !oldestDate) return;
