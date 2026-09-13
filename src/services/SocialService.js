@@ -242,3 +242,64 @@ export async function getFamilySummary(accessToken, { memberId, limit } = {}) {
     entries: (section.entries || []).map(adaptEntry),
   }));
 }
+
+/**
+ * One household's journal as the book: who is in the household, and a page of the days
+ * they wrote on.
+ *
+ * The household comes back separately from the days on purpose. Membership is a fact about
+ * the family; days are a fact about what was written. Deriving the first from the second --
+ * which the per-member-sections shape did -- meant anyone who had written nothing vanished
+ * from their own family, and a reader could not tell "quiet" from "not here".
+ *
+ * Paging is by date cursor rather than entry count: a per-member cap gave every member a
+ * different horizon, so reading backwards the household thinned out one person at a time.
+ *
+ * @param {string} accessToken
+ * @param {object} [options]
+ * @param {string} [options.memberId] - which family-tree node's household to show. A tree-node
+ *   id, not a user id: the server only ever consults the caller's own tree. Omitted means
+ *   the caller's own branch.
+ * @param {string} [options.before] - date cursor, `YYYY-MM-DD`. Pass the previous response's
+ *   `oldestDate` to read further back.
+ * @param {number} [options.days] - how many days-with-entries to fetch. The server clamps it.
+ * @returns {Promise<{household: Array, days: Array, oldestDate: string|null, hasMore: boolean}>}
+ */
+export async function getJournalBook(accessToken, { memberId, before, days } = {}) {
+  const params = [];
+  if (memberId) params.push(`memberId=${encodeURIComponent(memberId)}`);
+  if (before) params.push(`before=${encodeURIComponent(before)}`);
+  if (days) params.push(`days=${encodeURIComponent(days)}`);
+  const query = params.length ? `?${params.join('&')}` : '';
+
+  const data = await authFetch(`/journal/book${query}`, accessToken);
+
+  return {
+    household: (data?.household || []).map((member) => ({
+      memberId: member.memberId,
+      userId: member.userId ?? null,
+      relation: member.relation,
+      name: member.name,
+      avatarUrl: member.avatarUrl ?? null,
+      hasAccount: member.hasAccount,
+    })),
+    days: (data?.days || []).map((day) => ({
+      date: day.date,
+      entries: (day.entries || []).map((item) => {
+        // adaptEntry prefers `entry.date` over `entry.createdAt` when both are present
+        // (correct for feeds where `date` already carries a full timestamp). Here the
+        // day bucket's `date` is a civil day with no time component, so if it ever also
+        // rides along on the entry itself, it must not reach adaptEntry -- otherwise
+        // every entry's time-of-day collapses to midnight. createdAt is the only field
+        // on this endpoint that actually carries the time.
+        const { date: _civilDate, ...entryPayload } = item.entry || {};
+        return {
+          ...adaptEntry(entryPayload),
+          memberId: item.memberId,
+        };
+      }),
+    })),
+    oldestDate: data?.oldestDate ?? null,
+    hasMore: Boolean(data?.hasMore),
+  };
+}
