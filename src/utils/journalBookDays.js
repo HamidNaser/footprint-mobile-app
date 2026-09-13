@@ -1,6 +1,6 @@
 /**
  * Turn the journal book's server-grouped days into the `SectionList` sections
- * `FamilySummaryScreen` (soon: the journal book screen) draws.
+ * `FamilySummaryScreen` draws.
  *
  * This is the successor to `familySummaryDays.js`. That module existed because the old
  * endpoint answered "who is in this family and what have they written" grouped by person,

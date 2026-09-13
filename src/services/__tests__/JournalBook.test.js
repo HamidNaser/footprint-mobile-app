@@ -122,7 +122,7 @@ describe('getJournalBook', () => {
 
   it('takes an entry\'s time from createdAt, never from the civil day, and leaves the day a civil day', async () => {
     // The day bucket's `date` is a civil day with no time component ("2026-09-10").
-    // adaptEntry (shared with getFamilySummary) prefers `entry.date` over
+    // adaptEntry (shared with getUserEntries) prefers `entry.date` over
     // `entry.createdAt` when both are present -- that's fine for feeds where `date`
     // already carries a full timestamp, but here it would collapse every entry's
     // time-of-day to midnight if a civil-day `date` ever rode along on the entry
