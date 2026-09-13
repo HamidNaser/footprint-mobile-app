@@ -56,6 +56,20 @@ describe('getJournalBook', () => {
     expect(url).toContain('days=10');
   });
 
+  it('escapes a member id that would otherwise break the query string', async () => {
+    // Ids are opaque to this client, so encoding them is load-bearing rather than
+    // cosmetic: one containing & or = would truncate the query and send a different
+    // request than the caller asked for. The test above cannot prove the encoding
+    // happens, because 'node_7' encodes to itself.
+    respondWith({ household: [], days: [], oldestDate: null, hasMore: false });
+
+    await getJournalBook(token, { memberId: 'a&b=c d' });
+
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toContain('memberId=a%26b%3Dc%20d');
+    expect(url).not.toContain('a&b=c');
+  });
+
   it('keeps a household member who has no account, with userId null and hasAccount false', async () => {
     // A grandmother who never signed up is still part of the household. Filtering her
     // out here -- or defaulting userId to something falsy-but-truthy -- would make the
