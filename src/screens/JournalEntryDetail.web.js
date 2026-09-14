@@ -357,7 +357,7 @@ export const JournalEntryDetail = ({
             </Text>
           </View>
 
-          {entry.updatedAt !== entry.createdAt && (
+          {entry.updatedAt != null && entry.updatedAt !== entry.createdAt && (
             <View style={styles.metadataRow}>
               <Ionicons name="time-outline" size={18} color="#8E8E93" />
               <Text style={styles.metadataText}>
