@@ -276,7 +276,18 @@ export default function FamilySummaryScreen({ navigation, route }) {
             </View>
           )}
           renderItem={({ item }) => (
-            <JournalEntryCard entry={item} currentUserId={user?.id} showAuthor />
+            // `user` is who the card draws in its header. journalBookToDays attributes each
+            // entry from the household roster rather than from the entry's own author field,
+            // precisely so a member the API returns without an author is not labelled
+            // 'Unknown' -- but that attribution only reaches the reader if it is handed to the
+            // card here. Without it every entry in the book renders a '?' avatar and the name
+            // 'Unknown', which is the exact outcome the attribution exists to prevent.
+            <JournalEntryCard
+              entry={item}
+              user={item.author}
+              currentUserId={user?.id}
+              showAuthor
+            />
           )}
           onEndReached={loadMore}
           // Generous enough that the next page usually lands before the reader scrolls
