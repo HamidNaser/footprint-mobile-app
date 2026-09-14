@@ -123,6 +123,13 @@ export default function FamilySummaryScreen({ navigation, route }) {
     const myEpoch = epochRef.current;
     const requestMemberId = memberId;
 
+    // Bumping the epoch above orphaned any in-flight page: its `finally` is guarded on the
+    // epoch still matching, so it will skip its own `setLoadingMore(false)`. Nothing else
+    // clears the flag, and if this refresh comes back with `hasMore: false` then `loadMore`
+    // can never run again to clear it either -- leaving the footer spinner turning forever
+    // under a list that is complete. Cleared here, the same way a household change does.
+    setLoadingMore(false);
+
     setRefreshing(true);
     try {
       const result = await getJournalBook(accessToken, { memberId: requestMemberId });
