@@ -292,7 +292,7 @@ export const JournalEntryDetail = ({
           <Ionicons name="arrow-back" size={24} color="#000" />
         </TouchableOpacity>
         <View style={styles.headerTitle}>
-          <Text style={styles.headerDate}>{formatDate(entry.date || entry.createdAt)}</Text>
+          <Text style={styles.headerDate}>{formatDate(entry.date) || formatDate(entry.createdAt)}</Text>
         </View>
         <TouchableOpacity style={styles.headerButton} onPress={showMenu}>
           <Ionicons name="ellipsis-horizontal" size={24} color="#000" />

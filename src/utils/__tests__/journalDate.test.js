@@ -61,6 +61,17 @@ describe('parseDateKey', () => {
     expect(d.getHours()).toBe(0);
   });
 
+  it('treats a missing day as missing, not as 1 January 1970', () => {
+    // `new Date(null)` is the epoch rather than an invalid date, so without an explicit
+    // guard a null key parses to a real, plausible-looking day. Callers that render a
+    // heading from this would print "Thursday, 1 January 1970" where they meant to show
+    // nothing -- and adaptEntry normalises an absent civil day to exactly null.
+    expect(parseDateKey(null)).toBeNull();
+    expect(parseDateKey(undefined)).toBeNull();
+    expect(parseDateKey('')).toBeNull();
+    expect(parseDateKey('not-a-date')).toBeNull();
+  });
+
   it('round-trips with toDateKey at every hour', () => {
     for (let hour = 0; hour < 24; hour += 1) {
       const key = toDateKey(new Date(2026, 7, 5, hour, 30));

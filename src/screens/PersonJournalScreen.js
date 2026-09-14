@@ -42,7 +42,7 @@ import { useAuth } from '../context/AuthContext';
 // Live data
 import { getUserEntries } from '../services/SocialService';
 import DayRoster from '../components/DayRoster';
-import { toDateKey, isSameDay } from '../utils/journalDate';
+import { toDateKey, isSameDay, parseDateKey } from '../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -213,11 +213,20 @@ export default function PersonJournalScreen({ route, navigation }) {
       );
       const merged = results.flat().sort((a, b) => b.createdAt - a.createdAt);
       setEntries(merged);
-      // On first successful load for this person, open on their latest entry so
-      // the journal isn't stuck on an empty "today".
+      // On first successful load for this person, open on their latest day that actually
+      // holds entries, so the journal isn't stuck on an empty "today".
+      //
+      // Derived from the civil day -- the same key `displayEntries` filters by. Taking the
+      // day off `createdAt` instead would open on the day the newest entry was *recorded*,
+      // which for anything written about an earlier day is a day the filter then finds
+      // nothing on: one entry loaded, and a blank screen.
       if (!didInitDateRef.current && merged.length > 0) {
         didInitDateRef.current = true;
-        setSelectedDate(new Date(merged[0].createdAt));
+        const latestKey = merged.reduce((max, entry) => {
+          const key = toDateKey(entry.date || entry.createdAt);
+          return key && (max === null || key > max) ? key : max;
+        }, null);
+        if (latestKey) setSelectedDate(parseDateKey(latestKey));
       }
     } catch (err) {
       setError(err.message || 'Failed to load journal');

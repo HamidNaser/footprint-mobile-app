@@ -57,6 +57,10 @@ export function toDateKey(value) {
  * @returns {Date|null}
  */
 export function parseDateKey(key) {
+  // `new Date(null)` is the epoch, not an invalid date, so a null key would otherwise
+  // parse to 1 January 1970 and render as a real, plausible-looking day. No caller wants
+  // that -- a missing day should read as missing.
+  if (key == null) return null;
   const match = typeof key === 'string' ? key.match(DATE_KEY) : null;
   if (!match) {
     const d = new Date(key);

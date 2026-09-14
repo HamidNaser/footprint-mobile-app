@@ -25,6 +25,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { VideoThumbnail } from '../media/VideoThumbnail';
+import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const MAP_HEIGHT = 200;
@@ -138,15 +139,19 @@ export const EntryGalleryModal = memo(({
 
   // Format entry date
   const entryDate = useMemo(() => {
-    if (!entry?.createdAt) return '';
-    const date = new Date(entry.createdAt);
+    // The civil day the entry is *about*, not the instant it was recorded: something
+    // written today about last week belongs to last week, and this header is the only
+    // thing telling the reader which day they are looking at. Falls through to
+    // `createdAt` if the civil day is missing or unparseable, rather than blanking.
+    const date = parseDateKey(entry?.date) || parseDateKey(entry?.createdAt);
+    if (!date) return '';
     return date.toLocaleDateString(undefined, {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     });
-  }, [entry?.createdAt]);
+  }, [entry?.date, entry?.createdAt]);
 
   if (!entry) return null;
 
