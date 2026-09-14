@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
+import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_COLUMNS = 3;
@@ -147,8 +148,12 @@ const AudioListItem = memo(({ item, onPress, primaryColor }) => {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const formatDate = (timestamp) => {
-    const date = new Date(timestamp);
+  const formatDate = (value) => {
+    // The civil day the entry is about, when it has one. parseDateKey anchors a
+    // `YYYY-MM-DD` to local midnight; `new Date` would read it as UTC and show the
+    // previous day west of UTC.
+    const date = parseDateKey(value);
+    if (!date) return '';
     return date.toLocaleDateString(undefined, { 
       month: 'short', 
       day: 'numeric',
@@ -170,7 +175,7 @@ const AudioListItem = memo(({ item, onPress, primaryColor }) => {
           {item.title || 'Voice recording'}
         </Text>
         <Text style={styles.audioMeta}>
-          {formatDuration(item.duration)} • {formatDate(item.createdAt)}
+          {formatDuration(item.duration)} • {formatDate(item.date || item.createdAt)}
         </Text>
       </View>
       <Ionicons name="play-circle" size={32} color={primaryColor} />
@@ -269,18 +274,21 @@ export const MediaGalleryTab = ({
             ...m,
             entryId: entry.localId,
             createdAt: entry.createdAt,
+            date: entry.date,
           }));
         } else if (block.type === 'video') {
           block.media?.forEach(m => videos.push({
             ...m,
             entryId: entry.localId,
             createdAt: entry.createdAt,
+            date: entry.date,
           }));
         } else if (block.type === 'audio') {
           block.media?.forEach(m => audio.push({
             ...m,
             entryId: entry.localId,
             createdAt: entry.createdAt,
+            date: entry.date,
             duration: block.duration,
           }));
         }
