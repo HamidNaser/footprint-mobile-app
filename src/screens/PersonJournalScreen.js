@@ -42,7 +42,7 @@ import { useAuth } from '../context/AuthContext';
 // Live data
 import { getUserEntries } from '../services/SocialService';
 import DayRoster from '../components/DayRoster';
-import { toDateKey } from '../utils/journalDate';
+import { toDateKey, isSameDay, parseDateKey } from '../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -213,11 +213,20 @@ export default function PersonJournalScreen({ route, navigation }) {
       );
       const merged = results.flat().sort((a, b) => b.createdAt - a.createdAt);
       setEntries(merged);
-      // On first successful load for this person, open on their latest entry so
-      // the journal isn't stuck on an empty "today".
+      // On first successful load for this person, open on their latest day that actually
+      // holds entries, so the journal isn't stuck on an empty "today".
+      //
+      // Derived from the civil day -- the same key `displayEntries` filters by. Taking the
+      // day off `createdAt` instead would open on the day the newest entry was *recorded*,
+      // which for anything written about an earlier day is a day the filter then finds
+      // nothing on: one entry loaded, and a blank screen.
       if (!didInitDateRef.current && merged.length > 0) {
         didInitDateRef.current = true;
-        setSelectedDate(new Date(merged[0].createdAt));
+        const latestKey = merged.reduce((max, entry) => {
+          const key = toDateKey(entry.date || entry.createdAt);
+          return key && (max === null || key > max) ? key : max;
+        }, null);
+        if (latestKey) setSelectedDate(parseDateKey(latestKey));
       }
     } catch (err) {
       setError(err.message || 'Failed to load journal');
@@ -238,23 +247,17 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, [loadEntries]);
 
   /**
-   * Check if a timestamp is on the same day as the selected date
-   */
-  const isSameDay = useCallback((timestamp, date) => {
-    const entryDate = new Date(timestamp);
-    return (
-      entryDate.getFullYear() === date.getFullYear() &&
-      entryDate.getMonth() === date.getMonth() &&
-      entryDate.getDate() === date.getDate()
-    );
-  }, []);
-
-  /**
-   * Filter entries for the selected date
+   * Filter entries for the selected date.
+   *
+   * Buckets on the entry's civil `date` -- the day it is *about* -- falling back to
+   * `createdAt` only when the server sent none. This file used to carry its own
+   * `isSameDay` that re-parsed its argument through `Date`; a civil day string parses as
+   * UTC midnight, so comparing local calendar fields put every entry on the previous day
+   * west of UTC. The shared helper keeps a civil string verbatim instead of re-parsing it.
    */
   const displayEntries = useMemo(() => {
-    return entries.filter(entry => isSameDay(entry.createdAt, selectedDate));
-  }, [entries, selectedDate, isSameDay]);
+    return entries.filter((entry) => isSameDay(entry.date || entry.createdAt, selectedDate));
+  }, [entries, selectedDate]);
 
   /**
    * Everyone in the group, in the order the group lists them. A friends group has no head
@@ -293,10 +296,13 @@ export default function PersonJournalScreen({ route, navigation }) {
    */
   const markedDates = useMemo(() => {
     const dates = {};
-    entries.forEach(entry => {
-      const date = new Date(entry.createdAt);
-      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-      dates[dateStr] = { marked: true };
+    entries.forEach((entry) => {
+      // The civil day the entry is about, through the shared helper -- the same derivation
+      // JournalScreen's calendar uses. This hand-rolled a re-parse of `createdAt` through
+      // `Date` plus local calendar fields, which lands a day early west of UTC: the dot
+      // sits on an empty day while the day that has entries looks bare.
+      const key = toDateKey(entry.date || entry.createdAt);
+      if (key) dates[key] = { marked: true };
     });
     return dates;
   }, [entries]);

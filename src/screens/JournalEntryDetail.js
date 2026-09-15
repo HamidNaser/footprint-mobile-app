@@ -25,6 +25,7 @@ import {
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { parseDateKey } from '../utils/journalDate';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
@@ -34,8 +35,12 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 /**
  * Format date for display
  */
-const formatDate = (timestamp) => {
-  const date = new Date(timestamp);
+const formatDate = (value) => {
+  // Takes the entry's civil day when it has one, so a backdated entry shows the day it is
+  // *about* rather than the day it was typed. parseDateKey anchors a `YYYY-MM-DD` to local
+  // midnight; `new Date` would read it as UTC and render the previous day west of UTC.
+  const date = parseDateKey(value);
+  if (!date) return '';
   return date.toLocaleDateString(undefined, {
     weekday: 'long',
     year: 'numeric',
@@ -287,7 +292,7 @@ export const JournalEntryDetail = ({
           <Ionicons name="arrow-back" size={24} color="#000" />
         </TouchableOpacity>
         <View style={styles.headerTitle}>
-          <Text style={styles.headerDate}>{formatDate(entry.createdAt)}</Text>
+          <Text style={styles.headerDate}>{formatDate(entry.date) || formatDate(entry.createdAt)}</Text>
         </View>
         <TouchableOpacity style={styles.headerButton} onPress={showMenu}>
           <Ionicons name="ellipsis-horizontal" size={24} color="#000" />
@@ -423,7 +428,7 @@ export const JournalEntryDetail = ({
           </View>
 
           {/* Last updated */}
-          {entry.updatedAt !== entry.createdAt && (
+          {entry.updatedAt != null && entry.updatedAt !== entry.createdAt && (
             <View style={styles.metadataRow}>
               <Ionicons name="time-outline" size={18} color="#8E8E93" />
               <Text style={styles.metadataText}>

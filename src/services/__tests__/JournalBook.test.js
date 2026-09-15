@@ -144,12 +144,11 @@ describe('getJournalBook', () => {
 
   it('takes an entry\'s time from createdAt, never from the civil day, and leaves the day a civil day', async () => {
     // The day bucket's `date` is a civil day with no time component ("2026-09-10").
-    // adaptEntry (shared with getUserEntries) prefers `entry.date` over
-    // `entry.createdAt` when both are present -- that's fine for feeds where `date`
-    // already carries a full timestamp, but here it would collapse every entry's
-    // time-of-day to midnight if a civil-day `date` ever rode along on the entry
-    // itself. This is exactly the latent bug the web client had in the function this
-    // one replaces.
+    // adaptEntry takes `createdAt` from `createdAt` and keeps the civil day separately,
+    // so a `date` riding along on the entry cannot swallow its time. This guarded a
+    // defensive strip at the call site when adaptEntry still preferred `date`; the strip
+    // is gone and the guarantee now comes from adaptEntry itself, so this test is what
+    // stops that precedence from being quietly reintroduced.
     const createdAt = '2026-09-10T23:45:00.000Z';
     respondWith({
       household: [],

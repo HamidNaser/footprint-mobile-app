@@ -160,7 +160,14 @@ function adaptBlock(block) {
 /**
  * Map a backend JournalEntryResponse into the shape JournalEntryCard expects.
  * Notably: `createdAt` becomes a millisecond timestamp and `localId` is set so
- * FlatList keying and date grouping work the same as local entries.
+ * FlatList keying works the same as local entries.
+ *
+ * Two distinct facts are kept distinct, matching `JournalRepository.createFromServer`:
+ * `date` is the calendar day the entry is *about*, chosen by the writer, and is what
+ * day-grouping reads (`getEntriesByDate` looks entries up by it). `createdAt` is the
+ * instant the record was made, and is what time-of-day display reads. Folding the first
+ * into the second destroys the time and, because an ISO date-only string parses as UTC
+ * midnight while bucketing reads local time, also moves entries a day west of UTC.
  */
 export function adaptEntry(entry) {
   const author = entry.author || {};
@@ -170,7 +177,12 @@ export function adaptEntry(entry) {
     serverId: entry.id,
     journalId: entry.journalId,
     userId: entry.userId,
-    createdAt: new Date(entry.date || entry.createdAt || Date.now()).getTime(),
+    // Verbatim, never re-parsed: round-tripping a civil day through Date and back to a
+    // local calendar day lands on the previous day for every timezone west of UTC.
+    date: entry.date ?? null,
+    // Falls back to the civil day rather than to now: an entry dated last year should not
+    // read as recorded today just because the server omitted one field.
+    createdAt: new Date(entry.createdAt || entry.date || Date.now()).getTime(),
     updatedAt: entry.updatedAt ? new Date(entry.updatedAt).getTime() : null,
     visibility: entry.visibility,
     syncStatus: 'synced',
@@ -247,19 +259,13 @@ export async function getJournalBook(accessToken, { memberId, before, days } = {
     })),
     days: (data?.days || []).map((day) => ({
       date: day.date,
-      entries: (day.entries || []).map((item) => {
-        // adaptEntry prefers `entry.date` over `entry.createdAt` when both are present
-        // (correct for feeds where `date` already carries a full timestamp). Here the
-        // day bucket's `date` is a civil day with no time component, so if it ever also
-        // rides along on the entry itself, it must not reach adaptEntry -- otherwise
-        // every entry's time-of-day collapses to midnight. createdAt is the only field
-        // on this endpoint that actually carries the time.
-        const { date: _civilDate, ...entryPayload } = item.entry || {};
-        return {
-          ...adaptEntry(entryPayload),
-          memberId: item.memberId,
-        };
-      }),
+      // No civil-date stripping here any more. This used to remove `date` before adapting,
+      // because adaptEntry folded it into `createdAt` and collapsed every time to midnight.
+      // adaptEntry now keeps the two apart, so the entry can carry its own civil day.
+      entries: (day.entries || []).map((item) => ({
+        ...adaptEntry(item.entry || {}),
+        memberId: item.memberId,
+      })),
     })),
     oldestDate: data?.oldestDate ?? null,
     hasMore: Boolean(data?.hasMore),
