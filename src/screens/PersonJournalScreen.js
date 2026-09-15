@@ -257,24 +257,36 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, [entries, selectedDate, isSameDay]);
 
   /**
-   * The group's roster, in the shape DayRoster reads.
-   *
-   * Only for a group: a single person's journal has nobody to be absent. Entries are
-   * attributed by `entry.userId`, the same key `getUserForEntry` uses below, so a face and
-   * the cards beneath it always agree about who recorded what.
+   * Everyone in the group, in the order the group lists them. A friends group has no head
+   * or spouse, so there is no relation to order by and none is sent — `rosterForDay` keeps
+   * whatever order it is given, which is what the group's own ordering means here.
    */
-  const rosterSections = useMemo(() => {
+  const rosterHousehold = useMemo(() => {
     if (!isGroup || !persons) return [];
-
     return persons.map((p) => ({
       memberId: p.id,
       name: p.name,
       avatarUrl: p.avatar ?? null,
-      // No relation in a group of friends, so the roster keeps the order the group lists
-      // its members in.
-      entries: entries.filter((entry) => entry.userId === p.id),
+      relation: null,
+      // Everyone in a friends group is an account holder by definition. Carried because
+      // the row shape includes it; nothing reads it yet.
+      hasAccount: true,
     }));
-  }, [isGroup, persons, entries]);
+  }, [isGroup, persons]);
+
+  /**
+   * The selected day's entries, tagged with the member each belongs to. The roster used to
+   * filter by day itself; that moved to the caller when it stopped receiving per-member
+   * sections. Bucketing prefers the civil `date` over `createdAt` deliberately — the
+   * question is which calendar day an entry belongs to, not what time it happened.
+   */
+  const rosterDayEntries = useMemo(() => {
+    if (!isGroup) return [];
+    const day = toDateKey(selectedDate);
+    return (entries || [])
+      .filter((entry) => toDateKey(entry?.date ?? entry?.createdAt ?? entry?.recordedAt ?? null) === day)
+      .map((entry) => ({ ...entry, memberId: entry.userId }));
+  }, [isGroup, entries, selectedDate]);
 
   /**
    * Dates that have journal entries - for calendar marking
@@ -420,8 +432,8 @@ export default function PersonJournalScreen({ route, navigation }) {
             // in scope. Not drawn for a single person, who has nobody to be absent.
             isGroup ? (
               <DayRoster
-                sections={rosterSections}
-                day={toDateKey(selectedDate)}
+                household={rosterHousehold}
+                dayEntries={rosterDayEntries}
                 dateText={selectedDate.toLocaleDateString(undefined, {
                   day: 'numeric',
                   month: 'long',
