@@ -101,3 +101,48 @@ describe('contentHash', () => {
     expect(requestedLength).toBe(100);
   });
 });
+
+/**
+ * Cross-platform parity (T005).
+ *
+ * Everything above proves this module is self-consistent. None of it would notice if the
+ * web half drifted -- both suites could stay green while the two clients computed
+ * different digests for the same photograph, and cross-device duplicate detection would
+ * quietly stop working. That is the failure this block exists to catch.
+ *
+ * The mechanism is a fixture both repos can reproduce byte-for-byte and one expected
+ * digest asserted on both sides. `foot-print-web/src/utils/contentHash.test.js` carries
+ * an identical block; the two are only meaningful together.
+ *
+ * The digest is NOT copied from either implementation. It is derived from the written
+ * specification --
+ *
+ *     SHA-256( first 256 KB  ++  exact byte length, 8 bytes big-endian )
+ *
+ * -- using Node's crypto as a third, independent implementation. A literal lifted from
+ * one client would let both suites agree on the same bug.
+ *
+ * The fixture is 300 KB so it is larger than the prefix: a shorter one would hash the
+ * whole file and prove nothing about where the prefix boundary falls.
+ *
+ * ⚠️ This literal encodes the current prefix choice. If T006's benchmark switches the
+ * contract to whole-file SHA-256, this test fails on both platforms until both are
+ * updated together -- which is the intended behaviour, not an obstacle.
+ */
+const PARITY_FIXTURE_BYTES = 300 * 1024;
+const PARITY_FIXTURE_SEED = 1;
+const PARITY_DIGEST = '96134c40d10c24c6c80b1fbc4960d7202a6f2d4487d2f9832d6c4fd2d6705ad3';
+
+describe('cross-platform parity (T005)', () => {
+  it('hashes the shared fixture to the digest the web client must also produce', async () => {
+    const bytes = bytesOfSize(PARITY_FIXTURE_BYTES, PARITY_FIXTURE_SEED);
+
+    const hash = await contentHash('file://parity.jpg', { deps: fileOf(bytes) });
+
+    expect(hash).toBe(PARITY_DIGEST);
+  });
+
+  it('uses a fixture larger than the prefix, so the boundary is actually exercised', () => {
+    expect(PARITY_FIXTURE_BYTES).toBeGreaterThan(HASH_PREFIX_BYTES);
+  });
+});
