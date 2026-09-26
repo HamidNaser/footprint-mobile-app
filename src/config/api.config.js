@@ -152,6 +152,21 @@ export const MEDIA_ENDPOINTS = {
 };
 
 /**
+ * Import endpoints (contracts/imports-api.md).
+ *
+ * Everything is paged and scoped to the caller. A real library is tens of thousands of
+ * photographs: one call per photograph is ten thousand round trips, and one unbounded pass
+ * times out before writing anything.
+ */
+export const IMPORT_ENDPOINTS = {
+  CREATE_BATCH: '/imports/batches',
+  LIST_BATCHES: '/imports/batches',
+  REGISTER_PHOTOS: '/imports/batches/:batchId/photos',
+  LIST_BATCH_PHOTOS: '/imports/batches/:batchId/photos',
+  FINALIZE: '/imports/batches/:batchId/finalize',
+};
+
+/**
  * Feed endpoints
  */
 export const FEED_ENDPOINTS = {
