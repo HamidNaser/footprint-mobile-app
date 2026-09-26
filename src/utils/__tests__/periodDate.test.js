@@ -56,27 +56,43 @@ describe('formatPeriodDate', () => {
     expect(formatPeriodDate('not a date', 'day')).toBe('');
   });
 
-  describe('west of Greenwich', () => {
-    /*
-     * Pinned to a zone rather than left to chance. CI is UTC, where the naive `Date`-based
-     * answer is right by accident — so an unpinned test would pass in CI whether or not the
-     * bug was present, and fail only on a developer's machine.
-     */
-    const original = process.env.TZ;
+  /**
+   * The real property, asserted directly: this never constructs a `Date`.
+   *
+   * <p>
+   * The first version of these tests pinned `process.env.TZ` to a westward zone instead. That
+   * does not work under jest — Node resolves the zone before `beforeAll` runs — so it passed
+   * only on a machine already in that zone, and failed in CI. Worse, it was passing locally for
+   * a reason that had nothing to do with the code.
+   * </p>
+   *
+   * <p>
+   * Replacing `Date` with something that throws needs no timezone at all and tests the property
+   * rather than a symptom of it: if the implementation ever reaches for a `Date`, these go red
+   * everywhere, in UTC as readily as anywhere else.
+   * </p>
+   */
+  describe('without a Date at all', () => {
+    const RealDate = global.Date;
 
-    beforeAll(() => { process.env.TZ = 'America/Chicago'; });
-    afterAll(() => { process.env.TZ = original; });
-
-    it('is in a zone where the naive answer really is wrong', () => {
-      // Guards the guard: if this stops being true the next two say nothing while passing.
-      expect(new Date('1978-01-01').toLocaleDateString('en-GB', { year: 'numeric' })).toBe('1977');
+    beforeAll(() => {
+      global.Date = function ForbiddenDate() {
+        throw new Error('formatPeriodDate must not construct a Date — a civil date is a day.');
+      };
+      global.Date.now = RealDate.now;
     });
 
-    it('does not shift a year-precision date into the previous year', () => {
+    afterAll(() => { global.Date = RealDate; });
+
+    it('renders a year', () => {
       expect(formatPeriodDate('1978-01-01', 'year')).toBe('1978');
     });
 
-    it('does not shift a new year’s day entry into December', () => {
+    it('renders a month', () => {
+      expect(formatPeriodDate('1978-07-01', 'month')).toBe('July 1978');
+    });
+
+    it('renders a day', () => {
       expect(formatPeriodDate('2018-01-01', 'day')).toBe('1 January 2018');
     });
   });
