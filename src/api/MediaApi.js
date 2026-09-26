@@ -130,6 +130,9 @@ class MediaApiClass {
       width: mediaInfo.width,
       height: mediaInfo.height,
       duration: mediaInfo.duration,
+      // Carried through from MediaPicker, which is the only place that knows whether the
+      // camera or the library produced this and what the file itself said (T023).
+      photoMetadata: mediaInfo.photoMetadata,
     });
 
     console.log('[MediaApi] Upload complete:', result);
@@ -319,6 +322,10 @@ class MediaApiClass {
       width: params.width ?? null,
       height: params.height ?? null,
       duration: params.duration ?? null,
+      // What the phone read off the photograph (FR-014, T023). The key is omitted rather
+      // than sent as null when there is none -- audio and video carry no capture metadata,
+      // and this request has a standing rule against inventing fields.
+      ...(params.photoMetadata ? { photoMetadata: params.photoMetadata } : {}),
     });
 
     return {

@@ -19,6 +19,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import { Ionicons } from '@expo/vector-icons';
 import LocationService from '../../services/LocationService';
+import { buildPhotoMetadata } from '../../utils/photoMetadata';
 
 /**
  * Media picker types
@@ -137,6 +138,13 @@ export const MediaPicker = ({
           fileName: asset.fileName,
           fileSize: asset.fileSize,
           exif: asset.exif,
+          // What the server needs to record about this photograph (FR-014, T023). Built
+          // here because only this code knows whether the picker or the camera produced
+          // it, and the file's own values must win over the device's (research.md #13).
+          photoMetadata: buildPhotoMetadata(asset, {
+            captureRoute: 'manual_upload',
+            location: LocationService.extractLocationFromExif(asset.exif) || undefined,
+          }),
           // Per-photo GPS pulled from the photo's own EXIF (where the shot was taken).
           location: LocationService.extractLocationFromExif(asset.exif) || undefined,
         }));
@@ -183,6 +191,13 @@ export const MediaPicker = ({
           fileName: asset.fileName,
           fileSize: asset.fileSize,
           exif: asset.exif,
+          // What the server needs to record about this photograph (FR-014, T023). Built
+          // here because only this code knows whether the picker or the camera produced
+          // it, and the file's own values must win over the device's (research.md #13).
+          photoMetadata: buildPhotoMetadata(asset, {
+            captureRoute: 'live_capture',
+            location: LocationService.extractLocationFromExif(asset.exif) || undefined,
+          }),
           location: LocationService.extractLocationFromExif(asset.exif) || undefined,
         };
 
