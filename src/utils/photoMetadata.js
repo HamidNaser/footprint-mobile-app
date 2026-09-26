@@ -23,7 +23,14 @@ export function buildPhotoMetadata(asset = {}, context = {}) {
   const exif = asset.exif ?? null;
 
   const fileDate = parseExifLocalDateTime(exif?.DateTimeOriginal ?? exif?.CreateDate ?? null);
-  const deviceDate = parseExifLocalDateTime(context.capturedAt ?? null);
+
+  // The picker hands a creation time over on every asset, and it was being thrown away —
+  // so a photograph whose file carried no EXIF date went to the holding area even though
+  // the phone knew when it arrived. Weaker than the file and marked as such: a creation
+  // time is when the file appeared on *this device*, which for anything transferred from
+  // a camera or another phone is not when the photograph was taken.
+  const deviceDate =
+    parseExifLocalDateTime(context.capturedAt ?? null) ?? deviceClock(asset.creationTime);
 
   const fileLat = numberOrNull(exif?.GPSLatitude);
   const fileLng = numberOrNull(exif?.GPSLongitude);
@@ -66,6 +73,26 @@ export function buildPhotoMetadata(asset = {}, context = {}) {
     // the file; this is what a corrected rule gets re-applied to (FR-015).
     rawMetadata: exif && Object.keys(exif).length > 0 ? exif : null,
   };
+}
+
+/**
+ * An epoch timestamp as a zone-less local wall clock.
+ *
+ * A `Date` is used here deliberately, which the EXIF path forbids — and the difference is
+ * the point. An EXIF string has no zone, so attaching the host's is a fabrication. A
+ * creation time *is* an instant recorded by this device, so reading it back in this
+ * device's zone is what it actually means.
+ */
+function deviceClock(epochMillis) {
+  if (typeof epochMillis !== 'number' || !Number.isFinite(epochMillis) || epochMillis <= 0) {
+    return null;
+  }
+
+  const when = new Date(epochMillis);
+  const pad = (n) => String(n).padStart(2, '0');
+
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+    + `T${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`;
 }
 
 function numberOrNull(value) {
