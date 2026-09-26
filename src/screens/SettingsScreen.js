@@ -687,6 +687,19 @@ export default function SettingsScreen({ navigation }) {
           </View>
         )}
 
+        {/* Photographs. First, because it is the only thing on this screen somebody
+            comes here to *do* — and it mirrors where the web client puts it. */}
+        <SectionHeader title="PHOTOGRAPHS" icon="images" />
+        <View style={styles.section}>
+          <SettingsRow
+            icon="images"
+            iconColor={PRIMARY_COLOR}
+            title="Import photos"
+            subtitle="Group your camera roll into entries"
+            onPress={() => navigation.navigate('Import')}
+          />
+        </View>
+
         {/* Storage & Privacy */}
         <SectionHeader title="STORAGE & PRIVACY" icon="shield-checkmark" />
         <View style={styles.section}>

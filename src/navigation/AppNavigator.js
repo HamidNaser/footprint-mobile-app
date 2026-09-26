@@ -16,6 +16,7 @@ import PlacesScreen from '../screens/PlacesScreen';
 import TimelineScreen from '../screens/TimelineScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import ImportScreen from '../screens/ImportScreen';
 import LoginScreen from '../screens/LoginScreen';
 import InterviewModeScreen from '../screens/InterviewModeScreen';
 import EventsScreen from '../screens/EventsScreen';
@@ -104,6 +105,13 @@ export default function AppNavigator() {
             <Stack.Screen 
               name="Settings" 
               component={SettingsScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            <Stack.Screen
+              name="Import"
+              component={ImportScreen}
               options={{
                 presentation: 'card',
               }}
