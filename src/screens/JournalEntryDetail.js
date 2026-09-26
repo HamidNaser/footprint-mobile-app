@@ -29,6 +29,7 @@ import { parseDateKey } from '../utils/journalDate';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
+import { formatPeriodDate } from '../utils/periodDate';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -292,7 +293,17 @@ export const JournalEntryDetail = ({
           <Ionicons name="arrow-back" size={24} color="#000" />
         </TouchableOpacity>
         <View style={styles.headerTitle}>
-          <Text style={styles.headerDate}>{formatDate(entry.date) || formatDate(entry.createdAt)}</Text>
+          {/*
+            * A period date shows only what is real (FR-013c). An entry dated "1978" in the
+            * holding area stores 1 January 1978, and rendering the stored day back would show
+            * somebody a day they never supplied. `entry.createdAt` is always a real instant, so
+            * the fallback keeps the ordinary format.
+            */}
+          <Text style={styles.headerDate}>
+            {entry.datePrecision && entry.datePrecision !== 'day'
+              ? formatPeriodDate(entry.date, entry.datePrecision)
+              : formatDate(entry.date) || formatDate(entry.createdAt)}
+          </Text>
         </View>
         <TouchableOpacity style={styles.headerButton} onPress={showMenu}>
           <Ionicons name="ellipsis-horizontal" size={24} color="#000" />
