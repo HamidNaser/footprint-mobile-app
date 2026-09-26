@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * SQL statements to create all tables
@@ -65,6 +65,49 @@ export const CREATE_TABLES = {
       error_message TEXT,
       created_at INTEGER NOT NULL,
       FOREIGN KEY (entry_local_id) REFERENCES journal_entries(local_id) ON DELETE CASCADE
+    );
+  `,
+
+  /**
+   * What the phone read off a photograph, kept until the server has its own copy.
+   *
+   * The case this exists for: photographs taken in a field with no signal, the OS killing
+   * the app to reclaim memory, and the upload happening days later. Everything the file
+   * knew was read at capture time and otherwise lives only in memory, so without this the
+   * photograph arrives with none of it — and FR-014 quietly fails for exactly the
+   * photographs that are hardest to take again (research.md #13).
+   *
+   * `confirmed_at` is the whole point: a row is cleared only once the server holds the
+   * same facts. Clearing on send would trade a durable copy for a hopeful one.
+   */
+  photo_metadata: `
+    CREATE TABLE IF NOT EXISTS photo_metadata (
+      local_id TEXT PRIMARY KEY,
+      media_local_id TEXT NOT NULL,
+
+      content_hash TEXT,
+      capture_route TEXT NOT NULL,
+
+      taken_at_local TEXT,
+      taken_at_source TEXT,
+      taken_at_plausible INTEGER DEFAULT 1,
+      taken_at_offset_minutes INTEGER,
+
+      raw_lat REAL,
+      raw_lng REAL,
+      altitude REAL,
+      lat_lng_source TEXT,
+      lat_lng_plausible INTEGER DEFAULT 1,
+
+      camera_make TEXT,
+      camera_model TEXT,
+      lens TEXT,
+      orientation INTEGER,
+      original_file_name TEXT,
+
+      raw_metadata TEXT,
+      created_at INTEGER NOT NULL,
+      confirmed_at INTEGER
     );
   `,
 

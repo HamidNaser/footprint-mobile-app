@@ -105,6 +105,43 @@ export const migrations = [
   //     // SQLite doesn't support DROP COLUMN easily
   //   ],
   // },
+  {
+    version: 4,
+    description: 'Durable photo_metadata, so capture data survives the app being killed',
+    up: [
+      // Every phone in the wild is on an earlier version, and a table that exists only in
+      // CREATE_TABLES reaches fresh installs and nobody else.
+      `CREATE TABLE IF NOT EXISTS photo_metadata (
+        local_id TEXT PRIMARY KEY,
+        media_local_id TEXT NOT NULL,
+        content_hash TEXT,
+        capture_route TEXT NOT NULL,
+        taken_at_local TEXT,
+        taken_at_source TEXT,
+        taken_at_plausible INTEGER DEFAULT 1,
+        taken_at_offset_minutes INTEGER,
+        raw_lat REAL,
+        raw_lng REAL,
+        altitude REAL,
+        lat_lng_source TEXT,
+        lat_lng_plausible INTEGER DEFAULT 1,
+        camera_make TEXT,
+        camera_model TEXT,
+        lens TEXT,
+        orientation INTEGER,
+        original_file_name TEXT,
+        raw_metadata TEXT,
+        created_at INTEGER NOT NULL,
+        confirmed_at INTEGER
+      );`,
+      'CREATE INDEX IF NOT EXISTS idx_photo_metadata_media ON photo_metadata(media_local_id);',
+      // The queue of rows still owed to the server, which is what the retry path reads.
+      'CREATE INDEX IF NOT EXISTS idx_photo_metadata_unconfirmed ON photo_metadata(confirmed_at);',
+    ],
+    down: [
+      'DROP TABLE IF EXISTS photo_metadata;',
+    ],
+  },
 ];
 
 /**
