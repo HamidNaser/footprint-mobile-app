@@ -15,6 +15,67 @@ const TAG = '[LocationService]';
 /**
  * Location accuracy levels
  */
+/**
+ * EXIF `DateTimeOriginal` as a zone-less local wall clock (FR-017, research.md #9).
+ *
+ * The tag is a bare string — `"2018:07:04 15:22:00"` — with **no zone in it**. Handed to
+ * `new Date()` it silently acquires the *device's* zone, so the same file read on a phone
+ * in Toronto and in a browser in Tokyo yields instants fourteen hours apart; the
+ * photographs then cluster into different entries from identical input, breaking SC-005
+ * and FR-008, and invisibly to anyone testing in one timezone.
+ *
+ * So this moves a string to a string and never constructs a `Date`. There is no moment at
+ * which a zone could attach. The instant is derived later, server-side, from this value
+ * plus a resolved zone (research.md #10) — never the other way round, because for a
+ * pre-2016 photograph with no offset tag and no GPS the wall clock is the only knowable
+ * value there is.
+ *
+ * **This is a shared convention, not an implementation detail.**
+ * `foot-print-web/src/utils/photoImport.js` carries a byte-equivalent version, and the
+ * cross-client parity test (T015) pins the two to one fixture. Change one and change both.
+ *
+ * ⚠️ Pass the **raw tag**. `expo-image-picker` exposes `asset.exif`, whose date fields may
+ * already have been revived into `Date` objects in device-local terms; a `Date` arriving
+ * here means the zone damage happened upstream, so it is refused rather than guessed at.
+ *
+ * @param {string|null|undefined} tag Raw `DateTimeOriginal`, colon- or hyphen-separated.
+ * @returns {string|null} `YYYY-MM-DDTHH:mm:ss`, or null when there is no usable date.
+ */
+export function parseExifLocalDateTime(tag) {
+  if (typeof tag !== 'string') return null;
+
+  // Sub-seconds are dropped rather than rejected: real cameras write them, and the extra
+  // precision has nowhere to go in a civil date-time.
+  const match = tag
+    .trim()
+    .match(/^(\d{4})[:-](\d{2})[:-](\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/);
+  if (!match) return null;
+
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+
+  // "0000:00:00 00:00:00" is what a camera writes when its clock was never set. It is a
+  // real value in the file and not a date; it belongs in the holding area (FR-013), not
+  // in the year zero.
+  if (year === 0) return null;
+
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > daysInMonth(year, month)) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+
+  // An implausible year — a camera clock reset to its epoch — is *kept*. FR-016 stores
+  // the value and flags it elsewhere; refusing it here would throw away the only date the
+  // file carries.
+  return `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}`;
+}
+
+/** Arithmetic rather than a Date, so this stays as zone-free as its caller. */
+function daysInMonth(year, month) {
+  const lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month !== 2) return lengths[month - 1];
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return leap ? 29 : 28;
+}
+
 export const LocationAccuracy = {
   LOWEST: Location.Accuracy.Lowest,
   LOW: Location.Accuracy.Low,

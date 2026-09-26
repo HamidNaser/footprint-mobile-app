@@ -99,6 +99,32 @@ describe('complete request', () => {
     expect(body).not.toHaveProperty('mediaType');
   });
 
+  it("carries the photograph's metadata when there is any (T023, FR-014)", async () => {
+    // SC-007: every photograph entering the system by any route carries a metadata record.
+    // This is the route for one taken in the app, and without it FR-007's duplicate
+    // detection cannot see such a photograph at all.
+    const post = jest.spyOn(ApiClient, 'post').mockResolvedValue({ id: 'm1', url: 'https://cdn/x' });
+
+    await MediaApi._completeUpload({
+      s3Key: 'media/abc.png',
+      photoMetadata: { contentHash: 'abc', captureRoute: 'live_capture' },
+    });
+
+    const [, body] = post.mock.calls[0];
+    expect(body.photoMetadata).toEqual({ contentHash: 'abc', captureRoute: 'live_capture' });
+  });
+
+  it('omits the key entirely for audio, rather than sending an empty one', async () => {
+    // The standing rule on this request is that nothing is invented. A null field the
+    // server would ignore is still a field it did not ask for.
+    const post = jest.spyOn(ApiClient, 'post').mockResolvedValue({ id: 'm1', url: 'https://cdn/x' });
+
+    await MediaApi._completeUpload({ s3Key: 'media/note.m4a', duration: 12 });
+
+    const [, body] = post.mock.calls[0];
+    expect(body).not.toHaveProperty('photoMetadata');
+  });
+
   it('returns the media id and url the entry payload needs', async () => {
     jest.spyOn(ApiClient, 'post').mockResolvedValue({
       id: 'm1',

@@ -62,6 +62,94 @@ class DatabaseServiceClass {
    * @param {object} entry - Entry data
    * @returns {Promise<object>} Inserted entry
    */
+  // ---- Photo metadata, kept until the server confirms it (FR-014, research.md #13) ----
+
+  /**
+   * Record what the phone read off a photograph, at the moment it read it.
+   *
+   * Called at capture rather than at upload, because the two can be days apart: the OS
+   * kills the app to reclaim memory and everything read into memory goes with it. Without
+   * this the photograph is uploaded later carrying none of what its file knew, and the
+   * photographs worst affected are the ones taken somewhere with no signal — the hardest
+   * of all to take again.
+   */
+  async savePhotoMetadata(mediaLocalId, metadata) {
+    const db = await this.getDb();
+
+    await db.runAsync(
+      `INSERT OR REPLACE INTO photo_metadata (
+         local_id, media_local_id, content_hash, capture_route,
+         taken_at_local, taken_at_source, taken_at_plausible, taken_at_offset_minutes,
+         raw_lat, raw_lng, altitude, lat_lng_source, lat_lng_plausible,
+         camera_make, camera_model, lens, orientation, original_file_name,
+         raw_metadata, created_at, confirmed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      [
+        mediaLocalId,
+        mediaLocalId,
+        metadata.contentHash ?? null,
+        metadata.captureRoute ?? 'manual_upload',
+        metadata.takenAtLocal ?? null,
+        metadata.takenAtSource ?? null,
+        metadata.takenAtPlausible === false ? 0 : 1,
+        metadata.takenAtOffsetMinutes ?? null,
+        metadata.rawLat ?? null,
+        metadata.rawLng ?? null,
+        metadata.altitude ?? null,
+        metadata.latLngSource ?? null,
+        metadata.latLngPlausible === false ? 0 : 1,
+        metadata.cameraMake ?? null,
+        metadata.cameraModel ?? null,
+        metadata.lens ?? null,
+        metadata.orientation ?? null,
+        metadata.originalFileName ?? null,
+        metadata.rawMetadata ? JSON.stringify(metadata.rawMetadata) : null,
+        Date.now(),
+      ]
+    );
+  }
+
+  /**
+   * Mark a row as held by the server. Only after this is it safe to remove.
+   */
+  async confirmPhotoMetadata(mediaLocalId) {
+    const db = await this.getDb();
+
+    await db.runAsync(
+      'UPDATE photo_metadata SET confirmed_at = ? WHERE media_local_id = ?',
+      [Date.now(), mediaLocalId]
+    );
+  }
+
+  /**
+   * Rows the server has not acknowledged, oldest first — what the retry path re-sends
+   * after a crash or a week without signal.
+   */
+  async getUnconfirmedPhotoMetadata(limit = 100) {
+    const db = await this.getDb();
+
+    return db.getAllAsync(
+      `SELECT * FROM photo_metadata
+       WHERE confirmed_at IS NULL
+       ORDER BY created_at ASC
+       LIMIT ?`,
+      [limit]
+    );
+  }
+
+  /**
+   * Discard rows the server has confirmed.
+   *
+   * The predicate is the safety rule of this whole table and is not an optimisation:
+   * deleting a row the server has not acknowledged throws away the only durable copy of
+   * something that cannot be read again once the app forgets it.
+   */
+  async purgeConfirmedPhotoMetadata() {
+    const db = await this.getDb();
+
+    await db.runAsync('DELETE FROM photo_metadata WHERE confirmed_at IS NOT NULL');
+  }
+
   async insertEntry(entry) {
     const db = await this.getDb();
     const now = Date.now();
