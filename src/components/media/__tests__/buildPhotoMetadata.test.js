@@ -155,4 +155,56 @@ describe('buildPhotoMetadata', () => {
     expect(buildPhotoMetadata({ exif: {}, creationTime: null }, {}).takenAtSource).toBe('none');
     expect(buildPhotoMetadata({ exif: {}, creationTime: 0 }, {}).takenAtSource).toBe('none');
   });
+
+  // ---- What the image itself is ---------------------------------------------------------
+
+  /**
+   * Dimensions, so "show me the large ones" is a query rather than a scan, and so a
+   * screenshot can be told from a photograph. Metadata about the source, never a substitute
+   * for it: the full EXIF payload still goes up as `rawMetadata`.
+   */
+  describe('dimensions', () => {
+    it('takes them from the asset, which the library always knows', () => {
+      const metadata = buildPhotoMetadata({ width: 5712, height: 4284, exif });
+
+      expect(metadata.width).toBe(5712);
+      expect(metadata.height).toBe(4284);
+    });
+
+    it('falls back to what the file says when the library did not say', () => {
+      // A photograph handed over by another app can arrive without dimensions on the asset.
+      const metadata = buildPhotoMetadata({ exif: { ...exif, ExifImageWidth: 3088, ExifImageHeight: 2316 } });
+
+      expect(metadata.width).toBe(3088);
+      expect(metadata.height).toBe(2316);
+    });
+
+    it('prefers the asset over the file, because the file can be stale after an edit', () => {
+      const metadata = buildPhotoMetadata({
+        width: 1000, height: 800,
+        exif: { ...exif, ExifImageWidth: 5712, ExifImageHeight: 4284 },
+      });
+
+      expect(metadata.width).toBe(1000);
+      expect(metadata.height).toBe(800);
+    });
+
+    it('says nothing rather than zero when neither knows', () => {
+      const metadata = buildPhotoMetadata({ exif });
+
+      expect(metadata.width).toBeNull();
+      expect(metadata.height).toBeNull();
+    });
+
+    it('does not read the file size, because it has not read the file', () => {
+      /*
+       * Deliberate. Nothing here has stat'd anything — `MediaApi.uploadMedia` already reads
+       * the size before uploading, so filling it in here would mean a second stat per
+       * photograph for a value something else already has.
+       */
+      const metadata = buildPhotoMetadata({ width: 100, height: 100, exif });
+
+      expect(metadata.fileSizeBytes).toBeNull();
+    });
+  });
 });

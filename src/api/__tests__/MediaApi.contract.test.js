@@ -114,6 +114,49 @@ describe('complete request', () => {
     expect(body.photoMetadata).toEqual({ contentHash: 'abc', captureRoute: 'live_capture' });
   });
 
+  it('fills in the byte length it already had to read anyway', async () => {
+    /*
+     * `uploadMedia` stats the file before uploading, so it is the one place that already
+     * knows the size. `buildPhotoMetadata` deliberately does not read it — doing so would
+     * mean a second stat per photograph for a value this request already holds.
+     */
+    const post = jest.spyOn(ApiClient, 'post').mockResolvedValue({ id: 'm1', url: 'https://cdn/x' });
+
+    await MediaApi._completeUpload({
+      s3Key: 'media/abc.heic',
+      fileSizeBytes: 2433182,
+      photoMetadata: { contentHash: 'abc', captureRoute: 'import' },
+    });
+
+    const [, body] = post.mock.calls[0];
+    expect(body.photoMetadata.fileSizeBytes).toBe(2433182);
+  });
+
+  it('does not overwrite a byte length the caller already knew', async () => {
+    // Filling a gap, not correcting the record.
+    const post = jest.spyOn(ApiClient, 'post').mockResolvedValue({ id: 'm1', url: 'https://cdn/x' });
+
+    await MediaApi._completeUpload({
+      s3Key: 'media/abc.heic',
+      fileSizeBytes: 999,
+      photoMetadata: { contentHash: 'abc', fileSizeBytes: 2433182 },
+    });
+
+    const [, body] = post.mock.calls[0];
+    expect(body.photoMetadata.fileSizeBytes).toBe(2433182);
+  });
+
+  it('invents no metadata for a file that has none, whatever its size', async () => {
+    // The standing rule on this request: nothing invented. A size alone is not a reason to
+    // start sending a photoMetadata object for an audio note.
+    const post = jest.spyOn(ApiClient, 'post').mockResolvedValue({ id: 'm1', url: 'https://cdn/x' });
+
+    await MediaApi._completeUpload({ s3Key: 'media/note.m4a', duration: 12, fileSizeBytes: 5000 });
+
+    const [, body] = post.mock.calls[0];
+    expect(body).not.toHaveProperty('photoMetadata');
+  });
+
   it('omits the key entirely for audio, rather than sending an empty one', async () => {
     // The standing rule on this request is that nothing is invented. A null field the
     // server would ignore is still a field it did not ask for.
