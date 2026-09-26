@@ -61,6 +61,24 @@ const getMimeType = (filename) => {
 /**
  * Media API class
  */
+/**
+ * Give the metadata the byte length this request already had to read.
+ *
+ * <p>
+ * Filling a gap, never correcting the record: a size the caller already knew is left alone.
+ * `buildPhotoMetadata` deliberately does not read this — `uploadMedia` stats the file before
+ * uploading, so reading it there too would be a second stat per photograph for a value this
+ * request already holds.
+ * </p>
+ */
+function withFileSize(photoMetadata, fileSizeBytes) {
+  const known = photoMetadata.fileSizeBytes !== null && photoMetadata.fileSizeBytes !== undefined;
+
+  return known || typeof fileSizeBytes !== 'number'
+    ? photoMetadata
+    : { ...photoMetadata, fileSizeBytes };
+}
+
 class MediaApiClass {
   constructor() {
     this.baseUrl = API_CONFIG.HUB_BASE_URL;
@@ -133,6 +151,9 @@ class MediaApiClass {
       // Carried through from MediaPicker, which is the only place that knows whether the
       // camera or the library produced this and what the file itself said (T023).
       photoMetadata: mediaInfo.photoMetadata,
+      // Already read above, so the metadata gets it for free. `buildPhotoMetadata` does not
+      // stat the file precisely because this request has.
+      fileSizeBytes: fileInfo.size,
     });
 
     console.log('[MediaApi] Upload complete:', result);
@@ -324,8 +345,11 @@ class MediaApiClass {
       duration: params.duration ?? null,
       // What the phone read off the photograph (FR-014, T023). The key is omitted rather
       // than sent as null when there is none -- audio and video carry no capture metadata,
-      // and this request has a standing rule against inventing fields.
-      ...(params.photoMetadata ? { photoMetadata: params.photoMetadata } : {}),
+      // and this request has a standing rule against inventing fields. A byte length alone
+      // is not a reason to start sending the object.
+      ...(params.photoMetadata
+        ? { photoMetadata: withFileSize(params.photoMetadata, params.fileSizeBytes) }
+        : {}),
     });
 
     return {

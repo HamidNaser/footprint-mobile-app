@@ -69,6 +69,31 @@ export function buildPhotoMetadata(asset = {}, context = {}) {
     orientation: exif?.Orientation ?? null,
     originalFileName: asset.fileName ?? null,
 
+    /*
+     * What the image itself is. Metadata *about* the source, never a substitute for it — the
+     * whole EXIF payload still goes up as `rawMetadata` below.
+     *
+     * The asset wins over the file here, which is the opposite of the date and the location
+     * above, and for a reason: the library reports the dimensions of the image as it stands,
+     * while `ExifImageWidth` is what the camera wrote and is stale after a crop. For a
+     * capture time or a coordinate the file is the original truth; for dimensions it is the
+     * out-of-date one.
+     *
+     * Null is "not known", not zero. Nothing here decodes an image to find out.
+     */
+    width: numberOrNull(asset.width)
+      ?? numberOrNull(exif?.ExifImageWidth ?? exif?.PixelXDimension ?? exif?.ImageWidth),
+    height: numberOrNull(asset.height)
+      ?? numberOrNull(exif?.ExifImageHeight ?? exif?.PixelYDimension ?? exif?.ImageHeight),
+
+    /*
+     * Not read here. Nothing in this function has stat'd anything, and `MediaApi.uploadMedia`
+     * already reads the size before uploading — filling it in here would mean a second stat
+     * per photograph for a value something else already holds. It is supplied through context
+     * when a caller does happen to know it.
+     */
+    fileSizeBytes: numberOrNull(context.fileSizeBytes),
+
     // The whole payload, not only what this understood. The fields above are one reading of
     // the file; this is what a corrected rule gets re-applied to (FR-015).
     rawMetadata: exif && Object.keys(exif).length > 0 ? exif : null,
