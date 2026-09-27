@@ -1,4 +1,4 @@
-import { formatPeriodDate } from '../periodDate';
+import { formatPeriodDate, parsePeriodDate } from '../periodDate';
 
 /**
  * A date somebody knows only roughly, rendered as much of it as is real (FR-013c, T055).
@@ -95,5 +95,68 @@ describe('formatPeriodDate', () => {
     it('renders a day', () => {
       expect(formatPeriodDate('2018-01-01', 'day')).toBe('1 January 2018');
     });
+  });
+});
+
+/**
+ * Reading what somebody typed (FR-013c, T064).
+ *
+ * <p>
+ * Deliberately the same rules as `foot-print-web/src/utils/periodDate.js`, case for case, so the
+ * two clients cannot disagree about what "1978" means. Two repositories cannot share a module;
+ * pinning both to the same cases is how they stay honest.
+ * </p>
+ *
+ * <p>
+ * It was left out of the earlier port on purpose — nothing on mobile could enter a date until the
+ * holding-area screen existed, and an untested helper with no caller is worse than no helper.
+ * </p>
+ */
+describe('parsePeriodDate', () => {
+  it('reads a year alone', () => {
+    expect(parsePeriodDate('1978')).toEqual({ date: '1978-01-01', datePrecision: 'year' });
+  });
+
+  it('reads a month', () => {
+    expect(parsePeriodDate('1978-07')).toEqual({ date: '1978-07-01', datePrecision: 'month' });
+  });
+
+  it('reads a full date', () => {
+    expect(parsePeriodDate('2018-07-04')).toEqual({ date: '2018-07-04', datePrecision: 'day' });
+  });
+
+  it('tolerates the spacing somebody actually types', () => {
+    expect(parsePeriodDate('  1978  ')).toEqual({ date: '1978-01-01', datePrecision: 'year' });
+  });
+
+  it('accepts slashes', () => {
+    expect(parsePeriodDate('1978/07/04')).toEqual({ date: '1978-07-04', datePrecision: 'day' });
+  });
+
+  it('refuses a month that is not a month', () => {
+    expect(parsePeriodDate('1978-13')).toBeNull();
+    expect(parsePeriodDate('1978-00')).toBeNull();
+  });
+
+  it('refuses a day the month does not have', () => {
+    expect(parsePeriodDate('1978-02-30')).toBeNull();
+    expect(parsePeriodDate('1900-02-29')).toBeNull();
+  });
+
+  it('accepts a leap day in a leap year', () => {
+    expect(parsePeriodDate('2000-02-29')).toEqual({ date: '2000-02-29', datePrecision: 'day' });
+  });
+
+  it('refuses a year nobody photographed', () => {
+    // Photography starts in 1826. Unlike captured EXIF, this value *creates* an entry, so it
+    // is validated rather than kept-and-flagged.
+    expect(parsePeriodDate('0007')).toBeNull();
+    expect(parsePeriodDate('3000')).toBeNull();
+  });
+
+  it('refuses nonsense rather than guessing at it', () => {
+    for (const text of ['', '   ', 'last summer', '19', '197', '1978-', null, undefined, 12]) {
+      expect(parsePeriodDate(text)).toBeNull();
+    }
   });
 });

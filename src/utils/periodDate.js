@@ -22,6 +22,9 @@
  * </p>
  */
 
+/** Photography starts in 1826, so an earlier year is a typo rather than a memory. */
+const EARLIEST_YEAR = 1826;
+
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -54,6 +57,61 @@ export function formatPeriodDate(date, datePrecision) {
   if (datePrecision === 'month') return `${monthName} ${year}`;
 
   return `${Number(day)} ${monthName} ${year}`;
+}
+
+function daysInMonth(year, month) {
+  if (month !== 2) return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return leap ? 29 : 28;
+}
+
+/**
+ * What somebody typed, as a date and a precision — or null (FR-013c).
+ *
+ * <p>
+ * Null rather than a guess. "last summer" is a real thing to know about a photograph and not
+ * something this can turn into a date; the honest response is to leave it held.
+ * </p>
+ *
+ * <p>
+ * Deliberately the same rules as the web client's, case for case, so the two cannot disagree
+ * about what "1978" means. The year bound is the one place this validates rather than
+ * keeps-and-flags, because unlike captured EXIF this value <b>creates an entry</b>.
+ * </p>
+ *
+ * <p>
+ * The only `Date` in this file is here, asking what year it is now — which is a question about
+ * the present, not about a stored civil date.
+ * </p>
+ *
+ * @param {string} text `1978`, `1978-07`, or `1978-07-04`. Slashes accepted.
+ * @returns {{date: string, datePrecision: 'year'|'month'|'day'}|null}
+ */
+export function parsePeriodDate(text) {
+  if (typeof text !== 'string') return null;
+
+  const match = text.trim().replace(/\//g, '-').match(/^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  if (year < EARLIEST_YEAR || year > new Date().getFullYear() + 1) return null;
+
+  if (match[2] === undefined) {
+    return { date: `${match[1]}-01-01`, datePrecision: 'year' };
+  }
+
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  const mm = String(month).padStart(2, '0');
+
+  if (match[3] === undefined) {
+    return { date: `${match[1]}-${mm}-01`, datePrecision: 'month' };
+  }
+
+  const day = Number(match[3]);
+  if (day < 1 || day > daysInMonth(year, month)) return null;
+
+  return { date: `${match[1]}-${mm}-${String(day).padStart(2, '0')}`, datePrecision: 'day' };
 }
 
 export default formatPeriodDate;

@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * SQL statements to create all tables
@@ -26,6 +26,11 @@ export const CREATE_TABLES = {
       journal_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       date TEXT NOT NULL,
+      -- How much of \`date\` is real: day, month or year (FR-013c). A box of scans dated
+      -- "1978" stores 1 January 1978, and without this the app shows a day nobody supplied.
+      -- Defaulted rather than nullable: "to the day" and "unknown" are different things, and
+      -- every row written before v5 meant the former.
+      date_precision TEXT NOT NULL DEFAULT 'day',
       content_blocks TEXT NOT NULL,
       location_lat REAL,
       location_lng REAL,

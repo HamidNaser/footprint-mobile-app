@@ -156,17 +156,20 @@ class DatabaseServiceClass {
 
     const result = await db.runAsync(
       `INSERT INTO journal_entries (
-        local_id, server_id, journal_id, user_id, date, content_blocks,
+        local_id, server_id, journal_id, user_id, date, date_precision, content_blocks,
         location_lat, location_lng, location_name, visibility,
         reactions_likes, reactions_liked_by, comments_count,
         sync_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.localId,
         entry.serverId || null,
         entry.journalId,
         entry.userId,
         entry.date,
+        // How much of that date is real (FR-013c). Defaulted here as well as in the
+        // schema: an entry written by older code has no opinion, and 'day' is what it meant.
+        entry.datePrecision || 'day',
         JSON.stringify(entry.contentBlocks || []),
         entry.location?.lat || null,
         entry.location?.lng || null,
