@@ -20,6 +20,14 @@
  * back from `getAssetInfoAsync`, real thumbnails, and the on-screen keyboard.
  * </p>
  */
+/*
+ * The first mount in this file pays the cost of transforming the screen and everything React
+ * Native pulls in behind it, which on a CI runner exceeded jest's 5s default while taking about a
+ * second here. Raised for the suite rather than for one test: whichever test happens to run first
+ * pays it, so pinning the timeout to a particular one would move the failure rather than fix it.
+ */
+jest.setTimeout(30000);
+
 jest.mock('expo-media-library/legacy', () => ({
   requestPermissionsAsync: jest.fn(),
   getAssetsAsync: jest.fn(),
