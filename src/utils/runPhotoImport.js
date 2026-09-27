@@ -111,7 +111,14 @@ export async function runPhotoImport({ journalId, onProgress = () => {}, deps })
     // Only now. A row confirmed before the server holds it is a row the purge will delete,
     // taking with it the only durable copy of something that cannot be read again.
     for (const { assetId } of pending) {
-      await confirmPhotoMetadata(assetId).catch(() => {});
+      // Same reasoning as the save above: a wider net than `.catch()`, because a failure to
+      // confirm must not undo a registration the server has already accepted.
+      try {
+        await confirmPhotoMetadata(assetId);
+      } catch {
+        // The row stays unconfirmed and the retry path will offer it again, which is the
+        // safe direction.
+      }
     }
 
     pending = [];
@@ -141,9 +148,22 @@ export async function runPhotoImport({ journalId, onProgress = () => {}, deps })
 
         const metadata = buildPhotoMetadata(full, { captureRoute: 'import', contentHash: hash });
 
-        // Durable before the network. The OS kills the app to reclaim memory and anything
-        // held only in memory goes with it.
-        await savePhotoMetadata(asset.id, metadata).catch(() => {});
+        /*
+         * Durable before the network. The OS kills the app to reclaim memory and anything held
+         * only in memory goes with it.
+         *
+         * A try/catch rather than `.catch()`, deliberately. The intent is that a failed local
+         * write never costs the photograph — and `.catch()` only absorbs a rejection, so a
+         * synchronous throw (or a stub that returns no promise) escaped to the per-photograph
+         * handler and marked the photograph failed, skipping the upload entirely. The net has to
+         * be wider than the failure it is there for.
+         */
+        try {
+          await savePhotoMetadata(asset.id, metadata);
+        } catch {
+          // Losing the durable copy is bad; losing the photograph because the copy failed is
+          // worse.
+        }
 
         const media = await uploadImage({ asset: full, metadata });
         pending.push({
