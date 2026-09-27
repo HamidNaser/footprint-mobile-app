@@ -290,6 +290,22 @@ describe('UndatedPhotosScreen', () => {
     });
   });
 
+  it('does not offer to load more when there is no cursor to load from', async () => {
+    /*
+     * Without a cursor there is nothing to ask for. Offered anyway, "Load more" re-fetched the
+     * first page for ever — `after` was null both times — so somebody tapped a button that
+     * silently did nothing. The server sets `hasMore` and `nextCursor` together today; this is
+     * the screen not depending on that.
+     */
+    HoldingAreaApi.listUndated.mockResolvedValue({
+      photos: [photo('m1', 'a.jpg')], total: 9, locationHints: [], hasMore: true, nextCursor: null,
+    });
+
+    const tree = await mount();
+
+    expect(() => pressable(tree, /Load more/)).toThrow(/No pressable/);
+  });
+
   describe('a shared-place hint', () => {
     beforeEach(() => {
       HoldingAreaApi.listUndated.mockResolvedValue({

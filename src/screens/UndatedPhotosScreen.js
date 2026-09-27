@@ -65,7 +65,11 @@ export default function UndatedPhotosScreen({ navigation }) {
         photos: page?.photos ?? [],
         total: page?.total ?? 0,
         locationHints: page?.locationHints ?? [],
-        hasMore: Boolean(page?.hasMore),
+        // Both, not either. Without a cursor there is nothing to ask for, so "more" would give
+        // a Load more that re-fetches the first page for ever — and tapping something that
+        // silently does nothing is a worse failure than a missing button. The server sets the
+        // two together today; this is not depending on it.
+        hasMore: Boolean(page?.hasMore && page?.nextCursor),
         nextCursor: page?.nextCursor ?? null,
       };
 
