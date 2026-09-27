@@ -17,6 +17,7 @@ import TimelineScreen from '../screens/TimelineScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import ImportScreen from '../screens/ImportScreen';
+import UndatedPhotosScreen from '../screens/UndatedPhotosScreen';
 import LoginScreen from '../screens/LoginScreen';
 import InterviewModeScreen from '../screens/InterviewModeScreen';
 import EventsScreen from '../screens/EventsScreen';
@@ -112,6 +113,17 @@ export default function AppNavigator() {
             <Stack.Screen
               name="Import"
               component={ImportScreen}
+              options={{
+                presentation: 'card',
+              }}
+            />
+            {/*
+              * A standing workspace, not a step in an import (FR-013a) — somebody may date a
+              * few today and the rest in a month, so it has its own route.
+              */}
+            <Stack.Screen
+              name="UndatedPhotos"
+              component={UndatedPhotosScreen}
               options={{
                 presentation: 'card',
               }}

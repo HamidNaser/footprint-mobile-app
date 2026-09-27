@@ -698,6 +698,17 @@ export default function SettingsScreen({ navigation }) {
             subtitle="Group your camera roll into entries"
             onPress={() => navigation.navigate('Import')}
           />
+          {/*
+            * The import tells somebody photographs are "waiting for a date"; with no way through
+            * to the place that supplies one, that sentence is a dead end (FR-013a).
+            */}
+          <SettingsRow
+            icon="calendar-outline"
+            iconColor={PRIMARY_COLOR}
+            title="Waiting for a date"
+            subtitle="Photographs the import could not date"
+            onPress={() => navigation.navigate('UndatedPhotos')}
+          />
         </View>
 
         {/* Storage & Privacy */}

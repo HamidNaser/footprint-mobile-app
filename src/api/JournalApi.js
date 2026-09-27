@@ -296,6 +296,10 @@ class JournalApiClass {
       // everywhere else. Sent as YYYY-MM-DD; see src/utils/journalDate.js for why
       // it must not become an instant on the way.
       date: toDateKey(entry.date || entry.created_at || entry.createdAt),
+      // How much of that date is real (FR-013c). Read as snake_case out of SQLite and
+      // camelCase off the API, so both spellings are accepted — missing either half loses the
+      // precision on one path only, which is the kind of gap that surfaces months later.
+      datePrecision: entry.date_precision || entry.datePrecision || 'day',
       title: entry.title,
       contentBlocks: this._parseContentBlocks(entry.content_blocks || entry.contentBlocks),
       visibility: entry.visibility,
@@ -320,6 +324,7 @@ class JournalApiClass {
       journal_id: serverEntry.journalId,
       title: serverEntry.title,
       content_blocks: JSON.stringify(serverEntry.contentBlocks || []),
+      date_precision: serverEntry.datePrecision || 'day',
       visibility: serverEntry.visibility,
       mood: serverEntry.mood,
       weather: serverEntry.weather,

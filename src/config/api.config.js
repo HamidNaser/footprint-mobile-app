@@ -167,6 +167,20 @@ export const IMPORT_ENDPOINTS = {
 };
 
 /**
+ * The undated holding area (contracts/photo-metadata-api.md §3, FR-013).
+ *
+ * Note the prefix: `/photos`, not `/imports`. Everything else in the import flow is under
+ * imports, and getting this wrong gives a 404 that reads as "the holding area is empty"
+ * rather than as a mistake.
+ */
+export const PHOTO_ENDPOINTS = {
+  LIST_UNDATED: '/photos/undated',
+  GROUP_UNDATED: '/photos/undated/group',
+  // `/photos/undated/:mediaId/date` exists on the server and is not listed here: nothing calls
+  // it on either client, and an endpoint constant with no caller is the start of dead code.
+};
+
+/**
  * Feed endpoints
  */
 export const FEED_ENDPOINTS = {

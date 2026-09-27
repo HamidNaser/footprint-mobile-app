@@ -61,10 +61,13 @@ describe('photo_metadata table', () => {
   it('ships with a migration, so an installed app gains the table rather than missing it', () => {
     // Every phone in the wild is on an earlier version. A table that only appears in
     // CREATE_TABLES reaches fresh installs and nobody else.
-    const latest = migrations[migrations.length - 1];
+    // Found by what it does, not by being last. This asserted `migrations[length - 1]`
+    // and broke the moment a v5 migration arrived for something else — the table had not
+    // moved, only the end of the list had.
+    const creating = migrations.find((m) => m.up.some((sql) => sql.includes('photo_metadata')));
 
-    expect(latest.version).toBe(SCHEMA_VERSION);
-    expect(latest.up.join('\n')).toContain('photo_metadata');
+    expect(creating).toBeTruthy();
+    expect(creating.version).toBeLessThanOrEqual(SCHEMA_VERSION);
   });
 
   it('is written and cleared by DatabaseService, not only declared', () => {

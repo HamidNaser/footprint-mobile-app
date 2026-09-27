@@ -142,6 +142,23 @@ export const migrations = [
       'DROP TABLE IF EXISTS photo_metadata;',
     ],
   },
+  {
+    version: 5,
+    description: 'journal_entries.date_precision, so an offline entry keeps how much of its date is real',
+    up: [
+      // Every phone in the wild is on v4, and a column declared only in CREATE_TABLES reaches
+      // fresh installs and nobody else -- the same trap v4 exists to avoid.
+      //
+      // SQLite applies the DEFAULT to rows that are already there, so no backfill is needed:
+      // every entry written before this was dated to the day, which is what 'day' says.
+      "ALTER TABLE journal_entries ADD COLUMN date_precision TEXT NOT NULL DEFAULT 'day';",
+    ],
+    down: [
+      // SQLite cannot drop a column without rebuilding the table, and rebuilding one to undo
+      // an additive change risks the rows it is protecting. Left deliberately empty: the
+      // column is harmless to an older build, which simply ignores it.
+    ],
+  },
 ];
 
 /**
