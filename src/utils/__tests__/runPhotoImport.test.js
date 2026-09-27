@@ -178,6 +178,54 @@ describe('runPhotoImport', () => {
     expect(d.uploadImage).toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * A failed durable write must not cost the photograph — which is what the guard around it is
+   * for, and what it did not do.
+   *
+   * <p>
+   * It was `await savePhotoMetadata(...).catch(() => {})`, which absorbs a rejection and nothing
+   * else. A synchronous throw — or a stub returning no promise at all — escaped to the
+   * per-photograph handler, so the photograph was counted as failed and <b>never uploaded</b>: the
+   * opposite of the intent. Found by a test whose mock returned `undefined`, which is exactly what
+   * an over-narrow net looks like from outside.
+   * </p>
+   */
+  it('still uploads the photograph when the durable write throws outright', async () => {
+    const d = deps({
+      savePhotoMetadata: jest.fn(() => { throw new Error('database is locked'); }),
+    });
+
+    const summary = await runPhotoImport({ journalId: 'j1', deps: d });
+
+    expect(d.uploadImage).toHaveBeenCalledTimes(2);
+    expect(summary.failed).toBe(0);
+  });
+
+  it('still uploads the photograph when the durable write rejects', async () => {
+    const d = deps({
+      savePhotoMetadata: jest.fn(async () => { throw new Error('disk full'); }),
+    });
+
+    const summary = await runPhotoImport({ journalId: 'j1', deps: d });
+
+    expect(d.uploadImage).toHaveBeenCalledTimes(2);
+    expect(summary.failed).toBe(0);
+  });
+
+  it('keeps going when confirming a local row throws', async () => {
+    // The row stays unconfirmed and the retry path offers it again, which is the safe
+    // direction. Undoing a registration the server already accepted would not be.
+    const d = deps({
+      confirmPhotoMetadata: jest.fn(() => { throw new Error('database is locked'); }),
+      registerPhotos: jest.fn(async () => ({ registered: 2, duplicates: 0, held: 0 })),
+    });
+
+    const summary = await runPhotoImport({ journalId: 'j1', deps: d });
+
+    expect(summary.registered).toBe(2);
+    expect(summary.failed).toBe(0);
+  });
+
   it('one bad photograph does not abandon the rest', async () => {
     const d = deps({
       uploadImage: jest.fn(async (a) => {
