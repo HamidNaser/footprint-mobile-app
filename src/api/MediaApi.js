@@ -252,6 +252,16 @@ class MediaApiClass {
     return ApiClient.get(url);
   }
 
+  /**
+   * Which display copies are ready (007, contracts/media-status.md). Up to 100 ids per call;
+   * the poller does the chunking. Resolves to `{ items, partial }`.
+   * @param {string[]} ids - Media ids
+   */
+  async status(ids) {
+    const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.STATUS);
+    return ApiClient.post(url, { ids });
+  }
+
   // ============================================================
   // Private Helper Methods
   // ============================================================
