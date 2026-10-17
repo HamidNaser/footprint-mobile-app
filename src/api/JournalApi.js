@@ -267,7 +267,10 @@ class JournalApiClass {
       updated: response.updated || [],      // Array of { clientId, serverId, serverTimestamp }
       deleted: response.deleted || [],      // Array of serverId (strings)
       conflicts: response.conflicts || [],  // Array of conflict details
-      serverChanges: response.serverChanges || [], // Server-side changes to pull
+      // No `serverChanges`: BatchSyncResponse declares Created, Updated, Deleted,
+      // Conflicts and ServerTimestamp and nothing else, so the field was always [] and
+      // nothing read it. Dead, and worse than dead -- it read as a pull that happens on
+      // the push path and does not.
       serverTimestamp: response.serverTimestamp,
     };
   }

@@ -115,54 +115,88 @@ const { SyncQueue } = require('../SyncQueue');
 const SERVER_TIME = '2026-10-17T09:00:00.000Z';
 
 /**
- * A stand-in for the Hub's POST /journals/sync.
+ * A stand-in for the Hub, serving both doors a create can go through.
  *
- * It deliberately reads ONLY `clientId` out of a create, because that is the only name
- * CreateSyncEntry binds, and it answers with SyncResultItem objects
- * ({ clientId, serverId, serverTimestamp }) for both `created` and `updated`, because that
- * is what BatchSyncResponse declares. `deleted` really is a list of strings.
+ * POST /journals/sync reads ONLY `clientId` out of a create, because that is the only
+ * name CreateSyncEntry binds, and it answers with SyncResultItem objects for both
+ * `created` and `updated`, because that is what BatchSyncResponse declares. `deleted`
+ * really is a list of strings.
+ *
+ * POST /journals/entries is the single-entry create the fallback uses, and it is the
+ * dangerous one: CreateJournalEntryRequest has no ClientId field at all and the
+ * controller never sets one, so there is no idempotency guard and the stored row carries
+ * no correlation id. Anything sent twice down this door becomes two memories. The fake
+ * has to serve it, or a test cannot tell a fallback that duplicates from one that does
+ * not -- which is precisely how a green test came to assert the opposite of the truth.
  */
 function createFakeHub() {
   const stored = [];
   const byClientId = new Map(); // stands in for the unique {UserId, ClientId} index
 
-  const handle = async (url, payload) => {
+  // JsonIgnoreCondition.WhenWritingNull is configured Hub-wide, so a null `clientId` is
+  // not serialised as null -- the key is absent from the reply altogether.
+  const resultItem = (clientId, serverId) => {
+    const item = { serverId, serverTimestamp: SERVER_TIME };
+    if (clientId != null) {
+      item.clientId = clientId;
+    }
+    return item;
+  };
+
+  const handleBatch = (body) => {
     const created = [];
 
-    for (const create of payload.creates || []) {
+    for (const create of body.creates || []) {
       const clientId = create.clientId ?? null;
 
       // The server's idempotency guard. With no clientId it does not run at all.
       if (clientId) {
         const already = byClientId.get(clientId);
         if (already) {
-          created.push({ clientId, serverId: already, serverTimestamp: SERVER_TIME });
+          created.push(resultItem(clientId, already));
           continue;
         }
       }
 
       const serverId = `srv-${stored.length + 1}`;
-      stored.push({ serverId, clientId, title: create.title ?? null });
+      stored.push({ serverId, clientId, title: create.title ?? null, via: 'batch' });
       if (clientId) {
         byClientId.set(clientId, serverId);
       }
-      created.push({ clientId, serverId, serverTimestamp: SERVER_TIME });
+      created.push(resultItem(clientId, serverId));
     }
 
-    const updated = (payload.updates || []).map((update) => ({
-      clientId: update.clientId ?? null,
-      serverId: update.serverId,
-      serverTimestamp: SERVER_TIME,
-    }));
+    const updated = (body.updates || []).map((update) =>
+      resultItem(update.clientId ?? null, update.serverId)
+    );
 
     return {
       created,
       updated,
-      deleted: payload.deletes || [],
+      deleted: body.deletes || [],
       conflicts: [],
-      serverChanges: [],
       serverTimestamp: SERVER_TIME,
     };
+  };
+
+  // POST /journals/entries. No correlation id is bound, so no guard can run: every call
+  // stores another memory. Answers with a JournalEntryResponse, which carries `id` and
+  // -- deliberately -- no client id to match anything against later.
+  const handleSingleCreate = (body) => {
+    const serverId = `srv-${stored.length + 1}`;
+    stored.push({ serverId, clientId: null, title: body.title ?? null, via: 'single' });
+    return { id: serverId, journalId: body.journalId, createdAt: SERVER_TIME };
+  };
+
+  const handle = async (url, payload) => {
+    // The fake is handed the live JS object, so a key whose value is `undefined` reads as
+    // present where the wire would have dropped it entirely. Round-trip it through JSON so
+    // the fake sees exactly what the server would.
+    const body = JSON.parse(JSON.stringify(payload ?? {}));
+
+    return String(url).endsWith('/journals/entries')
+      ? handleSingleCreate(body)
+      : handleBatch(body);
   };
 
   return { stored, handle };
@@ -193,6 +227,49 @@ function primeQueue(operations) {
 function batchSyncCalls() {
   return ApiClient.post.mock.calls.filter(([url]) => String(url).endsWith('/journals/sync'));
 }
+
+function singleCreateCalls() {
+  return ApiClient.post.mock.calls.filter(([url]) => String(url).endsWith('/journals/entries'));
+}
+
+/**
+ * What ApiClient.request actually throws, reproduced from src/api/ApiClient.js so these
+ * tests exercise the real shapes rather than an invented one:
+ *
+ *   timeout   -> ApiError.timeoutError()   : AbortError from _fetchWithTimeout's
+ *                                            AbortController. status 0, code 'TIMEOUT'.
+ *   network   -> ApiError.networkError(m)  : any other fetch rejection. status 0,
+ *                                            code 'NETWORK_ERROR'.
+ *   offline   -> ApiError.offlineError()   : thrown before fetch is called at all.
+ *                                            status 0, code 'OFFLINE'.
+ *   rejected  -> _handleResponse           : status from the response, data = its body.
+ */
+const apiErrors = {
+  timeout: () =>
+    Object.assign(new Error('Request timed out'), {
+      name: 'ApiError', status: 0, code: 'TIMEOUT', data: null, isNetworkError: true,
+    }),
+  network: () =>
+    Object.assign(new Error('Network request failed'), {
+      name: 'ApiError', status: 0, code: 'NETWORK_ERROR', data: null, isNetworkError: true,
+    }),
+  offline: () =>
+    Object.assign(new Error('No internet connection'), {
+      name: 'ApiError', status: 0, code: 'OFFLINE', data: null, isNetworkError: true,
+    }),
+  serverError: () =>
+    Object.assign(new Error('Request failed with status 502'), {
+      name: 'ApiError', status: 502, code: 'API_ERROR', data: null, isServerError: true,
+    }),
+  rejected: () =>
+    Object.assign(new Error('Validation failed: {"Creates":["Date is required"]}'), {
+      name: 'ApiError',
+      status: 400,
+      code: 'API_ERROR',
+      data: { title: 'One or more validation errors occurred', errors: { Creates: ['Date is required'] } },
+      isClientError: true,
+    }),
+};
 
 const createOperation = () => ({
   id: 'op-create-1',
@@ -269,18 +346,241 @@ describe('batch sync correlates creates with the server reply', () => {
     expect(payload.creates[0].clientId).toBe('local-abc');
   });
 
-  it('lets the server deduplicate even when the reply is lost', async () => {
-    // The reply never arrives, so the operation stays pending through no fault of the
-    // matching code -- the server's own guard is what has to stop the duplicate.
+  it('does not match a reply item that carries no correlation id', async () => {
+    // Two creates with no local_id. Both come back with `clientId` absent -- the Hub omits
+    // a null rather than writing one -- so `undefined === undefined` matched the FIRST
+    // such operation both times: it was claimed twice, its local row stamped with the
+    // second memory's server id, and the other operation was never claimed at all. That
+    // one stays pending forever and is re-pushed with no correlation id on every sync,
+    // which the server cannot deduplicate.
+    const { JournalRepository } = require('../../repositories');
+    const nameless = (id, entityId) => ({
+      id,
+      type: 'create_entry',
+      entityId,
+      serverId: null,
+      data: {
+        journal_id: 'j1',
+        date: '2026-08-05',
+        title: `Untitled ${id}`,
+        content_blocks: '[]',
+        visibility: 'private',
+      },
+    });
+    const queue = primeQueue([nameless('op-a', 'local-a'), nameless('op-b', 'local-b')]);
+
+    await SyncEngine._pushLocalChanges();
+
+    // Neither reply can be correlated, so neither operation may be claimed -- and above
+    // all neither may be claimed twice.
+    expect(JournalRepository.markSynced).not.toHaveBeenCalled();
+    expect(queue.completed.size).toBe(0);
+  });
+});
+
+describe('a batch whose reply is lost does not duplicate the memory', () => {
+  let hub;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    hub = createFakeHub();
+    ApiClient.post.mockImplementation(hub.handle);
+  });
+
+  /** The batch commits, then the reply is dropped on the way back. */
+  const loseTheReplyOnce = (makeError) => {
+    let lost = false;
+    ApiClient.post.mockImplementation(async (url, payload) => {
+      const response = await hub.handle(url, payload);
+      if (!lost && String(url).endsWith('/journals/sync')) {
+        lost = true;
+        throw makeError();
+      }
+      return response;
+    });
+  };
+
+  it('does not make a second memory when the batch commits and the reply times out', async () => {
+    // The commonest mobile failure: _fetchWithTimeout's AbortController fires while the
+    // server has already written the entry. The phone cannot tell that from a request
+    // that never arrived, so it must not re-send the create down POST /journals/entries,
+    // which has no idempotency guard. Leaving it pending costs one sync interval; the
+    // next batch is keyed on clientId and settles it against the memory already there.
+    primeQueue([createOperation()]);
+    loseTheReplyOnce(apiErrors.timeout);
+
+    await SyncEngine._pushLocalChanges();
+    await SyncEngine._pushLocalChanges();
+
+    expect(hub.stored).toHaveLength(1);
+    expect(hub.stored[0]).toMatchObject({ serverId: 'srv-1', clientId: 'local-abc' });
+    expect(singleCreateCalls()).toHaveLength(0);
+  });
+
+  it('leaves the create pending rather than failing it, so the next batch can settle it', async () => {
+    const queue = primeQueue([createOperation()]);
+    loseTheReplyOnce(apiErrors.timeout);
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    // Not completed, not failed: pending. markFailed would burn one of the operation's
+    // finite retries for a request the server may well have honoured.
+    expect(queue.completed.has('op-create-1')).toBe(false);
+    expect(queue.failed.has('op-create-1')).toBe(false);
+    expect(result).toEqual({ succeeded: 0, failed: 0, conflicts: 0 });
+
+    const settled = await SyncEngine._pushLocalChanges();
+    expect(settled.succeeded).toBe(1);
+    expect(queue.completed.has('op-create-1')).toBe(true);
+    expect(hub.stored).toHaveLength(1);
+  });
+
+  it.each([
+    ['a bare connection failure', apiErrors.network],
+    ['a 5xx, which a gateway can send after the origin committed', apiErrors.serverError],
+  ])('holds the create back on %s too', async (_name, makeError) => {
+    primeQueue([createOperation()]);
+    loseTheReplyOnce(makeError);
+
+    await SyncEngine._pushLocalChanges();
+    await SyncEngine._pushLocalChanges();
+
+    expect(hub.stored).toHaveLength(1);
+    expect(singleCreateCalls()).toHaveLength(0);
+  });
+
+  it('still falls back for a create when the server answered and rejected the batch', async () => {
+    // A 4xx is the server itself saying it refused the payload, so nothing was written and
+    // the single-entry endpoint is safe. Holding every create back on every failure would
+    // be the easy fix and the wrong one -- it would strand creates the batch will never
+    // accept.
     primeQueue([createOperation()]);
     ApiClient.post.mockImplementation(async (url, payload) => {
-      await hub.handle(url, payload);
-      throw Object.assign(new Error('Network request failed'), { status: 0 });
+      if (String(url).endsWith('/journals/sync')) {
+        throw apiErrors.rejected();
+      }
+      return hub.handle(url, payload);
     });
 
-    await SyncEngine._pushLocalChanges().catch(() => {});
-    await SyncEngine._pushLocalChanges().catch(() => {});
+    const result = await SyncEngine._pushLocalChanges();
 
+    expect(singleCreateCalls()).toHaveLength(1);
+    expect(result.succeeded).toBe(1);
+    expect(hub.stored).toHaveLength(1);
+  });
+
+  it('falls back for a create when the phone never sent the batch at all', async () => {
+    // offlineError is thrown before fetch is called, so the server provably saw nothing.
+    primeQueue([createOperation()]);
+    ApiClient.post.mockImplementation(async (url, payload) => {
+      if (String(url).endsWith('/journals/sync')) {
+        throw apiErrors.offline();
+      }
+      return hub.handle(url, payload);
+    });
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(singleCreateCalls()).toHaveLength(1);
+  });
+
+  it('keeps falling back for updates and deletes, which are idempotent', async () => {
+    primeQueue([
+      createOperation(),
+      {
+        id: 'op-update-1',
+        type: 'update_entry',
+        entityId: 'local-xyz',
+        serverId: 'srv-9',
+        data: { local_id: 'local-xyz', journal_id: 'j1', date: '2026-08-06', content_blocks: '[]', updated_at: '2026-08-06T12:00:00.000Z' },
+      },
+      {
+        id: 'op-delete-1',
+        type: 'delete_entry',
+        entityId: 'local-gone',
+        serverId: 'srv-7',
+        data: { local_id: 'local-gone' },
+      },
+    ]);
+    ApiClient.patch.mockResolvedValue({ id: 'srv-9' });
+    ApiClient.delete.mockResolvedValue(null);
+    loseTheReplyOnce(apiErrors.timeout);
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    // A re-sent PATCH or DELETE cannot make a second memory, so holding them back would
+    // only delay them for nothing.
+    expect(ApiClient.patch).toHaveBeenCalledTimes(1);
+    expect(ApiClient.delete).toHaveBeenCalledTimes(1);
+    expect(result.succeeded).toBe(2);
+    // The create alone is held back.
+    expect(singleCreateCalls()).toHaveLength(0);
+  });
+});
+
+describe('a failed local write does not re-send what the batch already accepted', () => {
+  let hub;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    hub = createFakeHub();
+    ApiClient.post.mockImplementation(hub.handle);
+  });
+
+  it('does not make a second memory when markSynced throws', async () => {
+    // markSynced and markCompleted are SQLite writes, and they used to sit inside the try
+    // whose catch re-sends everything. A locked database therefore re-created, down the
+    // unguarded single-entry endpoint, entries the server had just accepted.
+    const { JournalRepository } = require('../../repositories');
+    primeQueue([createOperation()]);
+    JournalRepository.markSynced.mockRejectedValueOnce(
+      Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' })
+    );
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(hub.stored).toHaveLength(1);
+    expect(singleCreateCalls()).toHaveLength(0);
+  });
+
+  it('does not re-send an update the batch had already settled', async () => {
+    // The structural half of the same defect, and the half a create-only guard does not
+    // cover: whatever the batch settled before the throw must not be sent again, whatever
+    // its type. Only the network call belongs inside the fallback's try.
+    const { JournalRepository } = require('../../repositories');
+    primeQueue([
+      {
+        id: 'op-update-1',
+        type: 'update_entry',
+        entityId: 'local-xyz',
+        serverId: 'srv-9',
+        data: { local_id: 'local-xyz', journal_id: 'j1', date: '2026-08-06', content_blocks: '[]', updated_at: '2026-08-06T12:00:00.000Z' },
+      },
+    ]);
+    JournalRepository.markSynced.mockRejectedValueOnce(new Error('disk I/O error'));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(ApiClient.patch).not.toHaveBeenCalled();
+    expect(batchSyncCalls()).toHaveLength(1);
+  });
+
+  it('does not report a local write failure as a sync success', async () => {
+    const { JournalRepository } = require('../../repositories');
+    const queue = primeQueue([createOperation()]);
+    JournalRepository.markSynced.mockRejectedValueOnce(new Error('database is locked'));
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    expect(result.succeeded).toBe(0);
+    // Still pending, so the next batch -- idempotent on clientId -- finishes the job
+    // against the memory already on the server rather than making another.
+    expect(queue.completed.has('op-create-1')).toBe(false);
+
+    JournalRepository.markSynced.mockResolvedValue(undefined);
+    const retried = await SyncEngine._pushLocalChanges();
+
+    expect(retried.succeeded).toBe(1);
     expect(hub.stored).toHaveLength(1);
   });
 });
