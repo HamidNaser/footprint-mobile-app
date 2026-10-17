@@ -23,6 +23,17 @@ export const EntryVisibility = {
 };
 
 /**
+ * Who may see a memory's EXACT coordinates. Separate from visibility, which decides who sees
+ * the memory at all: anybody below this level is shown a coarsened (~1km) position instead.
+ * Mirrors the backend's LocationSharingLevels and the compose screen's own picker.
+ */
+export const LocationSharing = {
+  PRIVATE: 'private',     // Only the owner sees the exact spot
+  FAMILY: 'family',       // Family see the exact spot
+  EVERYONE: 'everyone',   // Anybody who can see the memory sees the exact spot
+};
+
+/**
  * Query options for fetching entries
  */
 export const SortOrder = {
@@ -65,6 +76,10 @@ class JournalRepositoryClass extends BaseRepository {
       contentBlocks: entryData.contentBlocks || [],
       location: entryData.location || null,
       visibility: entryData.visibility || EntryVisibility.PRIVATE,
+      // Who may see the exact coordinates, as picked per memory in the compose screen. The
+      // same default the picker shows, and the narrowest, so a caller that says nothing
+      // cannot accidentally share a position more widely than the person expected.
+      locationSharing: entryData.locationSharing || LocationSharing.PRIVATE,
       reactions: { likes: 0, likedByUserIds: [] },
       commentsCount: 0,
       syncStatus,
@@ -126,6 +141,10 @@ class JournalRepositoryClass extends BaseRepository {
       contentBlocks: serverEntry.contentBlocks || [],
       location: serverEntry.location || null,
       visibility: serverEntry.visibility || EntryVisibility.PRIVATE,
+      // Kept rather than re-derived, so a level set on another device is not lost on the way
+      // in and then pushed back narrower on the next edit. A server that sends nothing falls
+      // to 'private' in insertEntry, which under-shares rather than over-shares.
+      locationSharing: serverEntry.locationSharing || null,
       reactions: serverEntry.reactions || { likes: 0, likedByUserIds: [] },
       commentsCount: serverEntry.commentsCount || 0,
       syncStatus: SyncStatus.SYNCED,
@@ -299,6 +318,9 @@ class JournalRepositoryClass extends BaseRepository {
     }
     if (updates.visibility !== undefined) {
       updateData.visibility = updates.visibility;
+    }
+    if (updates.locationSharing !== undefined) {
+      updateData.locationSharing = updates.locationSharing;
     }
 
     // Mark as pending sync (unless local-only)
@@ -549,6 +571,7 @@ class JournalRepositoryClass extends BaseRepository {
         name: row.location_name,
       } : null,
       visibility: row.visibility,
+      locationSharing: row.location_sharing,
       reactions: {
         likes: row.reactions_likes,
         likedByUserIds: JSON.parse(row.reactions_liked_by || '[]'),
