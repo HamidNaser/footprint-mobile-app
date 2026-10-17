@@ -150,6 +150,7 @@ export const MEDIA_ENDPOINTS = {
   DELETE_MEDIA: '/media/:id',
   GET_MEDIA: '/media/:id',
   STATUS: '/media/status',
+  RETRY_DERIVATIVES: '/media/:id/derivatives/retry',
 };
 
 /**

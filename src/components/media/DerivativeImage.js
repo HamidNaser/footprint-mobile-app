@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Image, Platform, StyleSheet, Text, View } from 'react-native';
 import { useMediaDerivative } from '../../hooks/useMediaDerivative';
+import { FailedTile, originalUrlOf } from './FailedTile';
 
 /**
  * One photo tile, in every state of the 007 display-copy lifecycle.
@@ -12,8 +13,11 @@ import { useMediaDerivative } from '../../hooks/useMediaDerivative';
  *  - local photo, or a ready copy ... the image
  *  - pending ........................ grey plate, "Preparing photo…" (FR-020; label only on tiles under 60 px)
  *  - unavailable / loadFailed ....... "Photo unavailable"
- *  - failed (server verdict) ........ "Photo unavailable" for now. SEAM for T070/T071: the
- *                                     owner's failed tile with Try again replaces `renderFailed`.
+ *  - failed (server verdict) ........ the owner (the server sent a `failureReason`) gets "This photo
+ *                                     couldn't be prepared", the reason, Try again and Download
+ *                                     original (FailedTile); anyone else gets "Photo unavailable"
+ *                                     with no actions. Pass `onFailedOwner` where the tile sits in
+ *                                     a Pressable, to take the actions as a sibling instead.
  *  - uploadFailed / missingFile ..... "Photo couldn't be uploaded" (the photo never left the device)
  *
  * `onStateChange(status)` fires whenever the tile settles into a new status: 'pending',
@@ -23,7 +27,7 @@ import { useMediaDerivative } from '../../hooks/useMediaDerivative';
  * Legacy: an item with no id and a plain `uri` (the seeded demo memories in data/placesData)
  * renders that uri directly and never polls -- the web id-less bridge.
  *
- * Video tiles do not use this: they keep VideoThumbnail (T078 adds the overlay).
+ * Video tiles do not use this: they keep VideoThumbnail (its poster and play overlay, T078).
  */
 
 export const PHOTO_UNAVAILABLE = 'Photo unavailable';
@@ -66,8 +70,24 @@ function Plate({ style, testID, label }) {
   );
 }
 
-/** The seam: T070/T071 pass `renderFailed` to show Try again to the owner. */
-const defaultRenderFailed = ({ style }) => <Plate style={style} testID="media-failed" label={PHOTO_UNAVAILABLE} />;
+/**
+ * The server sends `failureReason` to the owner only (media-status contract), so its presence is
+ * the ownership signal; without it the photo is just unavailable. Fails closed (FR-019).
+ */
+const defaultRenderFailed = ({ style, media, failureReason, tryAgain, retrying, retryError, hostTakesActions }) =>
+  failureReason ? (
+    <FailedTile
+      style={style}
+      media={media}
+      failureReason={failureReason}
+      tryAgain={tryAgain}
+      retrying={retrying}
+      retryError={retryError}
+      showActions={!hostTakesActions}
+    />
+  ) : (
+    <Plate style={style} testID="media-failed" label={PHOTO_UNAVAILABLE} />
+  );
 
 function DerivativeImage({
   media,
@@ -77,8 +97,9 @@ function DerivativeImage({
   renderFailed = defaultRenderFailed,
   testID,
   onStateChange,
+  onFailedOwner,
 }) {
-  const { src, state, failureReason, onError, rewatch } = useMediaDerivative(media, { variant });
+  const { src, state, failureReason, onError, rewatch, tryAgain, retrying, retryError } = useMediaDerivative(media, { variant });
   const [loadedSrc, setLoadedSrc] = useState(null);
 
   const legacyUri = isLegacy(media) ? media.uri : null;
@@ -95,6 +116,17 @@ function DerivativeImage({
   useEffect(() => {
     onStateChangeRef.current?.(status);
   }, [status]);
+
+  // A host that wraps the tile in a Pressable takes the owner's actions here and renders them
+  // beside its Pressable (FailedActions). Null whenever there is nothing to offer.
+  const originalUrl = originalUrlOf(media);
+  const exposeActions = !!onFailedOwner && state === 'failed' && !!failureReason;
+  const onFailedOwnerRef = useRef(onFailedOwner);
+  onFailedOwnerRef.current = onFailedOwner;
+  useEffect(() => {
+    onFailedOwnerRef.current?.(exposeActions ? { tryAgain, retrying, retryError, originalUrl } : null);
+  }, [exposeActions, tryAgain, retrying, retryError, originalUrl]);
+  useEffect(() => () => onFailedOwnerRef.current?.(null), []);
 
   if (legacyUri) {
     return (
@@ -116,7 +148,16 @@ function DerivativeImage({
     return <Plate style={style} testID="media-unavailable" label={PHOTO_UNAVAILABLE} />;
   }
   if (state === 'failed') {
-    return renderFailed({ style, media, failureReason, rewatch });
+    return renderFailed({
+      style,
+      media,
+      failureReason,
+      rewatch,
+      tryAgain,
+      retrying,
+      retryError,
+      hostTakesActions: !!onFailedOwner,
+    });
   }
   if (!src || state === 'pending') {
     return <Plate style={style} testID="media-pending" label={PHOTO_PREPARING} />;

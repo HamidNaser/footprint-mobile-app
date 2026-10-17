@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { mediaStatusPoller } from '../services/mediaStatusPoller';
+import { MediaApi } from '../api/MediaApi';
+import { useTileVisibility } from './mediaVisibility';
 import { thumbnailSource, fullSizeSource } from '../utils/mediaSource';
 
 /**
@@ -25,7 +27,13 @@ import { thumbnailSource, fullSizeSource } from '../utils/mediaSource';
  * source that does not exist yet is `null`, never the original: the tile is 'pending' and
  * the poller is asked about it straight away, because there is no image to error.
  *
- * Visibility gating and app-state pause belong to T080 and plug into the poller.
+ * Try again (FR-018, FR-022): `tryAgain()` asks the server to prepare a failed photo again;
+ * `retrying` / `retryError` are for the owner's failed tile.
+ *
+ * Viewport (FR-027, SC-007): a tile that is off screen does not watch. `visible` comes from the
+ * option, else from the nearest <TileVisibility> a list host provides, else true. Leaving the
+ * screen unwatches; coming back watches again. The loadFailed cycle count survives both.
+ * App-state pause lives in the poller.
  */
 
 export const RETRY_DELAY_MS = 2000;
@@ -46,7 +54,9 @@ function startPhase(media, base) {
   return media?.unresolved ? 'unavailable' : 'pending';
 }
 
-export function useMediaDerivative(media, { variant = 'grid' } = {}) {
+export function useMediaDerivative(media, { variant = 'grid', visible: visibleOption } = {}) {
+  const hostVisible = useTileVisibility();
+  const visible = visibleOption === undefined ? hostVisible : visibleOption !== false;
   const base = sourceFor(media, variant);
   // A photo that never left the device (uploadFailed / missingFile) has nothing to ask the
   // server about, so it is never watched.
@@ -70,6 +80,9 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
   const localFailedRef = useRef(false); // the device file would not load: use the server copy
   // The id actually handed to the poller, so teardown unwatches that one even after props move on.
   const watchedIdRef = useRef(null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const wantWatchRef = useRef(false); // the tile is waiting on the server but is off screen
   useLayoutEffect(() => {
     propsRef.current = { mediaId, base, variant, isLocal, unresolved: !!media?.unresolved, media };
   });
@@ -101,6 +114,13 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
       const cb = (update) => onStatus(update, cb);
       callbackRef.current = cb;
       commit({ phase: 'pending', src: orig, failureReason: null });
+      if (!visibleRef.current) {
+        // Off screen: remember that an answer is wanted and ask when the tile is seen.
+        callbackRef.current = null;
+        wantWatchRef.current = true;
+        return;
+      }
+      wantWatchRef.current = false;
       watchedIdRef.current = id;
       mediaStatusPoller.watch(id, cb);
     };
@@ -148,6 +168,7 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
     retriedRef.current = false;
     rewatchesRef.current = 0;
     localFailedRef.current = false;
+    wantWatchRef.current = false;
     const p = propsRef.current;
     if (p.base) {
       commit({ phase: 'idle', src: p.base, failureReason: null });
@@ -205,6 +226,25 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
     // pending / failed / unavailable / loadFailed: another error changes nothing.
   }, [commit]);
 
+  // Off screen: stop asking. On return: ask again if we were still waiting. Nothing else is
+  // reset, in particular not the loadFailed cycle count (a flicker must not buy more tries).
+  const firstVisibility = useRef(true);
+  useEffect(() => {
+    if (firstVisibility.current) {
+      firstVisibility.current = false;
+      return;
+    }
+    if (!visible) {
+      if (callbackRef.current) {
+        mediaStatusPoller.unwatch(watchedIdRef.current, callbackRef.current);
+        callbackRef.current = null;
+        wantWatchRef.current = true;
+      }
+    } else if (wantWatchRef.current && phaseRef.current === 'pending' && propsRef.current.mediaId) {
+      apiRef.current.startWatch();
+    }
+  }, [visible]);
+
   // Back to watching from any state: used after the owner's Try again (FR-018, T070/T071).
   const rewatch = useCallback(() => {
     teardown();
@@ -214,7 +254,54 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
     if (propsRef.current.mediaId) apiRef.current.startWatch();
   }, [teardown]);
 
-  return { src: view.src, state: view.phase, failureReason: view.failureReason, onError, rewatch };
+  // The owner's Try again. One request at a time; stays `retrying` until the tile leaves the
+  // failed state so the button cannot flash back and invite a second POST.
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState(false);
+  const inFlightRef = useRef(false);
+  useEffect(() => {
+    inFlightRef.current = false;
+    setRetrying(false);
+    setRetryError(false);
+  }, [mediaId]);
+  useEffect(() => {
+    if (view.phase !== 'failed') {
+      inFlightRef.current = false;
+      setRetrying(false);
+    }
+  }, [view.phase]);
+
+  const tryAgain = useCallback(async () => {
+    const id = propsRef.current.mediaId;
+    if (!id || inFlightRef.current) return;
+    inFlightRef.current = true;
+    setRetrying(true);
+    setRetryError(false);
+    try {
+      await MediaApi.retry(id);
+      rewatch();
+    } catch (e) {
+      if (e && e.status === 409) {
+        // Not failed any more (someone retried, or it finished): just look again.
+        rewatch();
+      } else {
+        inFlightRef.current = false;
+        setRetrying(false);
+        setRetryError(true);
+      }
+    }
+  }, [rewatch]);
+
+  return {
+    src: view.src,
+    state: view.phase,
+    failureReason: view.failureReason,
+    onError,
+    rewatch,
+    tryAgain,
+    retrying,
+    retryError,
+  };
 }
 
 export default useMediaDerivative;

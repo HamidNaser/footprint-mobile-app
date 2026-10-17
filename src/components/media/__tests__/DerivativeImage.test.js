@@ -118,7 +118,7 @@ describe('DerivativeImage', () => {
 
   it.each([
     ['unavailable', { id: 'm1', status: 'unavailable' }],
-    ['failed (until the failed tile arrives in T070/T071)', { id: 'm1', status: 'failed', updatedAt: 't' }],
+    ['failed with no failureReason (not the owner)', { id: 'm1', status: 'failed', updatedAt: 't' }],
   ])('says "Photo unavailable" for %s', (_name, payload) => {
     const tree = render({ media: { id: 'm1', thumbnailUrl: null } });
     act(() => mediaStatusPoller.watch.mock.calls[0][1](payload));

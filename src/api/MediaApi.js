@@ -263,6 +263,17 @@ class MediaApiClass {
     return ApiClient.post(url, { ids });
   }
 
+  /**
+   * The owner's Try again for a photo that could not be prepared (007, contracts/derivative-retry.md).
+   * 202 `{ id, status: "pending", updatedAt }`; 409 when it is not failed (any more) -- the caller
+   * treats that as "look again". 404 for anyone but the owner. No body.
+   * @param {string} mediaId - Server media ID
+   */
+  async retry(mediaId) {
+    const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.RETRY_DERIVATIVES, { id: mediaId });
+    return ApiClient.post(url);
+  }
+
   // ============================================================
   // Private Helper Methods
   // ============================================================
