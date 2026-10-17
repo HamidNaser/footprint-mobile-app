@@ -30,6 +30,8 @@ jest.mock('../../api/JournalApi', () => ({
   default: { listJournals: jest.fn() },
 }));
 // The tiles are DerivativeImage now; its poller reaches ApiClient, which cannot load here.
+// useMediaDerivative reaches MediaApi (retry); keep the real API client out of this suite.
+jest.mock('../../api/MediaApi', () => ({ MediaApi: { retry: jest.fn() } }));
 jest.mock('../../services/mediaStatusPoller', () => {
   const poller = { watch: jest.fn(), unwatch: jest.fn() };
   return { mediaStatusPoller: poller, default: poller };
