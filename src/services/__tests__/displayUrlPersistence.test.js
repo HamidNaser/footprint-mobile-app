@@ -56,6 +56,7 @@ describe('migration clears cached addresses', () => {
           thumbnailUri: 'https://api/api/v1/media/t/srv-1',
           displayUrl: 'https://cdn/d',
           displayUri: 'https://cdn/d',
+          thumbnailServerUrl: 'https://api/api/v1/media/t/srv-1',
         },
         {
           id: 'local-1',
@@ -85,14 +86,14 @@ describe('migration clears cached addresses', () => {
     };
   }
 
-  it('wipes thumbnail and display addresses from the queue, and resets the pull cursor', async () => {
+  it('wipes thumbnail and display addresses from the queue, and leaves the pull cursor alone', async () => {
     const db = fakeDb();
     await applyMigration(db, adding());
     const sql = db.statements.join('\n');
     expect(sql).toMatch(/UPDATE media_queue SET thumbnail_server_url = NULL/i);
     expect(sql).toMatch(/display_server_url = NULL/i);
-    // The cursor reset is what makes "the next sync repopulates them" true.
-    expect(sql).toMatch(/DELETE FROM sync_metadata WHERE key = 'last_pull_timestamp'/i);
+    // R-a: no re-pull. A reset would also miss deletions made while the cursor was behind.
+    expect(sql).not.toMatch(/sync_metadata/i);
   });
 
   it('strips remote addresses from cached entries but keeps the device copy', async () => {
@@ -107,9 +108,88 @@ describe('migration clears cached addresses', () => {
     expect(remote.thumbnailUri).toBeUndefined();
     expect(remote.displayUrl).toBeUndefined();
     expect(remote.displayUri).toBeUndefined();
+    expect(remote.thumbnailServerUrl).toBeUndefined(); // the video preview key (M3)
     expect(remote.serverUrl).toBe('https://cdn/orig'); // the original is not a cached rendition
     expect(local.localPath).toBe('file:///a.jpg');
     expect(local.thumbnailUri).toBe('file:///a.jpg');
+  });
+});
+
+/**
+ * C2: the migration is all-or-nothing, and cannot trip over a column that already exists.
+ * A fresh install builds tables from CREATE_TABLES (which already has the columns) and then
+ * runs every migration from v1; an ALTER ... ADD COLUMN there is a "duplicate column" crash.
+ */
+describe('migration safety', () => {
+  function sqliteLikeDb(columns) {
+    const calls = { direct: [], txn: [] };
+    const exec = (log) => ({
+      runAsync: jest.fn(async (sql) => {
+        log.push(sql);
+        const alter = /ALTER TABLE (\w+) ADD COLUMN (\w+)/i.exec(sql);
+        if (alter) {
+          if (columns[alter[1]].includes(alter[2])) throw new Error('duplicate column name: ' + alter[2]);
+          columns[alter[1]].push(alter[2]);
+        }
+      }),
+      getAllAsync: jest.fn(async (sql) => {
+        const pragma = /PRAGMA table_info\((\w+)\)/i.exec(sql);
+        if (pragma) return columns[pragma[1]].map((name) => ({ name }));
+        return [];
+      }),
+    });
+    const direct = exec(calls.direct);
+    const txn = exec(calls.txn);
+    const db = {
+      ...direct,
+      withExclusiveTransactionAsync: jest.fn(async (cb) => cb(txn)),
+    };
+    return { db, txn, direct, calls };
+  }
+
+  const v = (n) => migrations.find((m) => m.version === n);
+
+  it('runs every step and the version insert inside one exclusive transaction', async () => {
+    const { db, calls } = sqliteLikeDb({ media_queue: [], journal_entries: [] });
+    await applyMigration(db, v(6));
+
+    expect(db.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
+    expect(calls.direct).toEqual([]); // nothing escaped the transaction
+    expect(calls.txn.some((s) => /INSERT OR REPLACE INTO schema_version/i.test(s))).toBe(true);
+  });
+
+  it('records no version when a step fails', async () => {
+    const { db, txn, calls } = sqliteLikeDb({ media_queue: [], journal_entries: [] });
+    txn.getAllAsync.mockImplementation(async (sql) => {
+      if (/PRAGMA/i.test(sql)) return [];
+      throw new Error('disk full');
+    });
+    await expect(applyMigration(db, v(6))).rejects.toThrow('disk full');
+    expect(calls.txn.some((s) => /schema_version/i.test(s))).toBe(false);
+  });
+
+  it('is a no-op when run a second time', async () => {
+    const { db } = sqliteLikeDb({ media_queue: [], journal_entries: [] });
+    await applyMigration(db, v(6));
+    await expect(applyMigration(db, v(6))).resolves.toBe(true);
+  });
+
+  it('succeeds on a fresh install, where CREATE_TABLES already has the columns (v5 and v6)', async () => {
+    const { db } = sqliteLikeDb({
+      media_queue: ['local_id', 'display_server_url'],
+      journal_entries: ['local_id', 'date_precision'],
+    });
+    await expect(applyMigration(db, v(5))).resolves.toBe(true);
+    await expect(applyMigration(db, v(6))).resolves.toBe(true);
+  });
+
+  it('still adds the column when it is genuinely missing', async () => {
+    const columns = { media_queue: ['local_id'], journal_entries: ['local_id'] };
+    const { db } = sqliteLikeDb(columns);
+    await applyMigration(db, v(5));
+    await applyMigration(db, v(6));
+    expect(columns.journal_entries).toContain('date_precision');
+    expect(columns.media_queue).toContain('display_server_url');
   });
 });
 

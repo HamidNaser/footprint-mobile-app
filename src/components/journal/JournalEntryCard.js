@@ -100,7 +100,14 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   const GRID_GAP = 4;
   
   // Web-specific image component using native img element
-  const WebImage = ({ uri, style, onPress }) => (
+  // A photo that can never upload says so (007 R-c), rather than showing a blank tile.
+  const FailedTile = ({ style }) => (
+    <View style={[styles.photo, style, { alignItems: 'center', justifyContent: 'center', backgroundColor: '#E0E0E0' }]}>
+      <Text style={styles.failedTileText}>Photo couldn't be uploaded</Text>
+    </View>
+  );
+
+  const WebImage = ({ uri, style, onPress, failed }) => failed ? <FailedTile style={style} /> : (
     <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
       <img 
         src={uri}
@@ -118,7 +125,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   );
   
   // Native image component
-  const NativeImage = ({ uri, style, onPress }) => (
+  const NativeImage = ({ uri, style, onPress, failed }) => failed ? <FailedTile style={style} /> : (
     <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
       <Image
         source={{ uri }}
@@ -134,6 +141,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   const renderSinglePhoto = () => (
     <PhotoImage 
       uri={thumbnailSource(photos[0])}
+      failed={photos[0]?.uploadFailed}
       style={{ height: PHOTO_HEIGHT }}
       onPress={() => onPhotoPress?.(photos, 0)}
     />
@@ -148,6 +156,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
         >
           <PhotoImage
             uri={thumbnailSource(photo)}
+            failed={photo?.uploadFailed}
             style={{ height: PHOTO_HEIGHT }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
@@ -161,6 +170,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
       <View style={{ flex: 2 }}>
         <PhotoImage
           uri={thumbnailSource(photos[0])}
+          failed={photos[0]?.uploadFailed}
           style={{ height: PHOTO_HEIGHT }}
           onPress={() => onPhotoPress?.(photos, 0)}
         />
@@ -173,6 +183,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
           >
             <PhotoImage
               uri={thumbnailSource(photo)}
+              failed={photo?.uploadFailed}
               style={{ height: (PHOTO_HEIGHT - GRID_GAP) / 2 }}
               onPress={() => onPhotoPress?.(photos, index + 1)}
             />
@@ -191,6 +202,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
         >
           <PhotoImage
             uri={thumbnailSource(photo)}
+            failed={photo?.uploadFailed}
             style={{ height: '100%' }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
@@ -607,6 +619,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  failedTileText: {
+    color: '#555',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingHorizontal: 8,
   },
   moreText: {
     color: '#FFF',

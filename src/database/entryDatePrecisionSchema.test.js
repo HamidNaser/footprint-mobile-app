@@ -66,7 +66,7 @@ describe('journal_entries.date_precision', () => {
     // SQLite applies the DEFAULT to existing rows when a column is added, so every row that
     // was there already reads as 'day' without a separate UPDATE. Adding one would be a
     // no-op that looked like it was doing something.
-    const latest = migrations[migrations.length - 1];
+    const latest = adding();
 
     expect(latest.up.join('\n')).not.toMatch(/UPDATE journal_entries/i);
   });

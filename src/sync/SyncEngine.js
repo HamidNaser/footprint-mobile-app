@@ -382,25 +382,68 @@ class SyncEngineClass {
   }
 
   /**
-   * True when an entry still references a device file the server has no media id for
-   * (007 FR-040, R12). Such an entry must not be sent: its reference would be a local id.
+   * True when a media item is a device file the server has no media id for (007 FR-040, R12).
+   * An item uploaded before mediaId was recorded carries its server url and keeps the id it
+   * was given then; only an item with neither has not been uploaded.
    */
+  _isUnuploadedItem(item) {
+    return !!((item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url));
+  }
+
+  /** True when an entry still references such a file: its reference would be a local id. */
   _hasUnuploadedMedia(entry) {
     return (entry?.contentBlocks || []).some((block) =>
-      (Array.isArray(block?.media) ? block.media : []).some(
-        // An item uploaded before mediaId was recorded carries its server url and keeps
-        // the id it was given then; only an item with neither has not been uploaded.
-        (item) => (item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url)
-      )
+      (Array.isArray(block?.media) ? block.media : []).some((item) => this._isUnuploadedItem(item))
     );
   }
 
   /**
-   * Hold back create/update operations whose entry still has media without a server media
-   * id. Held visibly -- the entry is marked failed and counted -- never dropped: the
-   * operation stays queued, and the device keeps rendering localPath meanwhile.
+   * Decide what to do with an entry's unuploaded media (FR-040, R-b, R-c).
+   * - a file still on disk can upload: the entry is held;
+   * - a file that is gone can never upload: it is left off the wire and flagged on the
+   *   device (uploadFailed/missingFile), so its tile says so, and the entry is not blocked.
+   * `wire` is what to send (device-only fields removed); `saved` is what to keep locally.
+   */
+  async _planEntryMedia(entry) {
+    let hold = false;
+    let flagged = false;
+    const saved = [];
+    const wire = [];
+    for (const block of entry.contentBlocks || []) {
+      if (!Array.isArray(block?.media)) {
+        saved.push(block);
+        wire.push(block);
+        continue;
+      }
+      const savedMedia = [];
+      const wireMedia = [];
+      for (const item of block.media) {
+        if (!this._isUnuploadedItem(item)) {
+          const { localPath, uri, uploadFailed, missingFile, ...onWire } = item || {};
+          savedMedia.push(item);
+          wireMedia.push(onWire);
+        } else if (await JournalService.fileService.getFileInfo(item.localPath || item.uri)) {
+          hold = true;
+          savedMedia.push(item);
+        } else {
+          flagged = flagged || !item.uploadFailed;
+          savedMedia.push({ ...item, uploadFailed: true, missingFile: true });
+        }
+      }
+      saved.push({ ...block, media: savedMedia });
+      wire.push({ ...block, media: wireMedia });
+    }
+    return { hold, flagged, saved, wire };
+  }
+
+  /**
+   * Prepare create/update operations for sending. An entry whose media can still upload is
+   * held -- left Pending, counted, never dropped -- and the device keeps rendering
+   * localPath. The rest are sent with the entry's CURRENT blocks, not the snapshot taken
+   * when the operation was queued.
    */
   async _withoutHeldEntries(operations, result) {
+    result.held = 0;
     const sendable = [];
     for (const op of operations) {
       const isWrite =
@@ -408,13 +451,25 @@ class SyncEngineClass {
       const entry = isWrite && op.entityId
         ? await DatabaseService.getEntryByLocalId(op.entityId).catch(() => null)
         : null;
-      if (entry && this._hasUnuploadedMedia(entry)) {
-        console.warn('[SyncEngine] Holding entry until its media has a server id:', op.entityId);
-        await JournalRepository.markSyncFailed(op.entityId);
-        result.failed++;
+      if (!entry) {
+        sendable.push(op);
         continue;
       }
-      sendable.push(op);
+      const plan = await this._planEntryMedia(entry);
+      if (plan.hold) {
+        console.warn('[SyncEngine] Holding entry until its media has a server id:', op.entityId);
+        if (entry.syncStatus === SyncStatus.FAILED) {
+          await DatabaseService.updateEntry(op.entityId, { syncStatus: SyncStatus.PENDING });
+        }
+        result.held++;
+        continue;
+      }
+      if (plan.flagged) {
+        await DatabaseService.updateEntry(op.entityId, { contentBlocks: plan.saved });
+      }
+      // content_blocks (the snapshot) wins over contentBlocks in the API formatter, so drop it.
+      const { content_blocks, ...data } = op.data || {};
+      sendable.push({ ...op, data: { ...data, contentBlocks: plan.wire } });
     }
     return sendable;
   }
@@ -441,7 +496,10 @@ class SyncEngineClass {
     const currentEntry = operation.entityId
       ? await DatabaseService.getEntryByLocalId(operation.entityId).catch(() => null)
       : null;
-    const payload = currentEntry || operation.data;
+    // The fresh row, with the blocks _withoutHeldEntries prepared for sending (when it ran).
+    const payload = currentEntry
+      ? { ...currentEntry, contentBlocks: operation.data?.contentBlocks ?? currentEntry.contentBlocks }
+      : operation.data;
 
     switch (operation.type) {
       case SyncOperationType.CREATE_ENTRY: {
@@ -623,6 +681,10 @@ class SyncEngineClass {
       await JournalRepository.createFromServer(mapped);
       return;
     }
+
+    // Local work that has not been pushed wins until it is. Pending and failed entries are
+    // pushed later; the server rejects a stale one with a conflict then, not a silent loss now.
+    if (localEntry.syncStatus !== SyncStatus.SYNCED) return;
 
     // Check for conflict
     const conflict = ConflictResolver.detectConflict(localEntry, serverEntry);

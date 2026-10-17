@@ -6,7 +6,13 @@
  * run multiple times.
  */
 
-const CACHED_ADDRESS_KEYS = ['thumbnailUrl', 'thumbnailUri', 'displayUrl', 'displayUri'];
+const CACHED_ADDRESS_KEYS = [
+  'thumbnailUrl',
+  'thumbnailUri',
+  'displayUrl',
+  'displayUri',
+  'thumbnailServerUrl', // a video's preview address
+];
 
 /** A server address, as opposed to the device's own file:// copy. */
 const isRemoteAddress = (v) => typeof v === 'string' && /^(https?:\/\/|\/)/i.test(v);
@@ -215,8 +221,8 @@ export const migrations = [
       'UPDATE media_queue SET thumbnail_server_url = NULL, display_server_url = NULL;',
       // Cached entries carry the same addresses inside content_blocks.
       clearCachedMediaAddresses,
-      // Without this the next pull is incremental and never revisits the entries just cleared.
-      "DELETE FROM sync_metadata WHERE key = 'last_pull_timestamp';",
+      // No pull-cursor reset (R-a): mediaSource ignores the retired addresses and the status
+      // poller supplies the new ones, and a reset would need a full re-pull and miss deletions.
     ],
     down: [
       // Additive column, harmless to an older build; cleared addresses repopulate from the server.
@@ -252,20 +258,37 @@ export const applyMigration = async (db, migration) => {
   console.log(`[Migration] Applying v${migration.version}: ${migration.description}`);
   
   try {
-    // Run all up statements
-    for (const statement of migration.up) {
-      if (typeof statement === 'function') {
-        await statement(db);
-      } else if (statement && statement.trim()) {
-        await db.runAsync(statement);
+    const run = async (conn) => {
+      for (const statement of migration.up) {
+        if (typeof statement === 'function') {
+          await statement(conn);
+        } else if (statement && statement.trim()) {
+          // A fresh install builds its tables from CREATE_TABLES, which already has every
+          // column, and then runs each migration from v1. Adding a column that is there is a
+          // "duplicate column" crash, so look first.
+          const add = /^\s*ALTER TABLE (\w+) ADD COLUMN (\w+)/i.exec(statement);
+          if (add) {
+            const columns = await conn.getAllAsync(`PRAGMA table_info(${add[1]})`);
+            if ((columns || []).some((c) => c.name === add[2])) continue;
+          }
+          await conn.runAsync(statement);
+        }
       }
+
+      // Record the migration
+      await conn.runAsync(
+        'INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)',
+        [migration.version, Date.now()]
+      );
+    };
+
+    // All or nothing: a migration that dies half way must not leave a half-cleared cache
+    // with no version recorded.
+    if (typeof db.withExclusiveTransactionAsync === 'function') {
+      await db.withExclusiveTransactionAsync(run);
+    } else {
+      await run(db);
     }
-    
-    // Record the migration
-    await db.runAsync(
-      'INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)',
-      [migration.version, Date.now()]
-    );
     
     console.log(`[Migration] Successfully applied v${migration.version}`);
     return true;
