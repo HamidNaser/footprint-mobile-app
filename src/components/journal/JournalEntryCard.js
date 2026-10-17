@@ -22,6 +22,7 @@ import { VideoThumbnail } from '../media/VideoThumbnail';
 import { AudioPlayer } from '../media/AudioPlayer';
 import { EngagementSection } from './EngagementSection';
 import DerivativeImage from '../media/DerivativeImage';
+import { FailedSlot } from '../media/FailedTile';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
@@ -88,7 +89,7 @@ const TextBlock = memo(({ content, isFirst }) => {
  * Module-level on purpose: a component defined inside PhotoBlock is a new type on every
  * render, so its hook (the display-copy lifecycle) would restart each time.
  */
-const FailedTile = ({ style }) => (
+const NotUploadedTile = ({ style }) => (
   <View style={[styles.photo, style, { alignItems: 'center', justifyContent: 'center', backgroundColor: '#E0E0E0' }]}>
     <Text style={styles.failedTileText}>Photo couldn't be uploaded</Text>
   </View>
@@ -100,11 +101,17 @@ const FailedTile = ({ style }) => (
  */
 const PhotoImage = ({ media, style, onPress, failed }) =>
   failed ? (
-    <FailedTile style={style} />
+    <NotUploadedTile style={style} />
   ) : (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
-      <DerivativeImage media={media} style={[styles.photo, style]} resizeMode="cover" />
-    </TouchableOpacity>
+    // The owner's Try again / Download original for a failed photo render beside the touchable
+    // (FailedSlot), not inside it: no button nested in another.
+    <FailedSlot style={styles.photoSlot}>
+      {(onFailedOwner) => (
+        <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
+          <DerivativeImage media={media} style={[styles.photo, style]} resizeMode="cover" onFailedOwner={onFailedOwner} />
+        </TouchableOpacity>
+      )}
+    </FailedSlot>
   );
 
 /**
@@ -574,6 +581,8 @@ const styles = StyleSheet.create({
   },
 
   // Photo styles
+  // Holds the touchable and, for the owner of a failed photo, Try again beside it.
+  photoSlot: { flex: 1 },
   photo: {
     width: '100%',
     borderRadius: 12,

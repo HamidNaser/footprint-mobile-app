@@ -1,3 +1,4 @@
+jest.unmock('../MediaApi');
 /** 007 T070: contracts/derivative-retry.md - POST /api/v1/media/{id}/derivatives/retry, no body. */
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(async () => null),

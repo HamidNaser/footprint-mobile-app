@@ -5,6 +5,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DerivativeImage from '../components/media/DerivativeImage';
+import { FailedSlot } from '../components/media/FailedTile';
+import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
 
 import HoldingAreaApi from '../api/HoldingAreaApi';
 import JournalApi from '../api/JournalApi';
@@ -156,7 +158,7 @@ export default function UndatedPhotosScreen({ navigation }) {
         <View style={{ width: 26 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
+      <ViewportScrollView contentContainerStyle={styles.body}>
         <Text style={styles.lede}>
           These photographs carry no date the import could read. Choose some, say when they were
           taken, and they become one entry. If you only know the year, say the year.
@@ -216,15 +218,17 @@ export default function UndatedPhotosScreen({ navigation }) {
           {held?.photos.map((photo) => {
             const isSelected = selected.includes(photo.mediaId);
             return (
+              <ViewportTile key={photo.mediaId}>
+              <FailedSlot style={[styles.tile, isSelected && styles.tileSelected]}>
+              {(onFailedOwner) => (
               <TouchableOpacity
-                key={photo.mediaId}
-                style={[styles.tile, isSelected && styles.tileSelected]}
+                style={{ flex: 1 }}
                 onPress={() => toggle(photo.mediaId)}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: isSelected }}
                 accessibilityLabel={`Select ${photo.originalFileName ?? photo.mediaId}`}
               >
-                <DerivativeImage media={photo} style={styles.thumb} />
+                <DerivativeImage media={photo} style={styles.thumb} onFailedOwner={onFailedOwner} />
                 {isSelected && (
                   <View style={styles.tick}>
                     <Ionicons name="checkmark-circle" size={22} color={PRIMARY_COLOR} />
@@ -236,6 +240,9 @@ export default function UndatedPhotosScreen({ navigation }) {
                   {photo.originalFileName ?? photo.mediaId}
                 </Text>
               </TouchableOpacity>
+              )}
+              </FailedSlot>
+              </ViewportTile>
             );
           })}
         </View>
@@ -286,7 +293,7 @@ export default function UndatedPhotosScreen({ navigation }) {
             </TouchableOpacity>
           </View>
         )}
-      </ScrollView>
+      </ViewportScrollView>
     </SafeAreaView>
   );
 }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Linking, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 /**
@@ -62,6 +62,26 @@ export function FailedActions({ actions }) {
   );
 }
 
+/**
+ * One slot in a grid or list of tiles where the tile sits inside the host's own touchable.
+ * `children` receives the `onFailedOwner` callback to give DerivativeImage and returns the
+ * host's touchable; the owner's Try again / Download original then render beside it, outside
+ * it, so no button is nested in another. `style` is the slot's (give it the tile's width).
+ */
+export function FailedSlot({ children, style }) {
+  const [actions, onFailedOwner] = useState(null);
+  return (
+    <View style={style}>
+      {children(onFailedOwner)}
+      {actions ? (
+        <View style={styles.slotActions} pointerEvents="box-none">
+          <FailedActions actions={actions} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 export function FailedTile({ style, media, failureReason, tryAgain, retrying, retryError, showActions = true }) {
   const flat = StyleSheet.flatten(style) || {};
   const small = [flat.width, flat.height].some((d) => typeof d === 'number' && d < SMALL_PX);
@@ -85,6 +105,8 @@ const styles = StyleSheet.create({
   plate: { backgroundColor: '#E0E0E0', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', padding: 6 },
   label: { color: '#444', fontSize: 12, fontWeight: '600', textAlign: 'center' },
   reason: { color: '#666', fontSize: 11, textAlign: 'center', marginTop: 2 },
+  // Over the foot of the slot (outside the host's touchable), so a fixed-size cell never grows.
+  slotActions: { position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.85)', paddingBottom: 2 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', marginTop: 6 },
   button: { paddingHorizontal: 8, paddingVertical: 4, marginHorizontal: 2 },
   buttonDisabled: { opacity: 0.5 },

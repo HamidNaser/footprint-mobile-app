@@ -37,10 +37,16 @@ export function useViewableKeys(keyExtractor = (item) => item?.key ?? item?.id) 
   const extractRef = useRef(keyExtractor);
   extractRef.current = keyExtractor;
   const onViewableItemsChanged = useCallback(({ viewableItems }) => {
-    setKeys(new Set(viewableItems.map((v) => v.key ?? extractRef.current(v.item))));
+    const next = new Set();
+    for (const v of viewableItems) {
+      // numColumns > 1: a viewable "row" is an array of items; their own keys count, not the row's.
+      if (Array.isArray(v.item)) v.item.forEach((it, i) => next.add(extractRef.current(it, i)));
+      else next.add(v.key ?? extractRef.current(v.item, v.index));
+    }
+    setKeys(next);
   }, []);
   const isViewable = useCallback((key) => keys === null || keys.has(key), [keys]);
-  return { onViewableItemsChanged, viewabilityConfig: VIEWABILITY_CONFIG, isViewable };
+  return { onViewableItemsChanged, viewabilityConfig: VIEWABILITY_CONFIG, isViewable, keys };
 }
 
 export default TileVisibility;

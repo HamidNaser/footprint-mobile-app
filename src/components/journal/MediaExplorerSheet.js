@@ -28,6 +28,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DerivativeImage from '../media/DerivativeImage';
+import { FailedSlot } from '../media/FailedTile';
+import { ViewportFlatList } from '../media/ViewportLists';
 import MapView, { Marker } from 'react-native-maps';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -50,11 +52,15 @@ const MediaThumbnail = memo(({
   onPress, 
   type = 'photo',
 }) => (
-  <TouchableOpacity
+  <FailedSlot
     style={[
       styles.thumbnail,
       isSelected && styles.thumbnailSelected,
     ]}
+  >
+    {(onFailedOwner) => (
+  <TouchableOpacity
+    style={{ flex: 1 }}
     onPress={() => onPress(item)}
     activeOpacity={0.8}
   >
@@ -63,6 +69,7 @@ const MediaThumbnail = memo(({
       media={type === 'video' ? { ...item, localPath: null } : item}
       style={styles.thumbnailImage}
       resizeMode="cover"
+      onFailedOwner={onFailedOwner}
     />
     
     {/* Video indicator */}
@@ -91,6 +98,8 @@ const MediaThumbnail = memo(({
       </View>
     )}
   </TouchableOpacity>
+    )}
+  </FailedSlot>
 ));
 
 /**
@@ -113,7 +122,7 @@ const MediaRow = memo(({
     </View>
     
     {data.length > 0 ? (
-      <FlatList
+      <ViewportFlatList
         data={data}
         horizontal
         showsHorizontalScrollIndicator={false}

@@ -6,8 +6,6 @@ import React from 'react';
 import { Image, Text, View } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 
-// useMediaDerivative reaches MediaApi (retry); keep the real API client out of this suite.
-jest.mock('../../../api/MediaApi', () => ({ MediaApi: { retry: jest.fn() } }));
 jest.mock('../../../services/mediaStatusPoller', () => {
   const poller = { watch: jest.fn(), unwatch: jest.fn() };
   return { mediaStatusPoller: poller, default: poller };

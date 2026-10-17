@@ -40,6 +40,7 @@ import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 import PlaceMapPreview from '../components/map/PlaceMapPreview';
 import DerivativeImage from '../components/media/DerivativeImage';
+import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -640,7 +641,7 @@ export default function PlacesScreen() {
       />
 
       {/* Places List */}
-      <ScrollView 
+      <ViewportScrollView 
         style={styles.placesList}
         contentContainerStyle={styles.placesListContent}
         showsVerticalScrollIndicator={false}
@@ -659,13 +660,14 @@ export default function PlacesScreen() {
           </View>
         ) : filteredPlaces.length > 0 ? (
           filteredPlaces.map((place, index) => (
-            <PlaceCard
-              key={place.id}
-              place={place}
-              isSelected={selectedPlace?.id === place.id}
-              onPress={handlePlacePress}
-              onYearPress={handleYearPress}
-            />
+            <ViewportTile key={place.id}>
+              <PlaceCard
+                place={place}
+                isSelected={selectedPlace?.id === place.id}
+                onPress={handlePlacePress}
+                onYearPress={handleYearPress}
+              />
+            </ViewportTile>
           ))
         ) : loadError ? (
           <View style={styles.emptyState}>
@@ -696,7 +698,7 @@ export default function PlacesScreen() {
             </Text>
           </View>
         )}
-      </ScrollView>
+      </ViewportScrollView>
 
       {/* Place Detail Modal */}
       <PlaceDetailModal

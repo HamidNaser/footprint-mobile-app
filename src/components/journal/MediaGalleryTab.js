@@ -19,6 +19,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import DerivativeImage from '../media/DerivativeImage';
+import { FailedSlot } from '../media/FailedTile';
+import { ViewportFlatList } from '../media/ViewportLists';
 import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -97,8 +99,10 @@ const FilterBar = memo(({ activeFilter, onFilterChange, counts, primaryColor }) 
  * Photo grid item
  */
 const PhotoGridItem = memo(({ item, onPress }) => (
+  <FailedSlot style={styles.gridItem}>
+    {(onFailedOwner) => (
   <TouchableOpacity
-    style={styles.gridItem}
+    style={{ flex: 1 }}
     onPress={() => onPress?.(item)}
     activeOpacity={0.8}
   >
@@ -106,6 +110,7 @@ const PhotoGridItem = memo(({ item, onPress }) => (
       media={item}
       style={styles.gridImage}
       resizeMode="cover"
+      onFailedOwner={onFailedOwner}
     />
     {item.location && (
       <View style={styles.locationIndicator}>
@@ -113,6 +118,8 @@ const PhotoGridItem = memo(({ item, onPress }) => (
       </View>
     )}
   </TouchableOpacity>
+    )}
+  </FailedSlot>
 ));
 
 /**
@@ -399,7 +406,7 @@ export const MediaGalleryTab = ({
 
       {/* Grid view for photos/videos */}
       {activeFilter !== MediaFilter.AUDIO && filteredMedia.data.length > 0 && (
-        <FlatList
+        <ViewportFlatList
           data={filteredMedia.data}
           renderItem={renderGridItem}
           keyExtractor={keyExtractor}

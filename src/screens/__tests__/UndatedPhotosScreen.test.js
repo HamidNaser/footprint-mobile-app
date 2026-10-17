@@ -30,8 +30,6 @@ jest.mock('../../api/JournalApi', () => ({
   default: { listJournals: jest.fn() },
 }));
 // The tiles are DerivativeImage now; its poller reaches ApiClient, which cannot load here.
-// useMediaDerivative reaches MediaApi (retry); keep the real API client out of this suite.
-jest.mock('../../api/MediaApi', () => ({ MediaApi: { retry: jest.fn() } }));
 jest.mock('../../services/mediaStatusPoller', () => {
   const poller = { watch: jest.fn(), unwatch: jest.fn() };
   return { mediaStatusPoller: poller, default: poller };
@@ -42,7 +40,9 @@ jest.mock('../../utils/resolveImportJournal', () => ({
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { TextInput } from 'react-native';
+import { ScrollView, Text, TextInput, TouchableOpacity } from 'react-native';
+import { mediaStatusPoller } from '../../services/mediaStatusPoller';
+import { MediaApi } from '../../api/MediaApi';
 import HoldingAreaApi from '../../api/HoldingAreaApi';
 import JournalApi from '../../api/JournalApi';
 import { resolveImportJournal } from '../../utils/resolveImportJournal';
@@ -360,5 +360,49 @@ describe('UndatedPhotosScreen', () => {
 
       expect(shows(await mount(), /loaded so far/)).toBe(true);
     });
+  });
+});
+
+describe('UndatedPhotosScreen: media tiles (007)', () => {
+  const watched = () => mediaStatusPoller.watch.mock.calls.map((c) => c[0]);
+
+  it('a tile scrolled out of view stops watching, and watches again when it returns (FR-027)', async () => {
+    const tree = await mount();
+    expect(watched().sort()).toEqual(['m1', 'm2']);
+    mediaStatusPoller.unwatch.mockClear();
+    mediaStatusPoller.watch.mockClear();
+
+    const pos = { m1: 100, m2: 5000 };
+    const scroll = tree.root.findByType(ScrollView);
+    scroll.instance.measureInWindow = (cb) => cb(0, 0, 400, 700);
+    // The tiles' ViewportTile wrappers, in photo order.
+    const wrappers = tree.root.findAll((n) => n.props.collapsable === false && typeof n.props.onLayout === 'function' && n.instance);
+    expect(wrappers).toHaveLength(2);
+    ['m1', 'm2'].forEach((id, i) => {
+      wrappers[i].instance.measureInWindow = (cb) => cb(0, pos[id], 100, 100);
+    });
+
+    act(() => scroll.props.onLayout({}));
+    expect(mediaStatusPoller.unwatch.mock.calls.map((c) => c[0])).toEqual(['m2']);
+
+    pos.m2 = 300; // scrolled into view
+    act(() => scroll.props.onMomentumScrollEnd({}));
+    expect(watched()).toEqual(['m2']);
+  });
+
+  it("the owner's Try again sits beside the tile's touchable, not inside it", async () => {
+    const tree = await mount();
+    const cb = mediaStatusPoller.watch.mock.calls.find((c) => c[0] === 'm1')[1];
+    act(() => cb({ id: 'm1', status: 'failed', updatedAt: 't', failureReason: 'corrupt' }));
+    const btn = tree.root.findAll(
+      (n) => n.type === TouchableOpacity && n.findAllByType(Text).some((t) => t.props.children === 'Try again'),
+    )[0];
+    expect(btn).toBeDefined();
+    for (let up = btn.parent; up; up = up.parent) expect(up.type).not.toBe(TouchableOpacity);
+    MediaApi.retry.mockResolvedValue({});
+    await act(async () => {
+      await btn.props.onPress();
+    });
+    expect(MediaApi.retry).toHaveBeenCalledWith('m1');
   });
 });

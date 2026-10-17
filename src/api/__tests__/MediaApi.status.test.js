@@ -1,3 +1,4 @@
+jest.unmock('../MediaApi');
 /** 007 contracts/media-status.md: POST /api/v1/media/status with { ids }. */
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(async () => null),

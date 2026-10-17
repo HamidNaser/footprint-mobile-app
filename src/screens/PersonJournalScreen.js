@@ -28,6 +28,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 // Components
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
+import { ViewportFlatList } from '../components/media/ViewportLists';
 import { 
   CalendarCoils,
   DateSwipeContainer,
@@ -425,7 +426,7 @@ export default function PersonJournalScreen({ route, navigation }) {
         onNextDate={goToNextDate}
         onPreviousDate={goToPreviousDate}
       >
-        <FlatList
+        <ViewportFlatList
           data={displayEntries}
           renderItem={renderEntry}
           keyExtractor={keyExtractor}

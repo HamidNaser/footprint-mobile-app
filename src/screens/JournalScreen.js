@@ -31,6 +31,7 @@ import { useNavigation } from '@react-navigation/native';
 
 // Components
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
+import { ViewportFlatList } from '../components/media/ViewportLists';
 import { JournalComposeModal } from '../components/journal/JournalComposeModal';
 import { JournalEntryDetail } from './JournalEntryDetail';
 import { ConnectionStatusIndicator } from '../components/common/ConnectionStatusIndicator';
@@ -855,7 +856,7 @@ export default function JournalScreen({ navigation }) {
             <Text style={styles.loadingText}>Loading journal...</Text>
           </View>
         ) : (
-          <FlatList
+          <ViewportFlatList
             data={displayEntries}
             renderItem={renderEntry}
             keyExtractor={keyExtractor}

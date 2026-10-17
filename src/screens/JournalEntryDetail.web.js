@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DerivativeImage from '../components/media/DerivativeImage';
+import { FailedSlot } from '../components/media/FailedTile';
 import { parseDateKey } from '../utils/journalDate';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
@@ -263,21 +264,26 @@ export const JournalEntryDetail = ({
           <View style={styles.mediaSection}>
             <View style={styles.photoGrid}>
               {photos.map((photo, index) => (
-                <TouchableOpacity
+                // A failed photo's Try again sits beside the touchable, not inside it.
+                <FailedSlot
                   key={photo.localId || index}
                   style={[
                     styles.photoItem,
                     photos.length === 1 && styles.photoItemSingle,
                   ]}
-                  onPress={() => openImageViewer(index)}
                 >
-                  <DerivativeImage
-                    media={photo}
-                    variant={photos.length === 1 ? 'display' : 'grid'}
-                    style={styles.photo}
-                    resizeMode="cover"
-                  />
-                </TouchableOpacity>
+                  {(onFailedOwner) => (
+                    <TouchableOpacity style={{ flex: 1 }} onPress={() => openImageViewer(index)}>
+                      <DerivativeImage
+                        media={photo}
+                        variant={photos.length === 1 ? 'display' : 'grid'}
+                        style={styles.photo}
+                        resizeMode="cover"
+                        onFailedOwner={onFailedOwner}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </FailedSlot>
               ))}
             </View>
           </View>
