@@ -50,23 +50,26 @@ describe('journal_entries.date_precision', () => {
   it('ships as a migration, so an installed app gains it rather than missing it', () => {
     // Every phone in the wild is on v4. A column that appears only in CREATE_TABLES reaches
     // fresh installs and nobody else — which is the same trap v4 was written to avoid.
-    const latest = migrations[migrations.length - 1];
-
-    expect(latest.version).toBe(SCHEMA_VERSION);
-    expect(latest.up.join('\n')).toMatch(/ALTER TABLE journal_entries[\s\S]*date_precision/i);
+    //
+    // Asks the migration that adds this column, not whichever migration happens to be last.
+    // Written as "the last one" it passed only while v5 was the newest, and broke the moment a
+    // v6 arrived — reporting a problem with date precision when nothing about date precision
+    // had changed. The `adding` helper above was already here for exactly this.
+    expect(adding().up.join('\n')).toMatch(/ALTER TABLE journal_entries[\s\S]*date_precision/i);
   });
 
   it('moves the schema version on, so the migration actually runs', () => {
-    expect(SCHEMA_VERSION).toBe(5);
+    // initializeDatabase only applies migrations above the version the database records, so a
+    // migration numbered beyond SCHEMA_VERSION would never execute. Stated as a relation rather
+    // than as the literal 5, which was only true until the next column landed.
+    expect(adding().version).toBeLessThanOrEqual(SCHEMA_VERSION);
   });
 
   it('backfills nothing, because there is nothing to backfill', () => {
     // SQLite applies the DEFAULT to existing rows when a column is added, so every row that
     // was there already reads as 'day' without a separate UPDATE. Adding one would be a
     // no-op that looked like it was doing something.
-    const latest = migrations[migrations.length - 1];
-
-    expect(latest.up.join('\n')).not.toMatch(/UPDATE journal_entries/i);
+    expect(adding().up.join('\n')).not.toMatch(/UPDATE journal_entries/i);
   });
 });
 
