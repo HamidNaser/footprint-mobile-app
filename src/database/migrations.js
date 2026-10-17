@@ -18,8 +18,8 @@ const CACHED_ADDRESS_KEYS = [
 const isRemoteAddress = (v) => typeof v === 'string' && /^(https?:\/\/|\/)/i.test(v);
 
 /**
- * v6 step: drop cached rendition addresses from every entry's media, so the next pull
- * (cursor reset below) repopulates them from the server. Device paths are left alone.
+ * v6 step: drop cached rendition addresses from every entry's media. mediaSource ignores
+ * the retired ones and the status poller supplies the new ones. Device paths are left alone.
  */
 async function clearCachedMediaAddresses(db) {
   const rows = await db.getAllAsync('SELECT local_id, content_blocks FROM journal_entries');

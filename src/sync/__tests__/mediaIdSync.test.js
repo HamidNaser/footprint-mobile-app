@@ -289,3 +289,34 @@ describe('a photo whose file is gone (R-c)', () => {
     expect(result.held).toBe(1);
   });
 });
+
+describe('clearing the upload-failed label (N3)', () => {
+  const flagged = { id: 'g', localPath: 'file:///back.jpg', uploadFailed: true, missingFile: true };
+
+  it('drops the flags when the file is readable again, and still holds for its upload', async () => {
+    SyncQueue.getPendingOperations.mockResolvedValue([op()]);
+    DatabaseService.getEntryByLocalId.mockResolvedValue(entryWith([flagged]));
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    expect(result.held).toBe(1);
+    const saved = DatabaseService.updateEntry.mock.calls.find((c) => c[1].contentBlocks)[1].contentBlocks;
+    expect(saved[0].media[0].uploadFailed).toBeUndefined();
+    expect(saved[0].media[0].missingFile).toBeUndefined();
+    expect(saved[0].media[0].localPath).toBe('file:///back.jpg');
+  });
+
+  it('drops the flags when the photo later uploads', async () => {
+    DatabaseService.getEntryByLocalId.mockResolvedValue(entryWith([flagged]));
+
+    await SyncEngine._applyUploadedMediaToEntry(
+      { id: 'q1', entry_id: 'L1', local_uri: 'file:///back.jpg' },
+      { mediaId: 'srv-9', url: 'https://cdn/o' }
+    );
+
+    const item = DatabaseService.updateEntry.mock.calls[0][1].contentBlocks[0].media[0];
+    expect(item.id).toBe('srv-9');
+    expect(item.uploadFailed).toBeUndefined();
+    expect(item.missingFile).toBeUndefined();
+  });
+});

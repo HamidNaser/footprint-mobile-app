@@ -390,6 +390,15 @@ class SyncEngineClass {
     return !!((item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url));
   }
 
+  /** Held by this feature: has a file that can still upload (not flagged as lost). */
+  _isHeldEntry(entry) {
+    return (entry?.contentBlocks || []).some((block) =>
+      (Array.isArray(block?.media) ? block.media : []).some(
+        (item) => this._isUnuploadedItem(item) && !item.uploadFailed
+      )
+    );
+  }
+
   /** True when an entry still references such a file: its reference would be a local id. */
   _hasUnuploadedMedia(entry) {
     return (entry?.contentBlocks || []).some((block) =>
@@ -424,7 +433,10 @@ class SyncEngineClass {
           wireMedia.push(onWire);
         } else if (await JournalService.fileService.getFileInfo(item.localPath || item.uri)) {
           hold = true;
-          savedMedia.push(item);
+          // Readable again: the label no longer applies.
+          const { uploadFailed, missingFile, ...rest } = item;
+          flagged = flagged || !!(uploadFailed || missingFile);
+          savedMedia.push(rest);
         } else {
           flagged = flagged || !item.uploadFailed;
           savedMedia.push({ ...item, uploadFailed: true, missingFile: true });
@@ -458,6 +470,9 @@ class SyncEngineClass {
       const plan = await this._planEntryMedia(entry);
       if (plan.hold) {
         console.warn('[SyncEngine] Holding entry until its media has a server id:', op.entityId);
+        if (plan.flagged) {
+          await DatabaseService.updateEntry(op.entityId, { contentBlocks: plan.saved });
+        }
         if (entry.syncStatus === SyncStatus.FAILED) {
           await DatabaseService.updateEntry(op.entityId, { syncStatus: SyncStatus.PENDING });
         }
@@ -682,9 +697,9 @@ class SyncEngineClass {
       return;
     }
 
-    // Local work that has not been pushed wins until it is. Pending and failed entries are
-    // pushed later; the server rejects a stale one with a conflict then, not a silent loss now.
-    if (localEntry.syncStatus !== SyncStatus.SYNCED) return;
+    // An entry this feature is holding (unsent, media still uploading) keeps its local blocks:
+    // overwriting it would lose the photo reference. Every other entry takes the usual path.
+    if (localEntry.syncStatus !== SyncStatus.SYNCED && this._isHeldEntry(localEntry)) return;
 
     // Check for conflict
     const conflict = ConflictResolver.detectConflict(localEntry, serverEntry);
@@ -766,8 +781,9 @@ class SyncEngineClass {
         if (localPath !== media.local_uri) return item;
 
         changed = true;
+        const { uploadFailed, missingFile, ...rest } = item; // it uploaded: no label
         return {
-          ...item,
+          ...rest,
           // The server's id, never the local one (007 R12). _uploadPendingMedia refuses
           // an upload that returned none, so this is always set by the time it runs.
           id: uploadResult.mediaId,
