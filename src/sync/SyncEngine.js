@@ -313,9 +313,15 @@ class SyncEngineClass {
         deletes: deletes.map(op => op.serverId).filter(Boolean),
       });
 
-      // Process results
+      // Process results.
+      //
+      // The reply is keyed by `clientId`, not `localId` -- SyncResultItem.ClientId, which
+      // the Hub's camelCase policy serialises as `clientId`. Matching on `localId` found
+      // nothing, so the operation was never marked completed and the next sync pushed it
+      // again, producing a duplicate memory every retry. The local column is still
+      // `local_id`; only the wire name is the server's.
       for (const created of batchResult.created) {
-        const op = creates.find(o => o.data.local_id === created.localId);
+        const op = creates.find(o => o.data.local_id === created.clientId);
         if (op) {
           await this._handleCreateSuccess(op, created.serverId);
           await SyncQueue.markCompleted(op.id, { serverId: created.serverId });
@@ -323,8 +329,11 @@ class SyncEngineClass {
         }
       }
 
-      for (const serverId of batchResult.updated) {
-        const op = updates.find(o => o.serverId === serverId);
+      // `updated` is a list of SyncResultItem objects, not of server id strings -- only
+      // `deleted` below is strings. Iterating it as strings meant `o.serverId === <object>`
+      // never matched, so accepted updates were re-pushed on every sync forever.
+      for (const updatedItem of batchResult.updated) {
+        const op = updates.find(o => o.serverId === updatedItem.serverId);
         if (op) {
           await this._handleUpdateSuccess(op);
           await SyncQueue.markCompleted(op.id);
