@@ -389,6 +389,10 @@ class DatabaseServiceClass {
       journalId: row.journal_id,
       userId: row.user_id,
       date: row.date,
+      // How much of that date is real (FR-013c). Written since schema v5 and never read back,
+      // so the serialiser's own fallback turned every "sometime in 1998" into 1 January --
+      // see the locationSharing note below for why a read-back gap reaches the wire.
+      datePrecision: row.date_precision,
       contentBlocks: this._normalizeContentBlocks(JSON.parse(row.content_blocks || '[]')),
       location: row.location_lat ? {
         lat: row.location_lat,

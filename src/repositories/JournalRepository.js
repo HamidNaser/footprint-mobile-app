@@ -564,6 +564,10 @@ class JournalRepositoryClass extends BaseRepository {
       journalId: row.journal_id,
       userId: row.user_id,
       date: row.date,
+      // How much of that date is real (FR-013c). Mapped here as well as in
+      // DatabaseService._mapEntryRow: search, date ranges and entries-with-media read their
+      // rows through this one, and the detail screen formats the date from it.
+      datePrecision: row.date_precision,
       contentBlocks: JSON.parse(row.content_blocks || '[]'),
       location: row.location_lat ? {
         lat: row.location_lat,

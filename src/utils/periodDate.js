@@ -33,9 +33,10 @@ const MONTH_NAMES = [
 /**
  * A period date as somebody should read it: `1978`, `July 1978`, `4 July 2018`.
  *
- * An absent precision renders as a day. That covers every entry created before FR-013c and
- * every entry read out of the local database — `journal_entries` has no `date_precision`
- * column — and the full stored date is what those rows mean.
+ * An absent precision renders as a day. That covers every entry created before FR-013c, and the
+ * full stored date is what those rows mean. It no longer covers entries read out of the local
+ * database: `journal_entries.date_precision` exists and is now mapped back out, so a local row
+ * carries its real precision here.
  *
  * @param {string|null|undefined} date `YYYY-MM-DD`, or an ISO instant whose date part is used.
  * @param {string|null|undefined} datePrecision `year`, `month` or `day`.
