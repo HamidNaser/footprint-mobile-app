@@ -32,15 +32,19 @@ const VIEWABILITY_CONFIG = { itemVisiblePercentThreshold: 1 };
  * List-host helper. Until the list reports its first viewable set every row counts as visible,
  * so nothing is held back before FlatList has measured anything.
  */
-export function useViewableKeys(keyExtractor = (item) => item?.key ?? item?.id) {
+export function useViewableKeys(keyExtractor = (item) => item?.key ?? item?.id, numColumns = 1) {
   const [keys, setKeys] = useState(null);
   const extractRef = useRef(keyExtractor);
   extractRef.current = keyExtractor;
+  const columnsRef = useRef(numColumns);
+  columnsRef.current = numColumns || 1;
   const onViewableItemsChanged = useCallback(({ viewableItems }) => {
     const next = new Set();
     for (const v of viewableItems) {
       // numColumns > 1: a viewable "row" is an array of items; their own keys count, not the row's.
-      if (Array.isArray(v.item)) v.item.forEach((it, i) => next.add(extractRef.current(it, i)));
+      // The index passed is the item's index in the data (row * numColumns + column), as FlatList's
+      // own keyExtractor call gets it, so index-based fallback keys line up.
+      if (Array.isArray(v.item)) v.item.forEach((it, i) => next.add(extractRef.current(it, (v.index ?? 0) * columnsRef.current + i)));
       else next.add(v.key ?? extractRef.current(v.item, v.index));
     }
     setKeys(next);

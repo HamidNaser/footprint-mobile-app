@@ -40,7 +40,7 @@ jest.mock('../../utils/resolveImportJournal', () => ({
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { ScrollView, Text, TextInput, TouchableOpacity } from 'react-native';
+import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity } from 'react-native';
 import { mediaStatusPoller } from '../../services/mediaStatusPoller';
 import { MediaApi } from '../../api/MediaApi';
 import HoldingAreaApi from '../../api/HoldingAreaApi';
@@ -364,6 +364,17 @@ describe('UndatedPhotosScreen', () => {
 });
 
 describe('UndatedPhotosScreen: media tiles (007)', () => {
+  it('keeps the three-up grid: the width is on the outer wrapper, the tile fills it', async () => {
+    const tree = await mount();
+    const wrappers = tree.root.findAll((n) => n.props.collapsable === false && typeof n.props.onLayout === 'function' && n.instance);
+    expect(wrappers).toHaveLength(2);
+    wrappers.forEach((w) => {
+      expect(StyleSheet.flatten(w.props.style).width).toBe('31%');
+      const slot = w.findAll((n) => n.props.style && StyleSheet.flatten(n.props.style)?.borderWidth === 2)[0];
+      expect(StyleSheet.flatten(slot.props.style).width).toBe('100%');
+    });
+  });
+
   const watched = () => mediaStatusPoller.watch.mock.calls.map((c) => c[0]);
 
   it('a tile scrolled out of view stops watching, and watches again when it returns (FR-027)', async () => {

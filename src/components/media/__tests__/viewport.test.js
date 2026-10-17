@@ -67,6 +67,68 @@ describe('ViewportFlatList', () => {
   });
 });
 
+describe('ViewportFlatList: numColumns keys, extraData, host callbacks', () => {
+  it('numColumns: item keys use the data index (row * numColumns + column), as the host keyExtractor sees them', () => {
+    const data = [{}, {}, {}, {}];
+    let tree;
+    act(() => {
+      tree = renderer.create(
+        <ViewportFlatList
+          data={data}
+          numColumns={2}
+          keyExtractor={(_item, index) => `media-${index}`}
+          renderItem={({ index }) => <Probe id={index} />}
+        />,
+      );
+    });
+    // Row 1 (data indexes 2 and 3) is the only viewable row.
+    act(() =>
+      tree.root.findByType(FlatList).props.onViewableItemsChanged({
+        viewableItems: [{ key: 'media-2:media-3', item: [data[2], data[3]], index: 1 }],
+        changed: [],
+      }),
+    );
+    expect([0, 1, 2, 3].map((i) => state(tree, i))).toEqual(['hidden', 'hidden', 'visible', 'visible']);
+  });
+
+  it('keeps the same extraData array while nothing changed, so FlatList can skip the render', () => {
+    const data = [{ id: 'a' }];
+    const el = (
+      <ViewportFlatList data={data} keyExtractor={(i) => i.id} extraData="x" renderItem={({ item }) => <Probe id={item.id} />} />
+    );
+    let tree;
+    act(() => {
+      tree = renderer.create(el);
+    });
+    const first = tree.root.findByType(FlatList).props.extraData;
+    act(() => tree.update(el));
+    expect(tree.root.findByType(FlatList).props.extraData).toBe(first);
+  });
+
+  it("calls the host's own onViewableItemsChanged too, and honours its viewabilityConfig", () => {
+    const data = [{ id: 'a' }, { id: 'b' }];
+    const hostCb = jest.fn();
+    const config = { itemVisiblePercentThreshold: 50 };
+    let tree;
+    act(() => {
+      tree = renderer.create(
+        <ViewportFlatList
+          data={data}
+          keyExtractor={(i) => i.id}
+          renderItem={({ item }) => <Probe id={item.id} />}
+          onViewableItemsChanged={hostCb}
+          viewabilityConfig={config}
+        />,
+      );
+    });
+    expect(tree.root.findByType(FlatList).props.viewabilityConfig).toBe(config);
+    const info = { viewableItems: [token('a', 0)], changed: [] };
+    act(() => tree.root.findByType(FlatList).props.onViewableItemsChanged(info));
+    expect(hostCb).toHaveBeenCalledWith(info);
+    expect([state(tree, 'a'), state(tree, 'b')]).toEqual(['visible', 'hidden']);
+  });
+});
+
 describe('ViewportSectionList', () => {
   it('gates items by the key the host extracts', () => {
     const sections = [{ title: 'T', data: [{ id: 'a' }, { id: 'b' }] }];

@@ -218,7 +218,7 @@ export default function UndatedPhotosScreen({ navigation }) {
           {held?.photos.map((photo) => {
             const isSelected = selected.includes(photo.mediaId);
             return (
-              <ViewportTile key={photo.mediaId}>
+              <ViewportTile key={photo.mediaId} style={styles.tileCell}>
               <FailedSlot style={[styles.tile, isSelected && styles.tileSelected]}>
               {(onFailedOwner) => (
               <TouchableOpacity
@@ -324,8 +324,10 @@ const styles = StyleSheet.create({
   },
   hintButtonText: { color: PRIMARY_COLOR, fontSize: 13 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 8 },
+  // The three-up width lives on the ViewportTile wrapper (the grid's direct child); the tile fills it.
+  tileCell: { width: '31%' },
   tile: {
-    width: '31%', borderRadius: 8, overflow: 'hidden', backgroundColor: '#FFF',
+    width: '100%', borderRadius: 8, overflow: 'hidden', backgroundColor: '#FFF',
     borderWidth: 2, borderColor: 'transparent',
   },
   tileSelected: { borderColor: PRIMARY_COLOR },

@@ -17,9 +17,29 @@ import { TileVisibility, useViewableKeys } from '../../hooks/mediaVisibility';
 
 const keyOf = (keyExtractor, item, index) => (keyExtractor ? keyExtractor(item, index) : item?.key ?? item?.id ?? String(index));
 
-function useViewportRows(keyExtractor) {
-  const { onViewableItemsChanged, viewabilityConfig, isViewable, keys } = useViewableKeys(keyExtractor);
-  return { onViewableItemsChanged, viewabilityConfig, isViewable, keys };
+/**
+ * Our viewability tracking composed with the host's own: the host's callback is called too (React
+ * Native forbids changing the function on a live list, so this one is stable and reads the host's
+ * latest through a ref), and the host's `viewabilityConfig` wins when it gives one.
+ */
+function useViewportRows(keyExtractor, numColumns, hostOnViewable, hostConfig) {
+  const tracked = useViewableKeys(keyExtractor, numColumns);
+  const hostRef = useRef(hostOnViewable);
+  hostRef.current = hostOnViewable;
+  const ours = tracked.onViewableItemsChanged;
+  const onViewableItemsChanged = useCallback(
+    (info) => {
+      ours(info);
+      hostRef.current?.(info);
+    },
+    [ours],
+  );
+  return {
+    onViewableItemsChanged,
+    viewabilityConfig: hostConfig || tracked.viewabilityConfig,
+    isViewable: tracked.isViewable,
+    keys: tracked.keys,
+  };
 }
 
 function wrapRender(renderItem, isViewable, keyExtractor) {
@@ -28,32 +48,50 @@ function wrapRender(renderItem, isViewable, keyExtractor) {
   );
 }
 
-export const ViewportFlatList = forwardRef(function ViewportFlatList({ renderItem, keyExtractor, extraData, ...rest }, ref) {
-  const { onViewableItemsChanged, viewabilityConfig, isViewable, keys } = useViewportRows(keyExtractor);
+export const ViewportFlatList = forwardRef(function ViewportFlatList(
+  { renderItem, keyExtractor, extraData, onViewableItemsChanged: hostOnViewable, viewabilityConfig: hostConfig, ...rest },
+  ref,
+) {
+  const { onViewableItemsChanged, viewabilityConfig, isViewable, keys } = useViewportRows(
+    keyExtractor,
+    rest.numColumns,
+    hostOnViewable,
+    hostConfig,
+  );
   const render = useMemo(() => wrapRender(renderItem, isViewable, keyExtractor), [renderItem, isViewable, keyExtractor]);
+  const extra = useMemo(() => [extraData, keys], [extraData, keys]);
   return (
     <FlatList
       {...rest}
       ref={ref}
       keyExtractor={keyExtractor}
       renderItem={render}
-      extraData={[extraData, keys]}
+      extraData={extra}
       onViewableItemsChanged={onViewableItemsChanged}
       viewabilityConfig={viewabilityConfig}
     />
   );
 });
 
-export const ViewportSectionList = forwardRef(function ViewportSectionList({ renderItem, keyExtractor, extraData, ...rest }, ref) {
-  const { onViewableItemsChanged, viewabilityConfig, isViewable, keys } = useViewportRows(keyExtractor);
+export const ViewportSectionList = forwardRef(function ViewportSectionList(
+  { renderItem, keyExtractor, extraData, onViewableItemsChanged: hostOnViewable, viewabilityConfig: hostConfig, ...rest },
+  ref,
+) {
+  const { onViewableItemsChanged, viewabilityConfig, isViewable, keys } = useViewportRows(
+    keyExtractor,
+    1,
+    hostOnViewable,
+    hostConfig,
+  );
   const render = useMemo(() => wrapRender(renderItem, isViewable, keyExtractor), [renderItem, isViewable, keyExtractor]);
+  const extra = useMemo(() => [extraData, keys], [extraData, keys]);
   return (
     <SectionList
       {...rest}
       ref={ref}
       keyExtractor={keyExtractor}
       renderItem={render}
-      extraData={[extraData, keys]}
+      extraData={extra}
       onViewableItemsChanged={onViewableItemsChanged}
       viewabilityConfig={viewabilityConfig}
     />
