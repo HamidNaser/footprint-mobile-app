@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Image, Platform, StyleSheet, Text, View } from 'react-native';
 import { useMediaDerivative } from '../../hooks/useMediaDerivative';
 
@@ -16,6 +16,13 @@ import { useMediaDerivative } from '../../hooks/useMediaDerivative';
  *                                     owner's failed tile with Try again replaces `renderFailed`.
  *  - uploadFailed / missingFile ..... "Photo couldn't be uploaded" (the photo never left the device)
  *
+ * `onStateChange(status)` fires whenever the tile settles into a new status: 'pending',
+ * 'loading' (an image is mounted, not yet loaded), 'loaded', 'unavailable', 'loadFailed',
+ * 'failed', 'uploadFailed'. The map marker uses it to know when a native snapshot is stale.
+ *
+ * Legacy: an item with no id and a plain `uri` (the seeded demo memories in data/placesData)
+ * renders that uri directly and never polls -- the web id-less bridge.
+ *
  * Video tiles do not use this: they keep VideoThumbnail (T078 adds the overlay).
  */
 
@@ -24,6 +31,21 @@ export const PHOTO_PREPARING = 'Preparing photo…';
 /** Under this many px (either side) a tile is too small for words; the label stays accessible. */
 export const SMALL_TILE_PX = 60;
 export const PHOTO_NOT_UPLOADED = "Photo couldn't be uploaded";
+
+/** A seeded demo item: a plain uri, no media id, no server copies. */
+function isLegacy(media) {
+  return (
+    !!media &&
+    typeof media.uri === 'string' &&
+    !!media.uri &&
+    !media.id &&
+    !media.mediaId &&
+    !media.unresolved &&
+    !media.thumbnailUrl &&
+    !media.displayUrl &&
+    !media.localPath
+  );
+}
 
 function isSmall(style) {
   const flat = StyleSheet.flatten(style) || {};
@@ -54,8 +76,37 @@ function DerivativeImage({
   resizeMode = 'cover',
   renderFailed = defaultRenderFailed,
   testID,
+  onStateChange,
 }) {
   const { src, state, failureReason, onError, rewatch } = useMediaDerivative(media, { variant });
+  const [loadedSrc, setLoadedSrc] = useState(null);
+
+  const legacyUri = isLegacy(media) ? media.uri : null;
+  const showsImage = !!legacyUri || (!!src && (state === 'idle' || state === 'ready'));
+  let status;
+  if (media?.uploadFailed || media?.missingFile) status = 'uploadFailed';
+  else if (legacyUri) status = loadedSrc === legacyUri ? 'loaded' : 'loading';
+  else if (state === 'unavailable' || state === 'loadFailed' || state === 'failed') status = state;
+  else if (!showsImage) status = 'pending';
+  else status = loadedSrc === src ? 'loaded' : 'loading';
+
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+  useEffect(() => {
+    onStateChangeRef.current?.(status);
+  }, [status]);
+
+  if (legacyUri) {
+    return (
+      <Image
+        source={{ uri: legacyUri }}
+        style={style}
+        resizeMode={resizeMode}
+        onLoad={() => setLoadedSrc(legacyUri)}
+        testID={testID}
+      />
+    );
+  }
 
   if (media?.uploadFailed || media?.missingFile) {
     return <Plate style={style} testID="media-not-uploaded" label={PHOTO_NOT_UPLOADED} />;
@@ -79,6 +130,7 @@ function DerivativeImage({
         src={src}
         alt="photo"
         onError={onError}
+        onLoad={() => setLoadedSrc(src)}
         data-testid={testID}
         style={{
           width: '100%',
@@ -93,7 +145,7 @@ function DerivativeImage({
     );
   }
 
-  return <Image source={{ uri: src }} style={style} resizeMode={resizeMode} onError={onError} testID={testID} />;
+  return <Image source={{ uri: src }} style={style} resizeMode={resizeMode} onError={onError} onLoad={() => setLoadedSrc(src)} testID={testID} />;
 }
 
 const styles = StyleSheet.create({

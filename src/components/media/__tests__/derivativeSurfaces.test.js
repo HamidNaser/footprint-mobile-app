@@ -13,6 +13,7 @@ const read = (rel) => fs.readFileSync(path.join(SRC, rel), 'utf8');
 const SURFACES = [
   'components/journal/JournalEntryCard.js',
   'components/journal/MediaGalleryTab.js',
+  'components/journal/EntryGalleryModal.js',
   'components/journal/EntryGalleryModal.web.js',
   'components/journal/MediaExplorerSheet.js',
   'components/journal/MediaExplorerSheet.web.js',

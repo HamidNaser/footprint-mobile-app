@@ -135,4 +135,77 @@ describe('DerivativeImage', () => {
     expect(texts(render({ media: { id: 'x', missingFile: true } }))).toContain("Photo couldn't be uploaded");
     expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
   });
+
+  describe('onStateChange', () => {
+    const track = () => {
+      const seen = [];
+      return { seen, onStateChange: (st) => seen.push(st) };
+    };
+    const READY = { id: 'm1', status: 'ready', updatedAt: 'T', gridUrl: 'https://cdn/g.webp', displayUrl: 'https://cdn/d.webp' };
+
+    it('reports pending, then loading and loaded once the ready copy arrives and renders', () => {
+      const { seen, onStateChange } = track();
+      const tree = render({ media: { id: 'm1', thumbnailUrl: null }, onStateChange });
+      expect(seen).toEqual(['pending']);
+      act(() => mediaStatusPoller.watch.mock.calls[0][1](READY));
+      expect(seen.at(-1)).toBe('loading');
+      act(() => images(tree)[0].props.onLoad());
+      expect(seen.at(-1)).toBe('loaded');
+    });
+
+    it('a photo that loads straight away goes loading, loaded', () => {
+      const { seen, onStateChange } = track();
+      const tree = render({ media: { id: 'm1', localPath: 'file:///a.jpg' }, onStateChange });
+      expect(seen).toEqual(['loading']);
+      act(() => images(tree)[0].props.onLoad());
+      expect(seen).toEqual(['loading', 'loaded']);
+    });
+
+    it.each([
+      ['unavailable', { id: 'm1', status: 'unavailable' }],
+      ['failed', { id: 'm1', status: 'failed', updatedAt: 't' }],
+    ])('reports %s', (name, payload) => {
+      const { seen, onStateChange } = track();
+      render({ media: { id: 'm1', thumbnailUrl: null }, onStateChange });
+      act(() => mediaStatusPoller.watch.mock.calls[0][1](payload));
+      expect(seen.at(-1)).toBe(name);
+    });
+
+    it('reports loadFailed when a ready copy will not load', () => {
+      const { seen, onStateChange } = track();
+      const tree = render({ media: { id: 'm1', thumbnailUrl: null }, onStateChange });
+      const ready = () => act(() => mediaStatusPoller.watch.mock.calls.at(-1)[1](READY));
+      const exhaust = () => {
+        act(() => images(tree)[0].props.onError());
+        act(() => jest.advanceTimersByTime(2000));
+        act(() => images(tree)[0].props.onError());
+      };
+      ready();
+      exhaust();
+      ready();
+      exhaust();
+      ready();
+      exhaust();
+      expect(seen.at(-1)).toBe('loadFailed');
+    });
+
+    it('reports uploadFailed', () => {
+      const { seen, onStateChange } = track();
+      render({ media: { id: 'x', uploadFailed: true }, onStateChange });
+      expect(seen).toEqual(['uploadFailed']);
+    });
+  });
+
+  describe('legacy id-less items (seed data)', () => {
+    it('an item with a uri and no id renders that uri directly, and never polls', () => {
+      const tree = render({ media: { uri: 'https://seed/x.jpg', type: 'photo' } });
+      expect(images(tree)[0].props.source).toEqual({ uri: 'https://seed/x.jpg' });
+      expect(images(tree)[0].props.onError).toBeUndefined(); // nothing to recover: no media id
+      expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
+    });
+    it('an item with an id keeps the lifecycle: uri alone is not shown', () => {
+      const tree = render({ media: { id: 'm1', uri: 'https://cdn/original.jpg', thumbnailUrl: null } });
+      expect(images(tree)).toHaveLength(0);
+    });
+  });
 });
