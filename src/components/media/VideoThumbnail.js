@@ -3,6 +3,13 @@
  * 
  * Generates and displays thumbnails for video files.
  * Uses expo-video-thumbnails for thumbnail generation.
+ *
+ * 007 (FR-024, M12): give it `media` and the tile shows the server's poster frame
+ * (`thumbnailSource`) under a play overlay; tapping calls `onPress({ videoUri, thumbnailUri,
+ * duration, media })` with `videoUri` = `videoSource(media)`, the ORIGINAL (or the device copy).
+ * The original is never an <Image> source: with no poster yet, a frame is generated from the
+ * file on the device, and a plate is shown otherwise. `videoUri` / `thumbnailUri` props still
+ * work for callers that have not moved to `media`.
  */
 
 import React, { useState, useEffect, useCallback, memo } from 'react';
@@ -17,6 +24,7 @@ import {
 } from 'react-native';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { Ionicons } from '@expo/vector-icons';
+import { thumbnailSource, videoSource } from '../../utils/mediaSource';
 
 /**
  * Format duration in mm:ss
@@ -75,8 +83,9 @@ export const clearThumbnailCache = () => {
  * VideoThumbnail component
  */
 export const VideoThumbnail = memo(({
-  videoUri,
-  thumbnailUri: initialThumbnailUri,
+  media,
+  videoUri: videoUriProp,
+  thumbnailUri: thumbnailUriProp,
   duration,
   width = 120,
   height = 90,
@@ -89,14 +98,27 @@ export const VideoThumbnail = memo(({
   style,
   imageStyle,
 }) => {
+  const videoUri = videoUriProp ?? videoSource(media);
+  // A poster the device made is a file:// path; the server's is an https copy. Never the original.
+  // For a video `localPath` is the VIDEO file, so it must never stand in as the poster image.
+  const initialThumbnailUri = thumbnailUriProp ?? (media ? thumbnailSource({ ...media, localPath: null }) : null);
   const [thumbnailUri, setThumbnailUri] = useState(initialThumbnailUri);
   const [isLoading, setIsLoading] = useState(!initialThumbnailUri);
   const [hasError, setHasError] = useState(false);
 
   // Generate thumbnail on mount if not provided
   useEffect(() => {
-    if (!initialThumbnailUri && videoUri) {
+    if (initialThumbnailUri) {
+      setThumbnailUri(initialThumbnailUri);
+      setIsLoading(false);
+    } else if (videoUri && (!media || !/^https?:/i.test(videoUri))) {
+      // With `media` the server makes the poster, so only a file already on the device is used
+      // here; a whole remote video is not downloaded to make one.
       generateThumbnailForVideo();
+    } else {
+      setThumbnailUri(null);
+      setHasError(true);
+      setIsLoading(false);
     }
   }, [videoUri, initialThumbnailUri]);
 
@@ -123,7 +145,7 @@ export const VideoThumbnail = memo(({
    * Handle press
    */
   const handlePress = () => {
-    onPress?.({ videoUri, thumbnailUri, duration });
+    onPress?.({ videoUri, thumbnailUri, duration, media });
   };
 
   /**
@@ -176,6 +198,9 @@ export const VideoThumbnail = memo(({
       onPress={handlePress}
       activeOpacity={onPress ? 0.8 : 1}
       disabled={!onPress}
+      accessibilityRole="button"
+      accessibilityLabel="Play video"
+      testID="video-play-overlay"
     >
       {renderContent()}
 

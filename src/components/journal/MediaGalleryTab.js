@@ -125,8 +125,7 @@ const VideoGridItem = memo(({ item, onPress }) => (
     activeOpacity={0.8}
   >
     <VideoThumbnail
-      videoUri={item.localPath || item.serverUrl}
-      thumbnailUri={item.thumbnailUrl}
+      media={item}
       duration={item.duration}
       width={ITEM_SIZE}
       height={ITEM_SIZE}

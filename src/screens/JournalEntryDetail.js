@@ -373,8 +373,7 @@ export const JournalEntryDetail = ({
                   onPress={() => openVideoPlayer(video)}
                 >
                   <VideoThumbnail
-                    videoUri={video.localPath || video.serverUrl}
-                    thumbnailUri={video.thumbnailUrl}
+                    media={video}
                     duration={video.duration}
                     width={(SCREEN_WIDTH - 48) / 2}
                     height={100}

@@ -223,8 +223,7 @@ const VideoBlock = memo(({ videos, onVideoPress }) => {
         {videos.slice(0, 4).map((video, index) => (
           <View key={video.localId || video.id || index} style={styles.videoContainer}>
             <VideoThumbnail
-              videoUri={video.localPath || video.serverUrl}
-              thumbnailUri={video.thumbnailUrl}
+              media={video}
               duration={video.duration}
               width={videos.length === 1 ? CONTENT_WIDTH - 32 : (CONTENT_WIDTH - 36) / 2}
               height={videos.length === 1 ? 200 : 100}

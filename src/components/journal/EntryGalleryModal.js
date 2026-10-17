@@ -127,7 +127,7 @@ const MediaRow = memo(({
             ) : (
               <View style={styles.videoThumbnailContainer}>
                 <VideoThumbnail
-                  video={item}
+                  media={item}
                   width={MEDIA_ITEM_SIZE}
                   height={MEDIA_ITEM_SIZE}
                 />
