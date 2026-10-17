@@ -10,24 +10,24 @@ import React, { memo, useMemo } from 'react';
 import {
   View,
   Text,
-  Image,
   StyleSheet,
   Platform,
 } from 'react-native';
 import { Marker, Callout } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 const PRIMARY_COLOR = '#4361ee';
 
 /**
- * Get the first photo from entry content blocks
+ * Get the first photo (a media item) from entry content blocks
  */
 const getFirstPhoto = (entry) => {
   if (!entry?.contentBlocks) return null;
   
   for (const block of entry.contentBlocks) {
     if (block.type === 'photos' && block.media?.length > 0) {
-      return block.media[0].localPath || block.media[0].remoteUrl;
+      return block.media[0]; // a media item; DerivativeImage picks the small copy
     }
   }
   return null;
@@ -86,8 +86,8 @@ const MarkerContent = memo(({ entry, size = 40, primaryColor = PRIMARY_COLOR }) 
   if (photo) {
     return (
       <View style={[styles.photoMarker, { width: size, height: size }]}>
-        <Image
-          source={{ uri: photo }}
+        <DerivativeImage
+          media={photo}
           style={[styles.photoImage, { width: size - 4, height: size - 4 }]}
           resizeMode="cover"
         />
@@ -116,11 +116,7 @@ const CalloutContent = memo(({ entry, primaryColor = PRIMARY_COLOR }) => {
   return (
     <View style={styles.calloutContainer}>
       {photo && (
-        <Image
-          source={{ uri: photo }}
-          style={styles.calloutImage}
-          resizeMode="cover"
-        />
+        <DerivativeImage media={photo} style={styles.calloutImage} resizeMode="cover" />
       )}
       <View style={styles.calloutContent}>
         <Text style={styles.calloutLocation} numberOfLines={1}>

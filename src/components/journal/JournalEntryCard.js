@@ -12,7 +12,6 @@ import Avatar from '../Avatar';
 import {
   View,
   Text,
-  Image,
   TouchableOpacity,
   StyleSheet,
   Dimensions,

@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View, Text, Image, StyleSheet, TouchableOpacity, ScrollView,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView,
   TextInput, ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../components/media/DerivativeImage';
 
 import HoldingAreaApi from '../api/HoldingAreaApi';
 import JournalApi from '../api/JournalApi';
@@ -223,7 +224,7 @@ export default function UndatedPhotosScreen({ navigation }) {
                 accessibilityState={{ checked: isSelected }}
                 accessibilityLabel={`Select ${photo.originalFileName ?? photo.mediaId}`}
               >
-                <Image source={{ uri: photo.thumbnailUrl ?? photo.url }} style={styles.thumb} />
+                <DerivativeImage media={photo} style={styles.thumb} />
                 {isSelected && (
                   <View style={styles.tick}>
                     <Ionicons name="checkmark-circle" size={22} color={PRIMARY_COLOR} />

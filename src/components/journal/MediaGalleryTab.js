@@ -11,7 +11,6 @@ import {
   Text,
   FlatList,
   TouchableOpacity,
-  Image,
   StyleSheet,
   Dimensions,
   RefreshControl,

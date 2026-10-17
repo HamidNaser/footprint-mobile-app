@@ -66,12 +66,13 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
   const rewatchesRef = useRef(0);
   const timerRef = useRef(null);
   const phaseRef = useRef(view.phase);
-  const propsRef = useRef({ mediaId, base, variant, isLocal, unresolved: !!media?.unresolved });
+  const propsRef = useRef({ mediaId, base, variant, isLocal, unresolved: !!media?.unresolved, media });
+  const localFailedRef = useRef(false); // the device file would not load: use the server copy
   // The id actually handed to the poller, so teardown unwatches that one even after props move on.
   const watchedIdRef = useRef(null);
   useLayoutEffect(() => {
-    propsRef.current = { mediaId, base, variant, isLocal, unresolved: !!media?.unresolved };
-  }, [mediaId, base, variant, isLocal, media?.unresolved]);
+    propsRef.current = { mediaId, base, variant, isLocal, unresolved: !!media?.unresolved, media };
+  });
 
   const commit = useCallback((next) => {
     phaseRef.current = next.phase;
@@ -146,6 +147,7 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
     readyRef.current = null;
     retriedRef.current = false;
     rewatchesRef.current = 0;
+    localFailedRef.current = false;
     const p = propsRef.current;
     if (p.base) {
       commit({ phase: 'idle', src: p.base, failureReason: null });
@@ -166,7 +168,19 @@ export function useMediaDerivative(media, { variant = 'grid' } = {}) {
     const p = propsRef.current;
 
     if (phase === 'idle') {
-      if (p.isLocal || !p.mediaId) return; // the device copy never engages the poller (R10)
+      if (!p.mediaId) return;
+      if (p.isLocal && !localFailedRef.current) {
+        // The device copy never engages the poller while it loads (R10). If the file has
+        // gone, fall back to the server copy: local first, not local only.
+        localFailedRef.current = true;
+        const remote = sourceFor({ ...p.media, localPath: null }, p.variant);
+        if (remote) {
+          commit({ phase: 'idle', src: remote, failureReason: null });
+        } else {
+          startWatch();
+        }
+        return;
+      }
       startWatch();
       return;
     }

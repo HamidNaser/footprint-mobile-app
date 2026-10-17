@@ -22,6 +22,12 @@ const SURFACES = [
   'screens/TimelineScreen.js',
   'screens/JournalEntryDetail.js',
   'screens/JournalEntryDetail.web.js',
+  'components/places/MemoryDetailModal.js',
+  'components/places/ThenNowComparison.js',
+  'components/places/ShareMemorySheet.js',
+  'components/places/MemoryRequestCard.js',
+  'components/map/EntryMarker.js',
+  'screens/UndatedPhotosScreen.js',
 ];
 
 /** Everything between <Image and its closing, for photo tiles. Avatars are not photographs. */
@@ -33,6 +39,12 @@ describe.each(SURFACES)('%s', (file) => {
   it('renders photographs through DerivativeImage', () => {
     expect(src).toMatch(/import\s+DerivativeImage\s+from\s+['"][^'"]*media\/DerivativeImage['"]/);
     expect(src).toContain('<DerivativeImage');
+  });
+
+  it('has no ?? or || fallback to the original (url, serverUrl, remoteUrl) for a photograph', () => {
+    expect(src).not.toMatch(/thumbnailUrl\s*(\?\?|\|\|)\s*[\w.]*url/i);
+    expect(src).not.toMatch(/uri:\s*[\w.]*(photo|item|image|img|media)[\w.\[\]]*\.(url|remoteUrl|serverUrl)/);
+    expect(src).not.toMatch(/source=\{\{\s*uri:[^}]*(localPath|serverUrl|remoteUrl|\.url)/); // video playback sources are not images
   });
 
   it('never picks an image with localPath || serverUrl, or hands Image a null uri', () => {
@@ -69,6 +81,28 @@ describe('JournalEntryCard', () => {
   it('defines no component inside PhotoBlock (a hook there would restart on every render)', () => {
     const block = card.slice(card.indexOf('const PhotoBlock'));
     expect(block.slice(0, block.indexOf('const renderSinglePhoto'))).not.toMatch(/const (NativeImage|WebImage|FailedTile)\s*=/);
+  });
+});
+
+describe('more surfaces', () => {
+  it('MemoryDetailModal does not drop pending photos from the carousel', () => {
+    const s = read('components/places/MemoryDetailModal.js');
+    expect(s).not.toMatch(/filter\(\(m\)\s*=>\s*m\?\.uri\)/);
+  });
+  it('EntryMarker takes its photo as a media item', () => {
+    const s = read('components/map/EntryMarker.js');
+    expect(s).not.toMatch(/remoteUrl/);
+  });
+  it('UndatedPhotosScreen has no original fallback', () => {
+    expect(read('screens/UndatedPhotosScreen.js')).not.toMatch(/photo\.url/);
+  });
+  it('no touched surface keeps an unused Image import', () => {
+    for (const file of SURFACES) {
+      const src = read(file);
+      const imp = src.match(/import\s*\{([^}]*)\}\s*from\s*'react-native';/);
+      const importsImage = !!imp && /(^|[\s,])Image\s*(,|$)/.test(imp[1]);
+      if (importsImage) expect(`${file}: ${src.includes('<Image')}`).toBe(`${file}: true`);
+    }
   });
 });
 

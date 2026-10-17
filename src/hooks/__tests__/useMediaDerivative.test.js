@@ -69,6 +69,32 @@ describe('useMediaDerivative: sources', () => {
     expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
   });
 
+  it('a device file that has gone falls back to the server copy: local first, not local only', () => {
+    const { result } = setup({ ...REMOTE, localPath: 'file:///deleted.jpg' });
+    act(() => result.current.onError());
+    expect(result.current.src).toBe(REMOTE.thumbnailUrl);
+    expect(result.current.state).toBe('idle');
+    expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
+    act(() => result.current.onError()); // the server copy is not there either
+    expect(result.current.state).toBe('pending');
+    expect(mediaStatusPoller.watch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a device file that has gone, with no server copy yet, watches for one', () => {
+    const { result } = setup({ ...NOT_YET, localPath: 'file:///deleted.jpg' });
+    act(() => result.current.onError());
+    expect(result.current.state).toBe('pending');
+    expect(mediaStatusPoller.watch).toHaveBeenCalledTimes(1);
+    deliver(READY);
+    expect(result.current.src).toBe(`${READY.gridUrl}?v=${encodeURIComponent(READY.updatedAt)}`);
+  });
+
+  it('a device file that has gone, with no server id, has nothing to fall back to', () => {
+    const { result } = setup({ localPath: 'file:///deleted.jpg' });
+    act(() => result.current.onError());
+    expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
+  });
+
   it('uses the grid copy for tiles and the display copy for the full view', () => {
     expect(setup(REMOTE).result.current.src).toBe(REMOTE.thumbnailUrl);
     expect(setup(REMOTE, { variant: 'display' }).result.current.src).toBe(REMOTE.displayUrl);

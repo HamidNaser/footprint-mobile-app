@@ -17,7 +17,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
-  Image,
   Dimensions,
   Platform,
 } from 'react-native';

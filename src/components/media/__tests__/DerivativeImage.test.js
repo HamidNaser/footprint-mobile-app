@@ -3,7 +3,7 @@
  * the surfaces themselves are checked in derivativeSurfaces.test.js.
  */
 import React from 'react';
-import { Image, Text } from 'react-native';
+import { Image, Text, View } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 
 jest.mock('../../../services/mediaStatusPoller', () => {
@@ -12,6 +12,7 @@ jest.mock('../../../services/mediaStatusPoller', () => {
 });
 
 import { mediaStatusPoller } from '../../../services/mediaStatusPoller';
+import { Platform } from 'react-native';
 import DerivativeImage from '../DerivativeImage';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -35,11 +36,52 @@ beforeEach(() => {
 afterEach(() => jest.useRealTimers());
 
 describe('DerivativeImage', () => {
-  it('renders the device copy for a local photo, and does not poll', () => {
+  it('renders the device copy for a local photo, and does not poll while it loads', () => {
     const tree = render({ media: { id: 'm1', localPath: 'file:///a.jpg' } });
     expect(images(tree)[0].props.source).toEqual({ uri: 'file:///a.jpg' });
-    act(() => images(tree)[0].props.onError());
     expect(mediaStatusPoller.watch).not.toHaveBeenCalled();
+  });
+
+  it('the pending plate says "Preparing photo…" (FR-020)', () => {
+    const tree = render({ media: { id: 'm1', thumbnailUrl: null } });
+    expect(texts(tree)).toContain('Preparing photo…');
+  });
+
+  it('on a very small tile the text is dropped but the label stays accessible', () => {
+    const tree = render({ media: { id: 'm1', thumbnailUrl: null }, style: { width: 40, height: 40 } });
+    expect(texts(tree)).not.toContain('Preparing photo…');
+    const plate = tree.root.findAllByType(View).find((v) => v.props.testID === 'media-pending');
+    expect(plate.props.accessibilityLabel).toBe('Preparing photo');
+  });
+
+  it('a small tile sized by aspect ratio alone still gets the full text', () => {
+    const tree = render({ media: { id: 'm1', thumbnailUrl: null }, style: { width: '100%', aspectRatio: 1 } });
+    expect(texts(tree)).toContain('Preparing photo…');
+  });
+
+  it('a local file that has gone falls back to the server copy', () => {
+    const tree = render({ media: { id: 'm1', localPath: 'file:///x.jpg', thumbnailUrl: 'https://cdn/g.webp' } });
+    act(() => images(tree)[0].props.onError());
+    expect(images(tree)[0].props.source).toEqual({ uri: 'https://cdn/g.webp' });
+  });
+
+  describe('on web', () => {
+    const original = Platform.OS;
+    beforeEach(() => {
+      Platform.OS = 'web';
+    });
+    afterEach(() => {
+      Platform.OS = original;
+    });
+    it('adds no border radius the style did not ask for', () => {
+      const tree = render({ media: { id: 'm1', localPath: 'file:///x.jpg' }, style: { height: 80 } });
+      const img = tree.root.findByType('img');
+      expect(img.props.style.borderRadius).toBeUndefined();
+    });
+    it('honours the border radius the style does ask for', () => {
+      const tree = render({ media: { id: 'm1', localPath: 'file:///x.jpg' }, style: { height: 80, borderRadius: 6 } });
+      expect(tree.root.findByType('img').props.style.borderRadius).toBe(6);
+    });
   });
 
   it('renders the pending placeholder, never { uri: null }, when there is no source yet', () => {

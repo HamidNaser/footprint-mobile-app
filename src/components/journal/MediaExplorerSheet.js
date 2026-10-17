@@ -24,7 +24,6 @@ import {
   Dimensions,
   TouchableOpacity,
   FlatList,
-  Image,
   Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';

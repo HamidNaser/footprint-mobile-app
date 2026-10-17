@@ -10,7 +10,7 @@ import { useMediaDerivative } from '../../hooks/useMediaDerivative';
  * pending placeholder -- an <Image> is never handed `{ uri: null }`.
  *
  *  - local photo, or a ready copy ... the image
- *  - pending ........................ grey placeholder (the poller is watching)
+ *  - pending ........................ grey plate, "Preparing photo…" (FR-020; label only on tiles under 60 px)
  *  - unavailable / loadFailed ....... "Photo unavailable"
  *  - failed (server verdict) ........ "Photo unavailable" for now. SEAM for T070/T071: the
  *                                     owner's failed tile with Try again replaces `renderFailed`.
@@ -20,12 +20,26 @@ import { useMediaDerivative } from '../../hooks/useMediaDerivative';
  */
 
 export const PHOTO_UNAVAILABLE = 'Photo unavailable';
+export const PHOTO_PREPARING = 'Preparing photo…';
+/** Under this many px (either side) a tile is too small for words; the label stays accessible. */
+export const SMALL_TILE_PX = 60;
 export const PHOTO_NOT_UPLOADED = "Photo couldn't be uploaded";
 
+function isSmall(style) {
+  const flat = StyleSheet.flatten(style) || {};
+  return [flat.width, flat.height].some((d) => typeof d === 'number' && d < SMALL_TILE_PX);
+}
+
 function Plate({ style, testID, label }) {
+  const small = isSmall(style);
   return (
-    <View style={[styles.plate, style]} testID={testID}>
-      {label ? <Text style={styles.plateText}>{label}</Text> : null}
+    <View
+      style={[styles.plate, style]}
+      testID={testID}
+      accessible
+      accessibilityLabel={label ? label.replace(/…$/, '') : undefined}
+    >
+      {label && !small ? <Text style={styles.plateText}>{label}</Text> : null}
     </View>
   );
 }
@@ -54,7 +68,7 @@ function DerivativeImage({
     return renderFailed({ style, media, failureReason, rewatch });
   }
   if (!src || state === 'pending') {
-    return <Plate style={style} testID="media-pending" />;
+    return <Plate style={style} testID="media-pending" label={PHOTO_PREPARING} />;
   }
 
   if (Platform.OS === 'web') {
@@ -70,7 +84,7 @@ function DerivativeImage({
           width: '100%',
           height: flat.height || '100%',
           objectFit: resizeMode === 'contain' ? 'contain' : 'cover',
-          borderRadius: flat.borderRadius ?? 12,
+          ...(flat.borderRadius != null ? { borderRadius: flat.borderRadius } : null),
           backgroundColor: '#E0E0E0',
           display: 'block',
           ...(flat.width != null ? { width: flat.width } : null),
