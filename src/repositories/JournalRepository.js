@@ -145,6 +145,17 @@ class JournalRepositoryClass extends BaseRepository {
       // in and then pushed back narrower on the next edit. A server that sends nothing falls
       // to 'private' in insertEntry, which under-shares rather than over-shares.
       locationSharing: serverEntry.locationSharing || null,
+      // Kept for the same reason, and it is the step the holding-area journey turns on: a
+      // person dates a box of scans "sometime in 1998", the server stores year precision, and
+      // this is where it comes back down. Dropped here, the entry lands as an exact day and
+      // every later read -- the detail screen and the next upload -- reports a day the person
+      // never gave. A server that sends nothing falls to 'day' in insertEntry, as before.
+      // Kept for the same reason, and it is the step the holding-area journey turns on: a
+      // person dates a box of scans "sometime in 1998", the server stores year precision, and
+      // this is where it comes back down. Dropped here, the entry lands as an exact day and
+      // every later read -- the detail screen and the next upload -- reports a day the person
+      // never gave. A server that sends nothing falls to 'day' in insertEntry, as before.
+      datePrecision: serverEntry.datePrecision || null,
       reactions: serverEntry.reactions || { likes: 0, likedByUserIds: [] },
       commentsCount: serverEntry.commentsCount || 0,
       syncStatus: SyncStatus.SYNCED,

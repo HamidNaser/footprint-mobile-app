@@ -229,3 +229,42 @@ describe('the stored precision survives read-back unchanged, at every level', ()
     expect(entry.datePrecision).toBe(level);
   });
 });
+
+describe('precision coming back DOWN from the server survives the inbound hop', () => {
+  // This is the hop the holding-area journey turns on, and it is the one the read-back fix
+  // alone does not cover: a person dates a box of scans "sometime in 1998" on the phone, the
+  // server stores year precision, and `createFromServer` is where it comes home. Dropped
+  // there, the row lands as an exact day -- so the mappers above faithfully read back a
+  // precision the person never gave, and every later read repeats it.
+  it.each(LEVELS)("stores '%s' rather than flattening it to a day", async (level) => {
+    const entry = await JournalRepository.createFromServer({
+      id: `srv-${level}`,
+      journalId: 'journal-1',
+      userId: 'user-1',
+      date: '1998-01-01',
+      contentBlocks: [],
+      datePrecision: level,
+    });
+
+    // Asserted through a mapper, not off the returned object, so this cannot pass on a value
+    // that was handed back without ever reaching SQLite.
+    const readBack = await DatabaseService.getEntryByLocalId(entry.localId);
+
+    expect(readBack.datePrecision).toBe(level);
+    expect(readBack.serverId).toBe(`srv-${level}`);
+  });
+
+  it("falls back to 'day' when the server sends no precision, as it does today", async () => {
+    const entry = await JournalRepository.createFromServer({
+      id: 'srv-none',
+      journalId: 'journal-1',
+      userId: 'user-1',
+      date: '1998-01-01',
+      contentBlocks: [],
+    });
+
+    const readBack = await DatabaseService.getEntryByLocalId(entry.localId);
+
+    expect(readBack.datePrecision).toBe('day');
+  });
+});
