@@ -24,6 +24,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { useEvent } from 'expo';
+import DerivativeImage from '../media/DerivativeImage';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -32,8 +33,9 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
  */
 const PhotoItem = memo(({ photo, width }) => (
   <View style={[styles.mediaContainer, { width }]}>
-    <Image
-      source={{ uri: photo.localPath || photo.serverUrl }}
+    <DerivativeImage
+      media={photo}
+      variant="display"
       style={styles.fullImage}
       resizeMode="contain"
     />

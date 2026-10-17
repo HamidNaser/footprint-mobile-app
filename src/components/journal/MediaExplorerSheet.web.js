@@ -21,6 +21,7 @@ import {
   Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -65,8 +66,9 @@ const MediaThumbnail = memo(({
     onPress={() => onPress(item)}
     activeOpacity={0.8}
   >
-    <Image
-      source={{ uri: item.thumbnailUri || item.localPath || item.serverUrl }}
+    {/* A video's tile shows its poster frame (thumbnailUrl); its device file is not an image. */}
+    <DerivativeImage
+      media={type === 'video' ? { ...item, localPath: null } : item}
       style={styles.thumbnailImage}
       resizeMode="cover"
     />

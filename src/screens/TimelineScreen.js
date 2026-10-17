@@ -13,6 +13,7 @@ import { getTimelineCandidates, getLifeline, getLifelineYear } from '../api/Life
 import { useAuth } from '../context/AuthContext';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
+import DerivativeImage from '../components/media/DerivativeImage';
 
 const C = {
   bg: '#0a1424',
@@ -475,7 +476,7 @@ export default function TimelineScreen({ navigation }) {
               <View style={styles.media} key={m.entryId}>
                 <View style={styles.mediaPhotoWrap}>
                   {m.photos && m.photos[0] ? (
-                    <Image source={{ uri: m.photos[0] }} style={styles.mediaPhoto} />
+                    <DerivativeImage media={m.photos[0]} style={styles.mediaPhoto} />
                   ) : (
                     <View style={[styles.mediaPhoto, styles.mediaPhotoEmpty]} />
                   )}

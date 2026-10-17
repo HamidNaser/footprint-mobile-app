@@ -19,6 +19,7 @@ import {
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../components/media/DerivativeImage';
 import { parseDateKey } from '../utils/journalDate';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
@@ -73,8 +74,9 @@ const ImageViewerModal = ({ visible, images, initialIndex, onClose }) => {
 
   const renderItem = ({ item }) => (
     <View style={styles.viewerImageContainer}>
-      <Image
-        source={{ uri: item.localPath || item.serverUrl }}
+      <DerivativeImage
+        media={item}
+        variant="display"
         style={styles.viewerImage}
         resizeMode="contain"
       />
@@ -269,8 +271,9 @@ export const JournalEntryDetail = ({
                   ]}
                   onPress={() => openImageViewer(index)}
                 >
-                  <Image
-                    source={{ uri: photo.localPath || photo.serverUrl }}
+                  <DerivativeImage
+                    media={photo}
+                    variant={photos.length === 1 ? 'display' : 'grid'}
                     style={styles.photo}
                     resizeMode="cover"
                   />

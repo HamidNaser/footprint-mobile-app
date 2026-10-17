@@ -36,7 +36,7 @@ const adaptPlace = (place) => {
     // PlaceResponse (list) carries no IWasHere — only PlaceDetailResponse does.
     iWasHere: false,
     // Detail-view fields with no backend source yet — safe defaults.
-    photos: place.image ? [place.image] : [],
+    photos: place.image ? [place.image] : [],  // media item (contracts/media-item.md)
     // Lat/Lng *are* on PlaceResponse; 0/0 means unknown. Same rule as
     // adaptPlaceDetail, so the list and detail views agree.
     location: place.lat || place.lng ? { lat: place.lat, lng: place.lng } : null,
@@ -74,7 +74,9 @@ export const getPlaces = async ({ filter = 'everyone', search = '' } = {}) => {
  */
 const adaptMemory = (m, placeId, year) => {
   const name = m.authorName || 'Someone';
-  const photos = m.photos || [];
+  // Media items (contracts/media-item.md), not URL strings. `uri` is kept as the display
+  // copy for the older detail views that still read it; it is never the original.
+  const photos = (m.photos || []).filter(Boolean);
   return {
     id: m.entryId,
     placeId,
@@ -89,7 +91,7 @@ const adaptMemory = (m, placeId, year) => {
       avatar: m.authorAvatar || null,
     },
     type: 'photo',
-    media: photos.map((uri) => ({ uri, type: 'photo' })),
+    media: photos.map((p) => ({ ...p, type: p.kind || 'photo', uri: p.displayUrl || null })),
     caption: m.text || '',
     isCurrentUser: !!m.isCurrentUser,
     // Photographs nobody has explained -- no text, no voice. Derived on the backend from
@@ -124,11 +126,20 @@ const adaptPlaceDetail = (detail) => {
   });
 
   // Collect a photo carousel from all memories, falling back to the header image.
-  const allPhotos = [];
+  // De-duplicated by media id; an unresolved item has no id and is kept as it is.
+  const seen = new Set();
+  const photos = [];
   years.forEach((y) =>
-    y.memories.forEach((m) => m.media.forEach((mm) => allPhotos.push(mm.uri)))
+    y.memories.forEach((m) =>
+      m.media.forEach(({ type, uri, ...item }) => {
+        if (item.id) {
+          if (seen.has(item.id)) return;
+          seen.add(item.id);
+        }
+        photos.push(item);
+      })
+    )
   );
-  const photos = [...new Set(allPhotos)];
 
   return {
     id: detail.id,

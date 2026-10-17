@@ -39,6 +39,7 @@ import MemoryDetailModal from '../components/places/MemoryDetailModal';
 import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 import PlaceMapPreview from '../components/map/PlaceMapPreview';
+import DerivativeImage from '../components/media/DerivativeImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -189,7 +190,7 @@ const PlaceCard = memo(({ place, isSelected, onPress, onYearPress }) => {
       >
         <View style={styles.placeImageWrapper}>
           {place.image ? (
-            <Image source={{ uri: place.image }} style={styles.placeImage} />
+            <DerivativeImage media={place.image} style={styles.placeImage} />
           ) : (
             // Nobody has photographed this place yet. A monogram from its own name,
             // so a list of unphotographed places still reads as distinct places
@@ -256,9 +257,10 @@ const ImageCarousel = memo(({ photos }) => {
         scrollEventThrottle={16}
       >
         {photos.map((photo, index) => (
-          <Image
-            key={index}
-            source={{ uri: photo }}
+          <DerivativeImage
+            key={photo.id || index}
+            media={photo}
+            variant="display"
             style={styles.carouselImage}
             resizeMode="cover"
           />

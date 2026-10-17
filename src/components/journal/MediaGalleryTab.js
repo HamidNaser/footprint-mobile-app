@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
+import DerivativeImage from '../media/DerivativeImage';
 import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -102,8 +103,8 @@ const PhotoGridItem = memo(({ item, onPress }) => (
     onPress={() => onPress?.(item)}
     activeOpacity={0.8}
   >
-    <Image
-      source={{ uri: item.localPath || item.serverUrl }}
+    <DerivativeImage
+      media={item}
       style={styles.gridImage}
       resizeMode="cover"
     />

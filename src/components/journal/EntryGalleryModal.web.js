@@ -25,6 +25,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { VideoThumbnail } from '../media/VideoThumbnail';
+import DerivativeImage from '../media/DerivativeImage';
 import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -83,8 +84,8 @@ const MediaRow = memo(({
             activeOpacity={0.8}
           >
             {type === 'photo' ? (
-              <Image
-                source={{ uri: item.localPath || item.serverUrl }}
+              <DerivativeImage
+                media={item}
                 style={styles.mediaImage}
                 resizeMode="cover"
               />
