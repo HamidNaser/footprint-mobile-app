@@ -1,3 +1,4 @@
+import { AppState } from 'react-native';
 import { MediaApi } from '../api/MediaApi';
 
 const fetchStatus = (ids) => MediaApi.status(ids);
@@ -18,8 +19,10 @@ const fetchStatus = (ids) => MediaApi.status(ids);
  *  - 401 halts polling (the shared request helper has already tried a token refresh) but keeps
  *    the watchers; the next watch() or resume() re-arms them all.
  *
- * App-state pause (AppState background) and off-screen gating belong to T080. They
- * plug in through `pause()` / `resume()`; nothing here reads AppState.
+ * App state (FR-031): while the app is in the `background` the poller sends nothing; it resumes
+ * when the app is `active` again. The AppState listener is registered once, on the first watch,
+ * and removed by stop(). Coming back to the foreground never un-halts a 401: only an explicit
+ * resume() or a new watch() does. Off-screen gating is per tile (the hook unwatches).
  */
 
 export const MAX_IDS_PER_REQUEST = 100;
@@ -36,7 +39,7 @@ function chunk(list, size) {
   return out;
 }
 
-export function createMediaStatusPoller({ status = fetchStatus } = {}) {
+export function createMediaStatusPoller({ status = fetchStatus, appState = AppState } = {}) {
   /**
    * id -> { gen, callbacks }. `gen` is fresh each time the id goes from unwatched to
    * watched, so a response requested for an earlier watch is never delivered to a later one.
@@ -153,7 +156,32 @@ export function createMediaStatusPoller({ status = fetchStatus } = {}) {
     schedule(delay);
   }
 
+  // Pause only what we paused: a 401 halt must not be woken by the app coming back to the front.
+  let backgroundPaused = false;
+  let appStateSub = null;
+
+  function onAppStateChange(next) {
+    if (next === 'background') {
+      if (!paused) {
+        backgroundPaused = true;
+        pause();
+      }
+    } else if (next === 'active' && backgroundPaused) {
+      backgroundPaused = false;
+      // Never un-halts a 401: only an explicit resume() or a new watch() does.
+      if (halted) paused = false;
+      else resume();
+    }
+  }
+
+  function listenForAppState() {
+    if (appStateSub || !appState || typeof appState.addEventListener !== 'function') return;
+    appStateSub = appState.addEventListener('change', onAppStateChange) || {};
+    if (appState.currentState === 'background') onAppStateChange('background');
+  }
+
   function watch(id, callback) {
+    listenForAppState();
     let entry = watchers.get(id);
     if (!entry) {
       entry = { gen: nextGen++, callbacks: new Set() };
@@ -190,6 +218,14 @@ export function createMediaStatusPoller({ status = fetchStatus } = {}) {
   /** Stop entirely and forget everything watched. A later watch() starts afresh. */
   function stop() {
     clearTimer();
+    if (appStateSub) {
+      appStateSub.remove?.();
+      appStateSub = null;
+    }
+    if (backgroundPaused) {
+      backgroundPaused = false;
+      paused = false;
+    }
     halted = false;
     watchers.clear();
     lastSeen.clear();
@@ -197,7 +233,7 @@ export function createMediaStatusPoller({ status = fetchStatus } = {}) {
     errorDelay = ERROR_START_MS;
   }
 
-  // Seams for T080 (app backgrounded / tile off-screen). A tick already in flight finishes.
+  // A tick already in flight finishes.
   function pause() {
     paused = true;
     clearTimer();
