@@ -33,7 +33,8 @@ function columnsOf(sql) {
 }
 
 /** The migration that adds the column, found by what it does rather than by its position. */
-const adding = () => migrations.find((m) => m.up.some((sql) => /date_precision/i.test(sql)));
+const adding = () =>
+  migrations.find((m) => m.up.some((sql) => typeof sql === 'string' && /date_precision/i.test(sql)));
 
 describe('journal_entries.date_precision', () => {
   it('is declared, so a fresh install has it', () => {
@@ -50,14 +51,15 @@ describe('journal_entries.date_precision', () => {
   it('ships as a migration, so an installed app gains it rather than missing it', () => {
     // Every phone in the wild is on v4. A column that appears only in CREATE_TABLES reaches
     // fresh installs and nobody else — which is the same trap v4 was written to avoid.
-    const latest = migrations[migrations.length - 1];
+    const latest = adding();
 
-    expect(latest.version).toBe(SCHEMA_VERSION);
+    expect(latest.version).toBeLessThanOrEqual(SCHEMA_VERSION);
     expect(latest.up.join('\n')).toMatch(/ALTER TABLE journal_entries[\s\S]*date_precision/i);
   });
 
   it('moves the schema version on, so the migration actually runs', () => {
-    expect(SCHEMA_VERSION).toBe(5);
+    expect(adding().version).toBe(5);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(5);
   });
 
   it('backfills nothing, because there is nothing to backfill', () => {

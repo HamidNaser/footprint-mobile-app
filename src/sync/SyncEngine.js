@@ -273,7 +273,10 @@ class SyncEngineClass {
     const result = { succeeded: 0, failed: 0, conflicts: 0 };
 
     // Get pending operations from queue
-    const operations = await SyncQueue.getPendingOperations();
+    const operations = await this._withoutHeldEntries(
+      await SyncQueue.getPendingOperations(),
+      result
+    );
     
     if (operations.length === 0) {
       console.log('[SyncEngine] No pending operations to push');
@@ -376,6 +379,44 @@ class SyncEngineClass {
     }
 
     return result;
+  }
+
+  /**
+   * True when an entry still references a device file the server has no media id for
+   * (007 FR-040, R12). Such an entry must not be sent: its reference would be a local id.
+   */
+  _hasUnuploadedMedia(entry) {
+    return (entry?.contentBlocks || []).some((block) =>
+      (Array.isArray(block?.media) ? block.media : []).some(
+        // An item uploaded before mediaId was recorded carries its server url and keeps
+        // the id it was given then; only an item with neither has not been uploaded.
+        (item) => (item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url)
+      )
+    );
+  }
+
+  /**
+   * Hold back create/update operations whose entry still has media without a server media
+   * id. Held visibly -- the entry is marked failed and counted -- never dropped: the
+   * operation stays queued, and the device keeps rendering localPath meanwhile.
+   */
+  async _withoutHeldEntries(operations, result) {
+    const sendable = [];
+    for (const op of operations) {
+      const isWrite =
+        op.type === SyncOperationType.CREATE_ENTRY || op.type === SyncOperationType.UPDATE_ENTRY;
+      const entry = isWrite && op.entityId
+        ? await DatabaseService.getEntryByLocalId(op.entityId).catch(() => null)
+        : null;
+      if (entry && this._hasUnuploadedMedia(entry)) {
+        console.warn('[SyncEngine] Holding entry until its media has a server id:', op.entityId);
+        await JournalRepository.markSyncFailed(op.entityId);
+        result.failed++;
+        continue;
+      }
+      sendable.push(op);
+    }
+    return sendable;
   }
 
   /**
@@ -665,10 +706,14 @@ class SyncEngineClass {
         changed = true;
         return {
           ...item,
-          id: uploadResult.mediaId || item.id,
+          // The server's id, never the local one (007 R12). _uploadPendingMedia refuses
+          // an upload that returned none, so this is always set by the time it runs.
+          id: uploadResult.mediaId,
+          mediaId: uploadResult.mediaId,
           serverUrl: uploadResult.url,
           url: uploadResult.url,
           thumbnailUrl: uploadResult.thumbnailUrl || item.thumbnailUrl,
+          displayUrl: uploadResult.displayUrl || item.displayUrl,
         };
       });
 
@@ -732,6 +777,12 @@ class SyncEngineClass {
           entryId: media.entry_id,
           filename: media.filename,
         });
+
+        // No media id means nothing the entry can safely reference (007 R12). Failed, not
+        // completed: it is retried, and the entry stays held until an upload returns one.
+        if (!uploadResult?.mediaId) {
+          throw new Error('Upload returned no media id');
+        }
 
         // Mark as completed
         await DatabaseService.updateMediaQueueItem(media.id, {

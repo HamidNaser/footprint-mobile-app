@@ -6,6 +6,52 @@
  * run multiple times.
  */
 
+const CACHED_ADDRESS_KEYS = ['thumbnailUrl', 'thumbnailUri', 'displayUrl', 'displayUri'];
+
+/** A server address, as opposed to the device's own file:// copy. */
+const isRemoteAddress = (v) => typeof v === 'string' && /^(https?:\/\/|\/)/i.test(v);
+
+/**
+ * v6 step: drop cached rendition addresses from every entry's media, so the next pull
+ * (cursor reset below) repopulates them from the server. Device paths are left alone.
+ */
+async function clearCachedMediaAddresses(db) {
+  const rows = await db.getAllAsync('SELECT local_id, content_blocks FROM journal_entries');
+  for (const row of rows || []) {
+    let blocks;
+    try {
+      blocks = JSON.parse(row.content_blocks || '[]');
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(blocks)) continue;
+
+    let changed = false;
+    const cleaned = blocks.map((block) => {
+      if (!block || !Array.isArray(block.media)) return block;
+      const media = block.media.map((m) => {
+        if (!m || typeof m !== 'object') return m;
+        const next = { ...m };
+        for (const key of CACHED_ADDRESS_KEYS) {
+          if (isRemoteAddress(next[key])) {
+            delete next[key];
+            changed = true;
+          }
+        }
+        return next;
+      });
+      return { ...block, media };
+    });
+
+    if (changed) {
+      await db.runAsync('UPDATE journal_entries SET content_blocks = ? WHERE local_id = ?', [
+        JSON.stringify(cleaned),
+        row.local_id,
+      ]);
+    }
+  }
+}
+
 /**
  * Migration definitions
  * Each migration has:
@@ -159,6 +205,23 @@ export const migrations = [
       // column is harmless to an older build, which simply ignores it.
     ],
   },
+  {
+    version: 6,
+    description: 'media_queue.display_server_url, and clear cached thumbnail/display addresses (007 R10)',
+    up: [
+      'ALTER TABLE media_queue ADD COLUMN display_server_url TEXT;',
+      // Addresses cached before renditions were replaced point at the retired
+      // /api/v1/media/t/ route. Cleared, not rewritten: the server owns them.
+      'UPDATE media_queue SET thumbnail_server_url = NULL, display_server_url = NULL;',
+      // Cached entries carry the same addresses inside content_blocks.
+      clearCachedMediaAddresses,
+      // Without this the next pull is incremental and never revisits the entries just cleared.
+      "DELETE FROM sync_metadata WHERE key = 'last_pull_timestamp';",
+    ],
+    down: [
+      // Additive column, harmless to an older build; cleared addresses repopulate from the server.
+    ],
+  },
 ];
 
 /**
@@ -191,7 +254,9 @@ export const applyMigration = async (db, migration) => {
   try {
     // Run all up statements
     for (const statement of migration.up) {
-      if (statement && statement.trim()) {
+      if (typeof statement === 'function') {
+        await statement(db);
+      } else if (statement && statement.trim()) {
         await db.runAsync(statement);
       }
     }

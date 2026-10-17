@@ -162,6 +162,7 @@ class MediaApiClass {
       mediaId: result.mediaId,
       url: result.url,
       thumbnailUrl: result.thumbnailUrl,
+      displayUrl: result.displayUrl,
       uploadId: presignedData.uploadId,
     };
   }
@@ -366,6 +367,7 @@ class MediaApiClass {
       mediaId: response.id,
       url: response.url,
       thumbnailUrl: response.thumbnailUrl,
+      displayUrl: response.displayUrl,
     };
   }
 
