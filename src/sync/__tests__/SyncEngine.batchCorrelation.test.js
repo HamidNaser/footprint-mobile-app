@@ -312,7 +312,11 @@ describe('batch sync correlates creates with the server reply', () => {
 
     const result = await SyncEngine._pushLocalChanges();
 
-    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0 });
+    // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
+    // rather than loosened to toMatchObject: the strictness is the point -- an
+    // unexpected field appearing in this result is exactly what this assertion should
+    // catch, and it did.
+    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [] });
     expect(queue.completed.has('op-create-1')).toBe(true);
 
     // Nothing pending means no second request at all.
@@ -427,7 +431,11 @@ describe('a batch whose reply is lost does not duplicate the memory', () => {
     // finite retries for a request the server may well have honoured.
     expect(queue.completed.has('op-create-1')).toBe(false);
     expect(queue.failed.has('op-create-1')).toBe(false);
-    expect(result).toEqual({ succeeded: 0, failed: 0, conflicts: 0 });
+    // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
+    // rather than loosened to toMatchObject: the strictness is the point -- an
+    // unexpected field appearing in this result is exactly what this assertion should
+    // catch, and it did.
+    expect(result).toEqual({ succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [] });
 
     const settled = await SyncEngine._pushLocalChanges();
     expect(settled.succeeded).toBe(1);
@@ -615,7 +623,11 @@ describe('batch sync correlates updates with the server reply', () => {
 
     const result = await SyncEngine._pushLocalChanges();
 
-    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0 });
+    // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
+    // rather than loosened to toMatchObject: the strictness is the point -- an
+    // unexpected field appearing in this result is exactly what this assertion should
+    // catch, and it did.
+    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [] });
     expect(queue.completed.has('op-update-1')).toBe(true);
 
     await SyncEngine._pushLocalChanges();
