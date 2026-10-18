@@ -3,9 +3,18 @@
  * 
  * Generates and displays thumbnails for video files.
  * Uses expo-video-thumbnails for thumbnail generation.
+ *
+ * 007 (FR-024, M12, final review I1): give it `media` and the poster frame is watched by media
+ * id (VideoPosterTile + useMediaDerivative): "Preparing photo…" until ready, then the poster
+ * under a play overlay, and the failed / unavailable states a photo tile has. Tapping calls
+ * `onPress({ videoUri, thumbnailUri, duration, media })` with `videoUri` = `videoSource(media)`,
+ * the ORIGINAL (or the device copy). The original is never an <Image> source: with no poster
+ * yet, a frame is generated from the file on the device. A host that wraps the tile in its own
+ * touchable passes `onFailedOwner` (FailedSlot). `videoUri` / `thumbnailUri` props still work
+ * for callers that have not moved to `media`.
  */
 
-import React, { useState, useEffect, useCallback, memo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
 import {
   View,
   Image,
@@ -17,6 +26,8 @@ import {
 } from 'react-native';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { Ionicons } from '@expo/vector-icons';
+import { thumbnailSource, videoSource } from '../../utils/mediaSource';
+import { VideoPosterTile, posterMediaOf } from './VideoPosterTile';
 
 /**
  * Format duration in mm:ss
@@ -72,11 +83,53 @@ export const clearThumbnailCache = () => {
 };
 
 /**
+ * With a media item (007, final review I1): the poster is watched by media id through
+ * VideoPosterTile (pending / ready / failed / unavailable). A video still on the device gets a
+ * frame made from that file while the server's poster is not there yet.
+ */
+const MediaVideoThumbnail = ({ media, time = 0, quality = 0.5, onThumbnailGenerated, width = 120, height = 90, ...rest }) => {
+  const devicePath =
+    typeof media.localPath === 'string' && media.localPath && !/^https?:/i.test(media.localPath) ? media.localPath : null;
+  const hasPoster = !!thumbnailSource(posterMediaOf(media));
+  const [frame, setFrame] = useState(null);
+  const onGeneratedRef = useRef(onThumbnailGenerated);
+  onGeneratedRef.current = onThumbnailGenerated;
+
+  useEffect(() => {
+    let live = true;
+    setFrame(null);
+    if (devicePath && !hasPoster) {
+      generateThumbnail(devicePath, { time, quality }).then((uri) => {
+        if (live && uri) {
+          setFrame(uri);
+          onGeneratedRef.current?.(uri);
+        }
+      });
+    }
+    return () => {
+      live = false;
+    };
+  }, [devicePath, hasPoster, time, quality]);
+
+  return <VideoPosterTile media={media} localFrame={frame} width={width} height={height} {...rest} />;
+};
+
+/**
  * VideoThumbnail component
  */
-export const VideoThumbnail = memo(({
-  videoUri,
-  thumbnailUri: initialThumbnailUri,
+export const VideoThumbnail = memo((props) =>
+  props.media && props.thumbnailUri == null && props.videoUri == null ? (
+    <MediaVideoThumbnail {...props} />
+  ) : (
+    <LegacyVideoThumbnail {...props} />
+  ),
+);
+
+/** The older `videoUri` / `thumbnailUri` props (the compose preview): no media id, nothing to watch. */
+const LegacyVideoThumbnail = ({
+  media,
+  videoUri: videoUriProp,
+  thumbnailUri: thumbnailUriProp,
   duration,
   width = 120,
   height = 90,
@@ -89,14 +142,27 @@ export const VideoThumbnail = memo(({
   style,
   imageStyle,
 }) => {
+  const videoUri = videoUriProp ?? videoSource(media);
+  // A poster the device made is a file:// path; the server's is an https copy. Never the original.
+  // For a video `localPath` is the VIDEO file, so it must never stand in as the poster image.
+  const initialThumbnailUri = thumbnailUriProp ?? (media ? thumbnailSource({ ...media, localPath: null }) : null);
   const [thumbnailUri, setThumbnailUri] = useState(initialThumbnailUri);
   const [isLoading, setIsLoading] = useState(!initialThumbnailUri);
   const [hasError, setHasError] = useState(false);
 
   // Generate thumbnail on mount if not provided
   useEffect(() => {
-    if (!initialThumbnailUri && videoUri) {
+    if (initialThumbnailUri) {
+      setThumbnailUri(initialThumbnailUri);
+      setIsLoading(false);
+    } else if (videoUri && (!media || !/^https?:/i.test(videoUri))) {
+      // With `media` the server makes the poster, so only a file already on the device is used
+      // here; a whole remote video is not downloaded to make one.
       generateThumbnailForVideo();
+    } else {
+      setThumbnailUri(null);
+      setHasError(true);
+      setIsLoading(false);
     }
   }, [videoUri, initialThumbnailUri]);
 
@@ -123,7 +189,7 @@ export const VideoThumbnail = memo(({
    * Handle press
    */
   const handlePress = () => {
-    onPress?.({ videoUri, thumbnailUri, duration });
+    onPress?.({ videoUri, thumbnailUri, duration, media });
   };
 
   /**
@@ -176,6 +242,9 @@ export const VideoThumbnail = memo(({
       onPress={handlePress}
       activeOpacity={onPress ? 0.8 : 1}
       disabled={!onPress}
+      accessibilityRole="button"
+      accessibilityLabel="Play video"
+      testID="video-play-overlay"
     >
       {renderContent()}
 
@@ -196,7 +265,7 @@ export const VideoThumbnail = memo(({
       )}
     </TouchableOpacity>
   );
-});
+};
 
 /**
  * Video thumbnail grid item

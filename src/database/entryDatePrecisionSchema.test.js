@@ -33,7 +33,8 @@ function columnsOf(sql) {
 }
 
 /** The migration that adds the column, found by what it does rather than by its position. */
-const adding = () => migrations.find((m) => m.up.some((sql) => /date_precision/i.test(sql)));
+const adding = () =>
+  migrations.find((m) => m.up.some((sql) => typeof sql === 'string' && /date_precision/i.test(sql)));
 
 describe('journal_entries.date_precision', () => {
   it('is declared, so a fresh install has it', () => {
@@ -63,6 +64,8 @@ describe('journal_entries.date_precision', () => {
     // migration numbered beyond SCHEMA_VERSION would never execute. Stated as a relation rather
     // than as the literal 5, which was only true until the next column landed.
     expect(adding().version).toBeLessThanOrEqual(SCHEMA_VERSION);
+    // v5 has shipped, so its number is fixed: a later migration goes above it, never into it.
+    expect(adding().version).toBe(5);
   });
 
   it('backfills nothing, because there is nothing to backfill', () => {

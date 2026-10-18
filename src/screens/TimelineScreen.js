@@ -13,6 +13,8 @@ import { getTimelineCandidates, getLifeline, getLifelineYear } from '../api/Life
 import { useAuth } from '../context/AuthContext';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
+import DerivativeImage from '../components/media/DerivativeImage';
+import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
 
 const C = {
   bg: '#0a1424',
@@ -470,12 +472,12 @@ export default function TimelineScreen({ navigation }) {
             <Text style={styles.emptyText}>No media for this year yet.</Text>
           </View>
         ) : (
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.mediaGrid}>
+          <ViewportScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.mediaGrid}>
             {moments.map((m) => (
-              <View style={styles.media} key={m.entryId}>
+              <ViewportTile style={styles.media} key={m.entryId}>
                 <View style={styles.mediaPhotoWrap}>
                   {m.photos && m.photos[0] ? (
-                    <Image source={{ uri: m.photos[0] }} style={styles.mediaPhoto} />
+                    <DerivativeImage media={m.photos[0]} style={styles.mediaPhoto} />
                   ) : (
                     <View style={[styles.mediaPhoto, styles.mediaPhotoEmpty]} />
                   )}
@@ -489,7 +491,7 @@ export default function TimelineScreen({ navigation }) {
                   {m.title || m.text || 'Memory'}
                 </Text>
                 <Text style={styles.mediaDate}>{monthYear(m.date)}</Text>
-              </View>
+              </ViewportTile>
             ))}
 
             {/* Generational gateway as inline end-cards */}
@@ -506,7 +508,7 @@ export default function TimelineScreen({ navigation }) {
                 <Text style={styles.gatewayYear}>from {parent.birthYear} →</Text>
               </TouchableOpacity>
             ))}
-          </ScrollView>
+          </ViewportScrollView>
         )}
       </View>
     </View>

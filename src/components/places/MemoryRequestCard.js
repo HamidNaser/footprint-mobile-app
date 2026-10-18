@@ -22,6 +22,7 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 // Theme colors
 const PRIMARY_COLOR = '#4361ee';
@@ -219,10 +220,7 @@ const MemoryRequestCard = ({
       {/* Memory preview if asking about specific memory */}
       {memory && memory.media?.[0] && (
         <View style={styles.memoryPreview}>
-          <Image 
-            source={{ uri: typeof memory.media[0] === 'string' ? memory.media[0] : memory.media[0]?.uri }} 
-            style={styles.memoryPreviewImage} 
-          />
+          <DerivativeImage media={memory.media[0]} style={styles.memoryPreviewImage} />
           {memory.caption && (
             <Text style={styles.memoryPreviewCaption} numberOfLines={2}>
               {memory.caption}

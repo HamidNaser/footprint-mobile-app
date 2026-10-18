@@ -25,6 +25,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getQuestionsForMemory } from '../../data/placesData';
 import { pickThenNow } from '../../utils/thenNow';
 import { buildStoryPrompts } from '../../utils/storyPrompts';
+import DerivativeImage from '../media/DerivativeImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -64,7 +65,8 @@ const formatDate = (dateString) => {
  */
 const MediaCarousel = memo(({ media }) => {
   const [index, setIndex] = useState(0);
-  const items = (media || []).filter((m) => m?.uri);
+  // Keep pending photos: a photo that is still being prepared shows its plate, not a gap.
+  const items = (media || []).filter(Boolean);
 
   const onScroll = useCallback((e) => {
     const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
@@ -80,17 +82,17 @@ const MediaCarousel = memo(({ media }) => {
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
-        keyExtractor={(item, i) => `${item.uri}-${i}`}
+        keyExtractor={(item, i) => `${item.id || 'item'}-${i}`}
         onMomentumScrollEnd={onScroll}
         renderItem={({ item }) => (
-          <Image source={{ uri: item.uri }} style={styles.media} resizeMode="cover" />
+          <DerivativeImage media={item} variant="display" style={styles.media} resizeMode="cover" />
         )}
       />
       {items.length > 1 && (
         <View style={styles.dots}>
           {items.map((item, i) => (
             <View
-              key={`${item.uri}-dot-${i}`}
+              key={`${item.id || 'item'}-dot-${i}`}
               style={[styles.dot, i === index && styles.dotActive]}
             />
           ))}

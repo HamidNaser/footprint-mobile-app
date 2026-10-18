@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * SQL statements to create all tables
@@ -73,6 +73,7 @@ export const CREATE_TABLES = {
       server_url TEXT,
       thumbnail_path TEXT,
       thumbnail_server_url TEXT,
+      display_server_url TEXT,
       upload_status TEXT DEFAULT 'pending',
       retry_count INTEGER DEFAULT 0,
       error_message TEXT,

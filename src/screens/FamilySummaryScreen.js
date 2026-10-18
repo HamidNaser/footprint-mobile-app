@@ -29,6 +29,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
+import { ViewportSectionList } from '../components/media/ViewportLists';
 import { useAuth } from '../context/AuthContext';
 import { getJournalBook } from '../services/SocialService';
 import { journalBookToDays } from '../utils/journalBookDays';
@@ -257,7 +258,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
       )}
 
       {status === 'ready' && listSections.length > 0 && (
-        <SectionList
+        <ViewportSectionList
           ref={listRef}
           sections={listSections}
           onScrollToIndexFailed={() => {}}
