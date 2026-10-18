@@ -295,19 +295,21 @@ export const JournalEntryDetail = ({
             <Text style={styles.mediaSectionTitle}>Videos</Text>
             <View style={styles.videoGrid}>
               {videos.map((video, index) => (
-                <TouchableOpacity
-                  key={video.localId || index}
-                  style={styles.videoItem}
-                  onPress={() => openVideoPlayer(video)}
-                >
-                  <VideoThumbnail
-                    media={video}
-                    duration={video.duration}
-                    width={(SCREEN_WIDTH - 48) / 2}
-                    height={100}
-                    showDuration
-                  />
-                </TouchableOpacity>
+                // A failed video's Try again sits beside the touchable, not inside it.
+                <FailedSlot key={video.localId || video.id || index} style={styles.videoItem}>
+                  {(onFailedOwner) => (
+                    <TouchableOpacity onPress={() => openVideoPlayer(video)}>
+                      <VideoThumbnail
+                        media={video}
+                        duration={video.duration}
+                        width={(SCREEN_WIDTH - 48) / 2}
+                        height={100}
+                        showDuration
+                        onFailedOwner={onFailedOwner}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </FailedSlot>
               ))}
             </View>
           </View>

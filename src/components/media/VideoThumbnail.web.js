@@ -8,6 +8,7 @@ import React from 'react';
 import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { thumbnailSource, videoSource } from '../../utils/mediaSource';
+import { VideoPosterTile } from './VideoPosterTile';
 
 /**
  * Generate thumbnail - returns null on web
@@ -39,7 +40,16 @@ export const clearThumbnailCache = async () => {
  * overlay, and a tap calls `onPress({ videoUri, thumbnailUri, duration, media })` with the
  * ORIGINAL (`videoSource`). The original is never an <Image>: with no poster this is a plate.
  */
-export const VideoThumbnail = ({
+export const VideoThumbnail = (props) =>
+  // With a media item the poster is watched by media id (final review I1): same lifecycle as
+  // native, minus the device frame (a browser cannot make one here).
+  props.media && props.thumbnailUri == null && props.videoUri == null ? (
+    <VideoPosterTile width={100} height={100} {...props} />
+  ) : (
+    <LegacyVideoThumbnail {...props} />
+  );
+
+const LegacyVideoThumbnail = ({
   media,
   videoUri: videoUriProp,
   thumbnailUri: thumbnailUriProp,

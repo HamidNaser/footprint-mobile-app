@@ -4,15 +4,17 @@
  * Generates and displays thumbnails for video files.
  * Uses expo-video-thumbnails for thumbnail generation.
  *
- * 007 (FR-024, M12): give it `media` and the tile shows the server's poster frame
- * (`thumbnailSource`) under a play overlay; tapping calls `onPress({ videoUri, thumbnailUri,
- * duration, media })` with `videoUri` = `videoSource(media)`, the ORIGINAL (or the device copy).
- * The original is never an <Image> source: with no poster yet, a frame is generated from the
- * file on the device, and a plate is shown otherwise. `videoUri` / `thumbnailUri` props still
- * work for callers that have not moved to `media`.
+ * 007 (FR-024, M12, final review I1): give it `media` and the poster frame is watched by media
+ * id (VideoPosterTile + useMediaDerivative): "Preparing photo…" until ready, then the poster
+ * under a play overlay, and the failed / unavailable states a photo tile has. Tapping calls
+ * `onPress({ videoUri, thumbnailUri, duration, media })` with `videoUri` = `videoSource(media)`,
+ * the ORIGINAL (or the device copy). The original is never an <Image> source: with no poster
+ * yet, a frame is generated from the file on the device. A host that wraps the tile in its own
+ * touchable passes `onFailedOwner` (FailedSlot). `videoUri` / `thumbnailUri` props still work
+ * for callers that have not moved to `media`.
  */
 
-import React, { useState, useEffect, useCallback, memo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, memo } from 'react';
 import {
   View,
   Image,
@@ -25,6 +27,7 @@ import {
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { Ionicons } from '@expo/vector-icons';
 import { thumbnailSource, videoSource } from '../../utils/mediaSource';
+import { VideoPosterTile, posterMediaOf } from './VideoPosterTile';
 
 /**
  * Format duration in mm:ss
@@ -80,9 +83,50 @@ export const clearThumbnailCache = () => {
 };
 
 /**
+ * With a media item (007, final review I1): the poster is watched by media id through
+ * VideoPosterTile (pending / ready / failed / unavailable). A video still on the device gets a
+ * frame made from that file while the server's poster is not there yet.
+ */
+const MediaVideoThumbnail = ({ media, time = 0, quality = 0.5, onThumbnailGenerated, width = 120, height = 90, ...rest }) => {
+  const devicePath =
+    typeof media.localPath === 'string' && media.localPath && !/^https?:/i.test(media.localPath) ? media.localPath : null;
+  const hasPoster = !!thumbnailSource(posterMediaOf(media));
+  const [frame, setFrame] = useState(null);
+  const onGeneratedRef = useRef(onThumbnailGenerated);
+  onGeneratedRef.current = onThumbnailGenerated;
+
+  useEffect(() => {
+    let live = true;
+    setFrame(null);
+    if (devicePath && !hasPoster) {
+      generateThumbnail(devicePath, { time, quality }).then((uri) => {
+        if (live && uri) {
+          setFrame(uri);
+          onGeneratedRef.current?.(uri);
+        }
+      });
+    }
+    return () => {
+      live = false;
+    };
+  }, [devicePath, hasPoster, time, quality]);
+
+  return <VideoPosterTile media={media} localFrame={frame} width={width} height={height} {...rest} />;
+};
+
+/**
  * VideoThumbnail component
  */
-export const VideoThumbnail = memo(({
+export const VideoThumbnail = memo((props) =>
+  props.media && props.thumbnailUri == null && props.videoUri == null ? (
+    <MediaVideoThumbnail {...props} />
+  ) : (
+    <LegacyVideoThumbnail {...props} />
+  ),
+);
+
+/** The older `videoUri` / `thumbnailUri` props (the compose preview): no media id, nothing to watch. */
+const LegacyVideoThumbnail = ({
   media,
   videoUri: videoUriProp,
   thumbnailUri: thumbnailUriProp,
@@ -221,7 +265,7 @@ export const VideoThumbnail = memo(({
       )}
     </TouchableOpacity>
   );
-});
+};
 
 /**
  * Video thumbnail grid item

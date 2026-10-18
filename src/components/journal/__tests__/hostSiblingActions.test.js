@@ -12,6 +12,8 @@ jest.mock('../../../services/mediaStatusPoller', () => {
 jest.mock('../../media/AudioPlayer', () => ({ AudioPlayer: () => null }));
 jest.mock('react-native-maps', () => ({ __esModule: true, default: () => null, Marker: () => null }));
 jest.mock('expo-video', () => ({ VideoView: () => null, useVideoPlayer: () => ({}) }));
+jest.mock('expo-video-thumbnails', () => ({ getThumbnailAsync: jest.fn(async () => ({ uri: 'file:///generated.jpg' })) }));
+jest.mock('../EngagementSection', () => ({ EngagementSection: () => null }));
 
 import React from 'react';
 import { Text, TouchableOpacity } from 'react-native';
@@ -23,6 +25,9 @@ import { MediaGalleryTab } from '../MediaGalleryTab';
 import { MediaExplorerSheet } from '../MediaExplorerSheet';
 import { JournalEntryDetail } from '../../../screens/JournalEntryDetail';
 import { JournalEntryDetail as JournalEntryDetailWeb } from '../../../screens/JournalEntryDetail.web';
+import { EntryGalleryModal } from '../EntryGalleryModal';
+import { EntryGalleryModal as EntryGalleryModalWeb } from '../EntryGalleryModal.web';
+import { JournalEntryCard } from '../JournalEntryCard';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -74,5 +79,44 @@ describe.each([
   it('puts Try again beside the photo touchable', async () => {
     const entry = { localId: 'e1', date: '2026-10-01', contentBlocks: [{ type: 'photos', media: [PHOTO] }] };
     await expectSiblingRetry(mount(<Detail entry={entry} user={{ id: 'u1', name: 'H' }} />));
+  });
+});
+
+// Final review I1: every host of VideoThumbnail drives the poster by media id, and a failed
+// video's Try again sits beside the host's touchable, never inside it. No Download original.
+describe('video tiles (final review I1)', () => {
+  const VIDEO = { id: 'm1', localId: 'lv1', duration: 3000, thumbnailUrl: null, url: 'https://cdn/m1/original.mp4' };
+  const videoEntry = { localId: 'e1', id: 'e1', userId: 'u1', createdAt: 1, date: '2026-10-01', contentBlocks: [{ type: 'video', media: [VIDEO] }] };
+  const noDownload = (tree) =>
+    expect(tree.root.findAllByType(Text).some((t) => t.props.children === 'Download original')).toBe(false);
+
+  it('MediaGalleryTab video grid item', async () => {
+    const tree = mount(<MediaGalleryTab entries={[videoEntry]} />);
+    await expectSiblingRetry(tree);
+    noDownload(tree);
+  });
+
+  it.each([
+    ['JournalEntryDetail', JournalEntryDetail],
+    ['JournalEntryDetail.web', JournalEntryDetailWeb],
+  ])('%s video grid', async (_name, Detail) => {
+    const tree = mount(<Detail entry={videoEntry} user={{ id: 'u1', name: 'H' }} />);
+    await expectSiblingRetry(tree);
+    noDownload(tree);
+  });
+
+  it.each([
+    ['EntryGalleryModal', EntryGalleryModal],
+    ['EntryGalleryModal.web', EntryGalleryModalWeb],
+  ])('%s video row', async (_name, Gallery) => {
+    const tree = mount(<Gallery visible entry={videoEntry} onClose={() => {}} />);
+    await expectSiblingRetry(tree);
+    noDownload(tree);
+  });
+
+  it('JournalEntryCard video block', async () => {
+    const tree = mount(<JournalEntryCard entry={videoEntry} user={{ id: 'u1', name: 'H' }} currentUserId="u1" showEngagement={false} />);
+    await expectSiblingRetry(tree);
+    noDownload(tree);
   });
 });

@@ -126,20 +126,26 @@ const PhotoGridItem = memo(({ item, onPress }) => (
  * Video grid item
  */
 const VideoGridItem = memo(({ item, onPress }) => (
-  <TouchableOpacity
-    style={styles.gridItem}
-    onPress={() => onPress?.(item)}
-    activeOpacity={0.8}
-  >
-    <VideoThumbnail
-      media={item}
-      duration={item.duration}
-      width={ITEM_SIZE}
-      height={ITEM_SIZE}
-      showDuration
-      showPlayIcon
-    />
-  </TouchableOpacity>
+  // A failed video's Try again sits beside the touchable, not inside it (final review I1).
+  <FailedSlot style={styles.gridItem}>
+    {(onFailedOwner) => (
+      <TouchableOpacity
+        style={{ flex: 1 }}
+        onPress={() => onPress?.(item)}
+        activeOpacity={0.8}
+      >
+        <VideoThumbnail
+          media={item}
+          duration={item.duration}
+          width={ITEM_SIZE}
+          height={ITEM_SIZE}
+          showDuration
+          showPlayIcon
+          onFailedOwner={onFailedOwner}
+        />
+      </TouchableOpacity>
+    )}
+  </FailedSlot>
 ));
 
 /**

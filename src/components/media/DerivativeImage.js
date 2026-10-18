@@ -27,7 +27,8 @@ import { FailedTile, originalUrlOf } from './FailedTile';
  * Legacy: an item with no id and a plain `uri` (the seeded demo memories in data/placesData)
  * renders that uri directly and never polls -- the web id-less bridge.
  *
- * Video tiles do not use this: they keep VideoThumbnail (its poster and play overlay, T078).
+ * Video tiles do not use this: VideoThumbnail renders VideoPosterTile, which drives the poster
+ * through the same hook and the same plates, under a play overlay (T078, final review I1).
  */
 
 export const PHOTO_UNAVAILABLE = 'Photo unavailable';

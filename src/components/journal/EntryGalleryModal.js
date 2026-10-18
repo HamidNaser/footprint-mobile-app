@@ -24,6 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import DerivativeImage from '../media/DerivativeImage';
+import { FailedSlot } from '../media/FailedTile';
 import { parseDateKey } from '../../utils/journalDate';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -111,33 +112,39 @@ const MediaRow = memo(({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.mediaScrollContent}
       >
-        {items.map((item, index) => (
-          <TouchableOpacity
-            key={item.id || index}
-            style={styles.mediaItem}
-            onPress={() => onItemPress?.(items, index)}
-            activeOpacity={0.8}
-          >
-            {type === 'photo' ? (
+        {items.map((item, index) =>
+          type === 'photo' ? (
+            <TouchableOpacity
+              key={item.id || index}
+              style={styles.mediaItem}
+              onPress={() => onItemPress?.(items, index)}
+              activeOpacity={0.8}
+            >
               <DerivativeImage
                 media={item}
                 style={styles.mediaImage}
                 resizeMode="cover"
               />
-            ) : (
-              <View style={styles.videoThumbnailContainer}>
-                <VideoThumbnail
-                  media={item}
-                  width={MEDIA_ITEM_SIZE}
-                  height={MEDIA_ITEM_SIZE}
-                />
-                <View style={styles.playOverlay}>
-                  <Ionicons name="play-circle" size={36} color="#FFF" />
-                </View>
-              </View>
-            )}
-          </TouchableOpacity>
-        ))}
+            </TouchableOpacity>
+          ) : (
+            // A failed video's Try again sits beside the touchable, not inside it (final review
+            // I1). VideoThumbnail draws its own play overlay once there is a poster to show.
+            <FailedSlot key={item.id || index} style={styles.mediaItem}>
+              {(onFailedOwner) => (
+                <TouchableOpacity onPress={() => onItemPress?.(items, index)} activeOpacity={0.8}>
+                  <View style={styles.videoThumbnailContainer}>
+                    <VideoThumbnail
+                      media={item}
+                      width={MEDIA_ITEM_SIZE}
+                      height={MEDIA_ITEM_SIZE}
+                      onFailedOwner={onFailedOwner}
+                    />
+                  </View>
+                </TouchableOpacity>
+              )}
+            </FailedSlot>
+          ),
+        )}
       </ScrollView>
     </View>
   );
