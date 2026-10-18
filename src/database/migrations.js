@@ -212,6 +212,14 @@ export const applyMigration = async (db, migration) => {
     // Run all up statements
     for (const statement of migration.up) {
       if (statement && statement.trim()) {
+        // A fresh install builds its tables from CREATE_TABLES, which already has every
+        // column, and then runs each migration from v1. Adding a column that is there is a
+        // "duplicate column" crash, so look first.
+        const add = /^\s*ALTER TABLE (\w+) ADD COLUMN (\w+)/i.exec(statement);
+        if (add) {
+          const columns = await db.getAllAsync(`PRAGMA table_info(${add[1]})`);
+          if ((columns || []).some((c) => c.name === add[2])) continue;
+        }
         await db.runAsync(statement);
       }
     }
