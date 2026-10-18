@@ -97,7 +97,14 @@ export function SyncStatusBadge({
     isInitialized,
     pendingCount,
     failedCount,
+    refusedMemories,
   } = useSync();
+
+  // Named memories the server refused. The banner already says "N not sent" from the count;
+  // without these that line is a warning light with nothing behind it. Only the banner
+  // shows them -- the dot, badge and inline variants have no room for a sentence, and
+  // inventing a screen for what is usually one row is more surface than the answer needs.
+  const refused = Array.isArray(refusedMemories) ? refusedMemories : [];
 
   // The queue decides, not syncState alone -- IDLE means "no sync running", which is
   // not the same as "nothing left to send".
@@ -193,29 +200,60 @@ export function SyncStatusBadge({
     }
 
     return (
-      <View style={[styles.banner, { backgroundColor: color + '15' }, style]}>
-        <View style={styles.bannerContent}>
-          {showSpinner ? (
-            <ActivityIndicator size="small" color={color} style={styles.bannerIcon} />
-          ) : (
-            <Ionicons name={icon} size={18} color={color} style={styles.bannerIcon} />
-          )}
-          <View style={styles.bannerTextContainer}>
-            <Text style={[styles.bannerText, { color }]}>{text}</Text>
-            {showLastSync && lastSyncTime && (
-              <Text style={styles.bannerLastSync}>
-                Last sync: {formatTimeAgo(lastSyncTime)}
-              </Text>
+      <View style={[styles.bannerGroup, { backgroundColor: color + '15' }, style]}>
+        <View style={styles.banner}>
+          <View style={styles.bannerContent}>
+            {showSpinner ? (
+              <ActivityIndicator size="small" color={color} style={styles.bannerIcon} />
+            ) : (
+              <Ionicons name={icon} size={18} color={color} style={styles.bannerIcon} />
             )}
+            <View style={styles.bannerTextContainer}>
+              <Text style={[styles.bannerText, { color }]}>{text}</Text>
+              {showLastSync && lastSyncTime && (
+                <Text style={styles.bannerLastSync}>
+                  Last sync: {formatTimeAgo(lastSyncTime)}
+                </Text>
+              )}
+            </View>
           </View>
+          {showRetryButton && (syncState === SyncState.ERROR || hasUnsentWork) && (
+            <TouchableOpacity
+              style={[styles.retryButton, { backgroundColor: color }]}
+              onPress={handleRetry}
+            >
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          )}
         </View>
-        {showRetryButton && (syncState === SyncState.ERROR || hasUnsentWork) && (
-          <TouchableOpacity
-            style={[styles.retryButton, { backgroundColor: color }]}
-            onPress={handleRetry}
-          >
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </TouchableOpacity>
+
+        {/*
+          Which memory, and what happened. Rendered only when there is something to say, so
+          nothing refused shows nothing at all rather than an empty notice.
+
+          No action on any of these, deliberately: retry, discard and keep-as-new were all
+          considered and deferred. The Retry button above is the existing whole-queue retry
+          and is unchanged -- a refused operation is settled as `conflict`, which
+          `getPendingOperations` does not offer and `resetFailedOperations` does not re-arm,
+          so pressing it cannot re-send these.
+        */}
+        {refused.length > 0 && (
+          <View style={styles.refusedList}>
+            {refused.map((memory) => (
+              <View key={memory.operationId || memory.localId} style={styles.refusedItem}>
+                {/*
+                  The title is cut to one line; the day gets its own, so a long note can
+                  never push the date off screen. The day is omitted rather than faked when
+                  the queued payload has none -- a refused delete carries only a local id.
+                */}
+                <Text style={styles.refusedTitle} numberOfLines={1}>
+                  {memory.title}
+                </Text>
+                {memory.day ? <Text style={styles.refusedDay}>{memory.day}</Text> : null}
+                <Text style={styles.refusedWhy}>{memory.why}</Text>
+              </View>
+            ))}
+          </View>
         )}
       </View>
     );
@@ -261,6 +299,13 @@ const styles = StyleSheet.create({
   },
 
   // Banner styles
+  //
+  // The tinted background moved out to `bannerGroup` so the refused-memory list sits inside
+  // the same block of colour as the headline rather than on the page behind it. `banner`
+  // keeps the row layout and the padding it always had, so every variant renders as before.
+  bannerGroup: {
+    paddingBottom: 0,
+  },
   banner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -298,6 +343,30 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 12,
     fontWeight: '600',
+  },
+
+  // Refused-memory notice styles
+  refusedList: {
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+  },
+  refusedItem: {
+    marginTop: 6,
+  },
+  refusedTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1C1C1E',
+  },
+  refusedDay: {
+    fontSize: 11,
+    color: '#8E8E93',
+    marginTop: 1,
+  },
+  refusedWhy: {
+    fontSize: 12,
+    color: '#3A3A3C',
+    marginTop: 1,
   },
 });
 
