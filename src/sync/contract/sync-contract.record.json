@@ -1,0 +1,761 @@
+{
+  "_header": [
+    "VENDORED COPY -- this file is NOT the original and is NOT generated here.",
+    "The sync contract is generated in the footprint-backend repository, by",
+    "Footprint.Hub.UnitTests/SyncContract/SyncContractRecordTests.cs, from the real sync DTOs",
+    "using the production JSON serializer. This is a copy of that output, taken by hand.",
+    "",
+    "Do not edit it to make a test pass. If this file and the phone disagree, one of the two is",
+    "wrong and editing the record just moves the disagreement somewhere nobody is looking --",
+    "which is the exact failure this file exists to stop.",
+    "",
+    "To refresh it: regenerate in the backend repository with",
+    "  FOOTPRINT_UPDATE_SYNC_CONTRACT=1 dotnet test Footprint.Hub/src/Footprint.Hub.UnitTests/Footprint.Hub.UnitTests.csproj --filter FullyQualifiedName~SyncContractRecordTests",
+    "copy Footprint.Hub/src/Footprint.Hub.Contracts/Api/Journals/sync-contract.record.json over",
+    "this file, and restore this _header and _provenance block.",
+    "",
+    "NOTHING CHECKS THAT THIS COPY IS CURRENT. The two test suites do not talk to each other, so",
+    "if the backend contract changes and nobody copies it here, the phone keeps passing against a",
+    "stale copy. _provenance below is what makes that diagnosable rather than invisible."
+  ],
+  "_provenance": {
+    "sourceRepository": "footprint-backend",
+    "sourcePath": "Footprint.Hub/src/Footprint.Hub.Contracts/Api/Journals/sync-contract.record.json",
+    "generatedBy": "Footprint.Hub.UnitTests/SyncContract/SyncContractRecordTests.cs",
+    "takenFromBackendBranch": "test/sync-contract-record",
+    "takenOn": "2026-10-17",
+    "isCopy": true,
+    "takenFromBackendCommit": "8e58a2a752ba7577f6de4ed1db05babf149318d4"
+  },
+  "serializerOptions": {
+    "propertyNamingPolicy": "camelCase",
+    "defaultIgnoreCondition": "WhenWritingNull",
+    "propertyNameCaseInsensitive": true,
+    "enumConverter": "JsonStringEnumConverter (see JsonSerializationOptions.GetJsonSerializerOptions)"
+  },
+  "endpoints": {
+    "POST   /api/v1/journals/sync      (request body)": "BatchSyncRequest",
+    "POST   /api/v1/journals/sync      (response body)": "BatchSyncResponse",
+    "GET    /api/v1/journals/changes   (response body)": "SyncChangesResponse",
+    "POST   /api/v1/journals/entries   (request body)": "CreateJournalEntryRequest",
+    "POST   /api/v1/journals/entries   (response body)": "JournalEntryResponse",
+    "PATCH  /api/v1/journals/entries/{entryId} (request body)": "UpdateJournalEntryRequest",
+    "PATCH  /api/v1/journals/entries/{entryId} (response body)": "JournalEntryResponse"
+  },
+  "types": {
+    "AuthorResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.AuthorResponse",
+      "properties": [
+        {
+          "name": "avatar",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "id",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "name",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "BatchSyncRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.BatchSyncRequest",
+      "properties": [
+        {
+          "name": "clientTimestamp",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "creates",
+          "shape": "array<object:CreateSyncEntry>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "deletes",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "updates",
+          "shape": "array<object:UpdateSyncEntry>",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "BatchSyncResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.BatchSyncResponse",
+      "properties": [
+        {
+          "name": "conflicts",
+          "shape": "array<object:SyncConflict>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "created",
+          "shape": "array<object:SyncResultItem>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "deleted",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "serverTimestamp",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "updated",
+          "shape": "array<object:SyncResultItem>",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "ContentBlockRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.ContentBlockRequest",
+      "properties": [
+        {
+          "name": "content",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "duration",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "media",
+          "shape": "array<object:MediaInfoRequest>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "type",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "ContentBlockResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.ContentBlockResponse",
+      "properties": [
+        {
+          "name": "content",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "duration",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "id",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationResponse",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "media",
+          "shape": "array<object:MediaInfoResponse>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "type",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "waveform",
+          "shape": "array<number>",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "CreateJournalEntryRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.CreateJournalEntryRequest",
+      "properties": [
+        {
+          "name": "contentBlocks",
+          "shape": "array<object:ContentBlockRequest>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "date",
+          "shape": "civil-date(CivilDateJsonConverter)",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "datePrecision",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "journalId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "locationSharing",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "sharedWith",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "visibility",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "CreateSyncEntry": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.CreateSyncEntry",
+      "properties": [
+        {
+          "name": "clientId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "contentBlocks",
+          "shape": "array<object:ContentBlockRequest>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "date",
+          "shape": "civil-date(CivilDateJsonConverter)",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "datePrecision",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "journalId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "locationSharing",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "sharedWith",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "visibility",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "JournalEntryResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.JournalEntryResponse",
+      "properties": [
+        {
+          "name": "author",
+          "shape": "object:AuthorResponse",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "commentsCount",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "contentBlocks",
+          "shape": "array<object:ContentBlockResponse>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "createdAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "date",
+          "shape": "civil-date(CivilDateJsonConverter)",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "datePrecision",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "id",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "journalId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationResponse",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "locationSharing",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "needsStory",
+          "shape": "boolean",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "reactions",
+          "shape": "object:ReactionStatsResponse",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "sharedWith",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "updatedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "userId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "visibility",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "LocationRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.LocationRequest",
+      "properties": [
+        {
+          "name": "address",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "lat",
+          "shape": "number",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "lng",
+          "shape": "number",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "name",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "LocationResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Users.LocationResponse",
+      "properties": [
+        {
+          "name": "address",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "lat",
+          "shape": "number",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "lng",
+          "shape": "number",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "name",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "MediaInfoRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.MediaInfoRequest",
+      "properties": [
+        {
+          "name": "height",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "id",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "thumbnailUrl",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "url",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "width",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "MediaInfoResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.MediaInfoResponse",
+      "properties": [
+        {
+          "name": "height",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "id",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationResponse",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "thumbnailUrl",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "url",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "width",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "ReactionStatsResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.ReactionStatsResponse",
+      "properties": [
+        {
+          "name": "likedByMe",
+          "shape": "boolean",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "likes",
+          "shape": "integer",
+          "required": false,
+          "omittedWhenNull": false
+        }
+      ]
+    },
+    "SyncChangesResponse": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.SyncChangesResponse",
+      "properties": [
+        {
+          "name": "deletedIds",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "entries",
+          "shape": "array<object:JournalEntryResponse>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "hasMore",
+          "shape": "boolean",
+          "required": false,
+          "omittedWhenNull": false
+        },
+        {
+          "name": "serverTimestamp",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": false
+        }
+      ]
+    },
+    "SyncConflict": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.SyncConflict",
+      "properties": [
+        {
+          "name": "clientId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "reason",
+          "shape": "string",
+          "required": true,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "serverId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "SyncResultItem": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.SyncResultItem",
+      "properties": [
+        {
+          "name": "clientId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "serverId",
+          "shape": "string",
+          "required": true,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "serverTimestamp",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": false
+        }
+      ]
+    },
+    "UpdateJournalEntryRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.UpdateJournalEntryRequest",
+      "properties": [
+        {
+          "name": "contentBlocks",
+          "shape": "array<object:ContentBlockRequest>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "datePrecision",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "locationSharing",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "sharedWith",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "visibility",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
+    "UpdateSyncEntry": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.UpdateSyncEntry",
+      "properties": [
+        {
+          "name": "clientId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "contentBlocks",
+          "shape": "array<object:ContentBlockRequest>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "datePrecision",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "lastModifiedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "location",
+          "shape": "object:LocationRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "locationSharing",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "serverId",
+          "shape": "string",
+          "required": true,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "sharedWith",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "visibility",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    }
+  }
+}
