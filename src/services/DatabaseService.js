@@ -157,10 +157,10 @@ class DatabaseServiceClass {
     const result = await db.runAsync(
       `INSERT INTO journal_entries (
         local_id, server_id, journal_id, user_id, date, date_precision, content_blocks,
-        location_lat, location_lng, location_name, visibility,
+        location_lat, location_lng, location_name, visibility, location_sharing,
         reactions_likes, reactions_liked_by, comments_count,
         sync_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.localId,
         entry.serverId || null,
@@ -175,6 +175,10 @@ class DatabaseServiceClass {
         entry.location?.lng || null,
         entry.location?.name || null,
         entry.visibility || 'private',
+        // Who may see the exact coordinates. Defaulted here as well as in the schema: an entry
+        // written by older code, or pulled from a server that does not send the field, has no
+        // opinion, and 'private' is the narrowest reading of no opinion.
+        entry.locationSharing || 'private',
         entry.reactions?.likes || 0,
         JSON.stringify(entry.reactions?.likedByUserIds || []),
         entry.commentsCount || 0,
@@ -214,6 +218,12 @@ class DatabaseServiceClass {
     if (updates.visibility !== undefined) {
       fields.push('visibility = ?');
       values.push(updates.visibility);
+    }
+    // Editing a memory can change who sees its exact position, so the edit has to be able to
+    // write it. Without this an entry could only ever carry the level it was created with.
+    if (updates.locationSharing !== undefined) {
+      fields.push('location_sharing = ?');
+      values.push(updates.locationSharing);
     }
     if (updates.syncStatus !== undefined) {
       fields.push('sync_status = ?');
@@ -379,6 +389,10 @@ class DatabaseServiceClass {
       journalId: row.journal_id,
       userId: row.user_id,
       date: row.date,
+      // How much of that date is real (FR-013c). Written since schema v5 and never read back,
+      // so the serialiser's own fallback turned every "sometime in 1998" into 1 January --
+      // see the locationSharing note below for why a read-back gap reaches the wire.
+      datePrecision: row.date_precision,
       contentBlocks: this._normalizeContentBlocks(JSON.parse(row.content_blocks || '[]')),
       location: row.location_lat ? {
         lat: row.location_lat,
@@ -386,6 +400,10 @@ class DatabaseServiceClass {
         name: row.location_name,
       } : null,
       visibility: row.visibility,
+      // The push path reads the row back through here rather than from the queued snapshot
+      // (see SyncEngine._processSingleOperation), so a column that is written but not mapped
+      // never reaches the wire at all. The compose screen also pre-fills the picker from this.
+      locationSharing: row.location_sharing,
       reactions: {
         likes: row.reactions_likes,
         likedByUserIds: JSON.parse(row.reactions_liked_by || '[]'),

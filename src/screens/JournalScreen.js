@@ -599,6 +599,12 @@ export default function JournalScreen({ navigation }) {
         contentBlocks: entryData.contentBlocks,
         visibility: entryData.visibility,
         location: entryData.location,
+        // Who may see the exact coordinates, as the compose screen's picker was set. This
+        // handler copied four fields and dropped this one, so every tap on that control was
+        // thrown away here: nothing reached the database, nothing reached the server, and the
+        // account-wide default applied instead -- which for somebody who had set that default
+        // to Everyone meant the opposite of what they had just chosen.
+        locationSharing: entryData.locationSharing,
         date: entryData.date,
       });
 
