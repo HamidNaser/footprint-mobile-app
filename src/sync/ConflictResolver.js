@@ -39,6 +39,13 @@ export const ResolutionResult = {
   RESOLVED_MERGED: 'resolved_merged',
   REQUIRES_MANUAL: 'requires_manual',
   NO_CONFLICT: 'no_conflict',
+
+  /**
+   * The server refused the change outright and said why. Distinct from
+   * REQUIRES_MANUAL, which means "the two versions disagree and a person must pick one" --
+   * there is no second version here to pick from, only a reason.
+   */
+  SERVER_REFUSED: 'server_refused',
 };
 
 /**
@@ -386,49 +393,46 @@ class ConflictResolverClass {
   // ============================================================
 
   /**
-   * Process conflicts from a batch sync response
-   * @param {array} conflicts - Array of conflict objects from server
-   * @returns {Promise<array>} Resolution results
+   * Normalise the conflicts a batch sync response carries.
+   *
+   * This reads two fields and resolves nothing, which is a deliberate narrowing of what it
+   * used to attempt. Three things were wrong before:
+   *
+   * 1. It read `serverConflict.id` and `serverConflict.serverVersion`. The server's
+   *    conflict object is `{ clientId, serverId, reason }` and has neither -- see
+   *    `SyncConflict` in the Hub's `JournalDtos.cs`. So `getByServerId(undefined)` became
+   *    `WHERE server_id = NULL`, matched no row, and every single refusal came back as
+   *    "no conflict / local entry not found" and was then filtered away by the caller.
+   * 2. `reason` -- the one field the server actually fills, with text like "Entry not
+   *    found" or "Not authorized to update this entry" -- was never read at all.
+   * 3. It tried to *resolve* the refusal. It cannot: a batch conflict carries no server
+   *    version, so `detectConflict` had nothing to compare against (and would in fact
+   *    have thrown on `serverVersion.updatedAt` the moment the id lookup started
+   *    succeeding). Deciding what to do about a refusal needs either a re-fetch or a
+   *    change to the contract, and neither is this function's business.
+   *
+   * The local lookup is gone too. The caller is pushing a queue and already holds the
+   * operation each refusal belongs to, so it can correlate without a database round trip
+   * -- and without the `undefined` id trap that started all this.
+   *
+   * The pull path's resolution machinery above (`detectConflict`, `resolveConflict` and
+   * the strategies) is untouched and still used by `SyncEngine._processServerEntry`.
+   *
+   * @param {array} conflicts - `{ clientId, serverId, reason }` objects from the server
+   * @returns {Promise<array>} one normalised refusal per conflict, in the same order
    */
   async processServerConflicts(conflicts) {
-    const results = [];
-
-    for (const serverConflict of conflicts) {
-      // Get local entry
-      const localEntry = await JournalRepository.getByServerId(serverConflict.id);
-      
-      if (!localEntry) {
-        // Entry doesn't exist locally anymore - skip
-        results.push({
-          serverId: serverConflict.id,
-          result: ResolutionResult.NO_CONFLICT,
-          message: 'Local entry not found',
-        });
-        continue;
-      }
-
-      // Detect conflict type
-      const conflict = this.detectConflict(localEntry, serverConflict.serverVersion);
-      
-      if (!conflict) {
-        results.push({
-          serverId: serverConflict.id,
-          localId: localEntry.localId,
-          result: ResolutionResult.NO_CONFLICT,
-        });
-        continue;
-      }
-
-      // Resolve conflict
-      const resolution = await this.resolveConflict(conflict);
-      results.push({
-        serverId: serverConflict.id,
-        localId: localEntry.localId,
-        ...resolution,
-      });
-    }
-
-    return results;
+    return (conflicts || []).map((serverConflict) => ({
+      // Correlates a refused create. The server sends `ServerId = string.Empty` for those,
+      // so this is the only field that can identify one.
+      clientId: serverConflict.clientId || null,
+      // Empty string normalised to null so "no server id" is one value, not two.
+      serverId: serverConflict.serverId || null,
+      // The server always fills this (`Reason` is required on the DTO). The fallback is
+      // only so a future contract change cannot silently produce a blank reason.
+      reason: serverConflict.reason || 'The server refused this change without saying why',
+      result: ResolutionResult.SERVER_REFUSED,
+    }));
   }
 
   // ============================================================

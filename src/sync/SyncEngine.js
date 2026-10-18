@@ -229,6 +229,10 @@ class SyncEngineClass {
       conflicts: 0,
       errors: 0,
       mediaUploaded: 0,
+      // One entry per change the server refused, each carrying the server's own reason.
+      // Empty on a sync where nothing was refused, which is every sync that used to
+      // report a clean result whether it deserved one or not.
+      conflictDetails: [],
     };
 
     try {
@@ -247,6 +251,7 @@ class SyncEngineClass {
       results.pushed = pushResult.succeeded;
       results.errors += pushResult.failed;
       results.conflicts += pushResult.conflicts;
+      results.conflictDetails.push(...pushResult.conflictDetails);
 
       // Step 3: Pull remote changes
       const pullResult = await this._pullRemoteChanges();
@@ -257,7 +262,12 @@ class SyncEngineClass {
       console.log('[SyncEngine] Sync completed in', duration, 'ms', results);
 
       return {
-        success: true,
+        // The sync ran to completion, but a refusal is not a success: a caller that
+        // checks only this field must not be told everything went through when a memory
+        // was turned away. Keyed on conflicts alone, deliberately -- `errors` covers
+        // transient failures that reported success before and still do, so folding them
+        // in here would change the behaviour of syncs that have no conflicts at all.
+        success: results.conflicts === 0,
         duration,
         ...results,
       };
@@ -270,7 +280,7 @@ class SyncEngineClass {
    * Push local changes to server
    */
   async _pushLocalChanges() {
-    const result = { succeeded: 0, failed: 0, conflicts: 0 };
+    const result = { succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [] };
 
     // Get pending operations from queue
     const operations = await SyncQueue.getPendingOperations();
@@ -374,14 +384,77 @@ class SyncEngineClass {
         }
       }
 
-      // Handle conflicts
+      // Handle conflicts -- that is, the entries the server refused.
+      //
+      // Every one of these must be *settled*. Left pending, the operation is picked up by
+      // the next sync and the next one after that, re-sending something the server has
+      // already said no to, for as long as the app is installed -- and because the refusal
+      // used to be discarded, `sync()` reported a clean success throughout. A memory the
+      // server would not accept sat on the phone indefinitely with nothing to show it.
+      //
+      // Settled as CONFLICT rather than FAILED, which is a deliberate departure from
+      // "mark it failed":
+      //   - `getPendingOperations()` takes PENDING, plus FAILED with retry_count < 3.
+      //     CONFLICT appears in neither, so the re-sending stops immediately rather than
+      //     after two more pointless round trips.
+      //   - `markFailed` increments retry_count, spending a budget that exists for flaky
+      //     networks. "Not authorized to update this entry" is not flaky; it will be
+      //     refused identically every time.
+      //   - `resetFailedOperations()` -- what `retryFailed()` calls -- resets FAILED rows
+      //     back to PENDING. A refusal re-armed that way starts the loop again.
+      //   - It is already visible without any new UI: `SyncQueue.getStats()` counts it,
+      //     and SyncContext already folds `stats.conflict` into its failed count, which
+      //     `syncBadgeStatus` renders as a failure.
+      // No new column and no new status: `conflict` and `conflict_data` both already
+      // exist and are already what the single-operation path uses.
       if (batchResult.conflicts && batchResult.conflicts.length > 0) {
-        const conflictResults = await ConflictResolver.processServerConflicts(
+        const refusals = await ConflictResolver.processServerConflicts(
           batchResult.conflicts
         );
-        result.conflicts = conflictResults.filter(
-          r => r.result !== ResolutionResult.NO_CONFLICT
-        ).length;
+
+        for (const refusal of refusals) {
+          const op = this._findRefusedOperation(refusal, { creates, updates, deletes });
+
+          if (op) {
+            await SyncQueue.markConflict(op.id, {
+              result: refusal.result,
+              reason: refusal.reason,
+              serverId: refusal.serverId,
+              clientId: refusal.clientId,
+              refusedAt: new Date().toISOString(),
+            });
+          } else {
+            // Reported, not swallowed. A refusal we cannot tie to an operation still has
+            // to be counted, or we are back to claiming a clean sync. It happens today
+            // for a refused *create*: the server can only echo `ClientId`, and this client
+            // sends the local id as `localId`, so it comes back null. That correlation gap
+            // is PR #42's, not this change's.
+            console.warn(
+              '[SyncEngine] Server refused a change that matches no queued operation:',
+              { clientId: refusal.clientId, serverId: refusal.serverId, reason: refusal.reason }
+            );
+          }
+
+          result.conflicts++;
+          result.conflictDetails.push({
+            reason: refusal.reason,
+            serverId: refusal.serverId,
+            clientId: refusal.clientId,
+            operationId: op?.id || null,
+            operationType: op?.type || null,
+            localId: op?.entityId || null,
+            // False means the operation could not be identified, so it is still pending
+            // and will be re-sent. Said out loud rather than implied.
+            settled: Boolean(op),
+          });
+
+          this._emit(SyncEvent.CONFLICT, {
+            localId: op?.entityId || null,
+            serverId: refusal.serverId,
+            reason: refusal.reason,
+            resolution: refusal.result,
+          });
+        }
       }
 
     } catch (error) {
@@ -488,6 +561,39 @@ class SyncEngineClass {
     }
 
     return result;
+  }
+
+  /**
+   * Find the queued operation a server refusal belongs to.
+   *
+   * Server id first, because it is unambiguous and it is what a refused update or delete
+   * carries. Client id second, because a refused *create* has `ServerId = string.Empty`
+   * (see `BatchSync` in the Hub's JournalsController) and `ClientId` is then the only
+   * correlating field there is.
+   *
+   * Returns null when neither matches, which the caller reports rather than ignores.
+   *
+   * @param {object} refusal - normalised `{ clientId, serverId, reason }`
+   * @param {object} queued - the `creates` / `updates` / `deletes` operations just pushed
+   */
+  _findRefusedOperation(refusal, { creates, updates, deletes }) {
+    if (refusal.serverId) {
+      const byServerId =
+        updates.find(op => op.serverId === refusal.serverId) ||
+        deletes.find(op => op.serverId === refusal.serverId);
+      if (byServerId) return byServerId;
+    }
+
+    if (refusal.clientId) {
+      // Both spellings: the queued payload is a SQLite row (`local_id`) on some paths and
+      // an in-memory entry (`localId`) on others.
+      const byClientId = creates.find(
+        op => (op.data?.local_id || op.data?.localId) === refusal.clientId
+      );
+      if (byClientId) return byClientId;
+    }
+
+    return null;
   }
 
   /**
