@@ -10,6 +10,7 @@ import { SyncEngine, SyncQueue, SyncState, SyncEvent } from '../sync';
 import { useAuth } from './AuthContext';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { SignalRService, SignalREvents } from '../services/SignalRService';
+import { refusedMemoriesFrom } from '../utils/refusedMemories';
 
 const SyncContext = createContext(null);
 
@@ -28,6 +29,12 @@ export function SyncProvider({ children }) {
   const [pendingCount, setPendingCount] = useState(0);
   const [failedCount, setFailedCount] = useState(0);
 
+  // The memories the server refused, named and explained. The count above already reaches
+  // the badge as "N not sent", which tells a person something is wrong and nothing about
+  // which memory or why. These are read in the same pass as the count, from the same rows,
+  // so the number and the detail beside it can never disagree.
+  const [refusedMemories, setRefusedMemories] = useState([]);
+
   const refreshQueueCounts = useCallback(async () => {
     try {
       const stats = await SyncQueue.getStats();
@@ -35,6 +42,14 @@ export function SyncProvider({ children }) {
       // failures: both need a person, and neither clears on its own.
       setPendingCount(stats.pending + stats.inProgress);
       setFailedCount(stats.failed + stats.conflict);
+
+      // Skip the second query when there is nothing refused -- the common case by far, and
+      // this runs on every queue notification.
+      setRefusedMemories(
+        stats.conflict > 0
+          ? refusedMemoriesFrom(await SyncQueue.getConflictedOperations())
+          : []
+      );
     } catch (error) {
       console.error('[SyncContext] Could not read queue counts:', error);
     }
@@ -183,6 +198,9 @@ export function SyncProvider({ children }) {
       setLastSyncTime(null);
       setPendingCount(0);
       setFailedCount(0);
+      // Cleared with the counts: another person's refused memory must not stay named on
+      // screen after they have signed out.
+      setRefusedMemories([]);
     }
   }, [isAuthenticated, isInitialized]);
 
@@ -219,6 +237,7 @@ export function SyncProvider({ children }) {
     isInitialized,
     pendingCount,
     failedCount,
+    refusedMemories,
 
     // Computed
     isOnline: syncState !== SyncState.OFFLINE,

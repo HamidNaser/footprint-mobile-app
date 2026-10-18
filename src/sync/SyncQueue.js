@@ -181,6 +181,37 @@ class SyncQueueClass {
   }
 
   /**
+   * Get the operations the server refused, newest refusal first.
+   *
+   * These are the rows `getStats()` counts as `conflict` and that `SyncContext` folds into
+   * the sync badge, so the badge's number and any detail shown beside it are read from one
+   * place and cannot disagree. Reading the detail instead from the `conflictDetails` array
+   * that `_pushLocalChanges` returns would be wrong twice over: it is gone after an app
+   * restart, while these rows and the badge count both survive it, and it is empty after a
+   * sync that pushed nothing -- which would leave the badge saying "1 not sent" with
+   * nothing behind it, exactly the gap this exists to close.
+   *
+   * Ordered by `updated_at`, which `markConflict` stamps, rather than by `created_at`: what
+   * matters is when the server said no, not when the edit was made.
+   *
+   * @param {number} limit - Maximum operations to return
+   * @returns {Promise<array>} Refused operations, each with its `conflictData`
+   */
+  async getConflictedOperations(limit = 50) {
+    const db = await getDatabase();
+
+    const rows = await db.getAllAsync(
+      `SELECT * FROM sync_queue
+       WHERE status = ?
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+      [OperationStatus.CONFLICT, limit]
+    );
+
+    return rows.map(row => this._formatOperation(row));
+  }
+
+  /**
    * Get count of pending operations
    */
   async getPendingCount() {
