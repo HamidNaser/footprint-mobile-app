@@ -30,10 +30,17 @@ export const failedLabel = (media) => `This ${media?.kind === 'video' ? 'video' 
 export const RETRY_ERROR_TEXT = "Couldn't try again just now. Please try later.";
 const SMALL_PX = 60;
 
-/** Where the original lives, for Download original. Never the device copy: that one is not failed. */
+/**
+ * Where the original lives, for Download original. The server's `originalUrl` comes first: it
+ * is sent only to the media's owner (I3, MEDIA-Q3 option A) and is the only original a
+ * list-shape item (places, lifeline, holding area) carries. Then the stored server original
+ * (journal items). Only a web address: never the device copy, which is not failed and is not
+ * the server's to offer.
+ */
+const isWebAddress = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
 export function originalUrlOf(media) {
-  const url = media?.serverUrl || media?.url;
-  return typeof url === 'string' && url ? url : null;
+  if (!media) return null;
+  return [media.originalUrl, media.serverUrl, media.url].find(isWebAddress) || null;
 }
 
 export function openOriginal(url) {

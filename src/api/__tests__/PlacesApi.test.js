@@ -182,6 +182,26 @@ describe('media-item shape (contracts/media-item.md)', () => {
     expect(place.image.unresolved).toBe(true);
     expect(place.image.id).toBeNull();
   });
+
+  // I3 / MEDIA-Q3 option A: `originalUrl` is present only for the media's owner. It must
+  // survive the adapters onto every list surface, and its absence must stay an absence.
+  it('carries the owner-only originalUrl on image, photos and memory media; omitted stays omitted', async () => {
+    const mine = item('mine', { originalUrl: 'https://cdn/mine/original.heic' });
+    ApiClient.get.mockResolvedValue({ places: [{ id: 'p', name: 'X', image: mine, years: [] }] });
+    const [place] = await getPlaces();
+    expect(place.image.originalUrl).toBe('https://cdn/mine/original.heic');
+    expect(place.photos[0].originalUrl).toBe('https://cdn/mine/original.heic');
+
+    const detail = detailFixture();
+    detail.years[0].memories[0].photos = [mine, item('theirs')];
+    ApiClient.get.mockResolvedValue(detail);
+    const adapted = await getPlace('paris');
+    const [mineOut, theirsOut] = adapted.years[0].memories[0].media;
+    expect(mineOut.originalUrl).toBe('https://cdn/mine/original.heic');
+    expect('originalUrl' in theirsOut).toBe(false);
+    expect(adapted.photos.find((p) => p.id === 'mine').originalUrl).toBe('https://cdn/mine/original.heic');
+    expect('originalUrl' in adapted.photos.find((p) => p.id === 'theirs')).toBe(false);
+  });
 });
 
 describe('getPlace', () => {

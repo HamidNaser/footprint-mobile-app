@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaDerivative } from '../../hooks/useMediaDerivative';
-import { FailedActions, FailedTile } from './FailedTile';
+import { FailedActions, FailedTile, originalUrlOf } from './FailedTile';
 import { PHOTO_NOT_UPLOADED, PHOTO_PREPARING, PHOTO_UNAVAILABLE, SMALL_TILE_PX } from './DerivativeImage';
 import { videoSource } from '../../utils/mediaSource';
 
@@ -17,9 +17,10 @@ import { videoSource } from '../../utils/mediaSource';
  *                                   (`localFrame`), else "Preparing photo…"
  *  - unavailable / loadFailed ..... "Photo unavailable"
  *  - failed ....................... the owner (the server sent a `failureReason`) gets "This video
- *                                   couldn't be prepared", the reason and Try again; anyone else
- *                                   gets "Photo unavailable" (fails closed). No Download original
- *                                   on a video: that waits on the owner's decision (I3).
+ *                                   couldn't be prepared", the reason, Try again and Download
+ *                                   original (when there is an original address: the owner-only
+ *                                   `originalUrl` first, I3); anyone else gets "Photo unavailable"
+ *                                   with no actions (fails closed).
  *
  * The tile is itself a touchable (tapping plays the original), so Try again is never put inside
  * it: a host whose own touchable wraps the tile passes `onFailedOwner` and renders the actions
@@ -85,13 +86,14 @@ export function VideoPosterTile({
   const posterShown = !neverUploaded && !!src && (state === 'idle' || state === 'ready');
   const frameShown = !posterShown && !neverUploaded && !!localFrame && (state === 'idle' || state === 'pending');
   const shownUri = posterShown ? src : frameShown ? localFrame : null;
+  const originalUrl = ownerFailed ? originalUrlOf(media) : null;
 
   // A host that wraps this tile in its own touchable takes the owner's actions (FailedSlot).
   const onFailedOwnerRef = useRef(onFailedOwner);
   onFailedOwnerRef.current = onFailedOwner;
   useEffect(() => {
-    onFailedOwnerRef.current?.(ownerFailed ? { tryAgain, retrying, retryError, originalUrl: null } : null);
-  }, [ownerFailed, tryAgain, retrying, retryError]);
+    onFailedOwnerRef.current?.(ownerFailed ? { tryAgain, retrying, retryError, originalUrl } : null);
+  }, [ownerFailed, tryAgain, retrying, retryError, originalUrl]);
   useEffect(() => () => onFailedOwnerRef.current?.(null), []);
 
   let content;
@@ -101,11 +103,10 @@ export function VideoPosterTile({
     content = <Plate width={width} height={height} testID="media-unavailable" label={PHOTO_UNAVAILABLE} />;
   } else if (state === 'failed') {
     content = failureReason ? (
-      // Words only inside the touchable; the actions go beside it. `url` is withheld so the
-      // tile cannot offer Download original (I3).
+      // Words only inside the touchable; the actions (with Download original) go beside it.
       <FailedTile
         style={{ width, height }}
-        media={{ ...posterMedia, url: null, serverUrl: null }}
+        media={posterMedia}
         failureReason={failureReason}
         showActions={false}
       />
@@ -156,7 +157,7 @@ export function VideoPosterTile({
       <View style={[{ width, height }, style]}>
         {tile}
         <View style={styles.slotActions} pointerEvents="box-none">
-          <FailedActions actions={{ tryAgain, retrying, retryError, originalUrl: null }} />
+          <FailedActions actions={{ tryAgain, retrying, retryError, originalUrl }} />
         </View>
       </View>
     );

@@ -219,3 +219,41 @@ describe('displayUrl round trip', () => {
     expect(block.media[0].displayUri).toBeNull();
   });
 });
+
+describe('thumbnail fallback (fb26945 concern 1, FR-023)', () => {
+  it('a media id never falls back to the original: no thumbnail means none, so the tile watches', () => {
+    const [block] = DatabaseService._normalizeContentBlocks([
+      {
+        media: [
+          { id: 'srv-1', url: 'https://cdn/orig.heic' },
+          { mediaId: 'srv-2', serverUrl: 'https://cdn/orig2.heic' },
+        ],
+      },
+    ]);
+    for (const m of block.media) {
+      expect(m.thumbnailUrl).toBeNull();
+      expect(m.thumbnailUri).toBeNull();
+    }
+    expect(block.media[0].serverUrl).toBe('https://cdn/orig.heic'); // still kept, for download/playback
+  });
+
+  it('a media id with a device copy still previews the device copy', () => {
+    const [block] = DatabaseService._normalizeContentBlocks([
+      { media: [{ id: 'srv-1', localPath: 'file:///a.jpg', url: 'https://cdn/orig.heic' }] },
+    ]);
+    expect(block.media[0].thumbnailUri).toBe('file:///a.jpg');
+  });
+
+  it('an id-less legacy item keeps its old fallback', () => {
+    const [block] = DatabaseService._normalizeContentBlocks([{ media: [{ url: 'https://cdn/old.jpg' }] }]);
+    expect(block.media[0].thumbnailUri).toBe('https://cdn/old.jpg');
+  });
+
+  it('carries the owner-only originalUrl through untouched (I3)', () => {
+    const [block] = DatabaseService._normalizeContentBlocks([
+      { media: [{ id: 'srv-1', url: 'https://cdn/o', originalUrl: 'https://cdn/o' }, { id: 'srv-2', url: 'https://cdn/p' }] },
+    ]);
+    expect(block.media[0].originalUrl).toBe('https://cdn/o');
+    expect('originalUrl' in block.media[1]).toBe(false); // omitted stays omitted
+  });
+});
