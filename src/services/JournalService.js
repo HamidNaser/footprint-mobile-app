@@ -6,7 +6,7 @@
  * Provides a clean API for UI components to interact with journal entries.
  */
 
-import { JournalRepository, EntryVisibility, SortOrder } from '../repositories/JournalRepository';
+import { JournalRepository, EntryVisibility, LocationSharing, SortOrder } from '../repositories/JournalRepository';
 import { FileService, MediaType } from './FileService';
 import { DatabaseService } from './DatabaseService';
 import { SettingsService, StorageMode } from './SettingsService';
@@ -151,6 +151,10 @@ class JournalServiceClass {
     contentBlocks = [],
     location = null,
     visibility = EntryVisibility.PRIVATE,
+    // Who may see the exact coordinates, picked per memory. Named explicitly because this
+    // signature destructures: a field that is not listed here is silently dropped, which is
+    // how the compose screen's answer went missing between the screen and the database.
+    locationSharing = LocationSharing.PRIVATE,
   }) {
     console.log('[JournalService] createEntry:', { journalId, userId, visibility, contentBlockCount: contentBlocks.length });
     
@@ -169,6 +173,7 @@ class JournalServiceClass {
       contentBlocks: durableBlocks,
       location,
       visibility,
+      locationSharing,
     });
 
     // Queue media for upload if there are media blocks
@@ -880,7 +885,7 @@ class JournalServiceClass {
 export const JournalService = new JournalServiceClass();
 
 // Re-export related types
-export { EntryVisibility, SortOrder } from '../repositories/JournalRepository';
+export { EntryVisibility, LocationSharing, SortOrder } from '../repositories/JournalRepository';
 export { ContentBlockType } from '../database/schema';
 export { MediaType } from './FileService';
 

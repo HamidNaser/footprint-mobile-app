@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * SQL statements to create all tables
@@ -36,6 +36,14 @@ export const CREATE_TABLES = {
       location_lng REAL,
       location_name TEXT,
       visibility TEXT DEFAULT 'private',
+      -- Who may see this memory's EXACT coordinates: private | family | everyone. Distinct from
+      -- \`visibility\`, which decides who sees the memory at all; anybody below this level sees a
+      -- coarsened (~1km) position instead. The compose screen has offered this control per
+      -- memory from the start and there was nowhere to put the answer, so it was discarded and
+      -- the account-wide default applied -- the opposite of what the person had just tapped.
+      -- Defaulted to 'private' rather than nullable: it is the value the picker shows, and the
+      -- narrowest, so a row with no explicit answer can only ever under-share.
+      location_sharing TEXT NOT NULL DEFAULT 'private',
       reactions_likes INTEGER DEFAULT 0,
       reactions_liked_by TEXT,
       comments_count INTEGER DEFAULT 0,

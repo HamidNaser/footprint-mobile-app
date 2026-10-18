@@ -18,7 +18,7 @@ const CACHED_ADDRESS_KEYS = [
 const isRemoteAddress = (v) => typeof v === 'string' && /^(https?:\/\/|\/)/i.test(v);
 
 /**
- * v6 step: drop cached rendition addresses from every entry's media. mediaSource ignores
+ * v7 step: drop cached rendition addresses from every entry's media. mediaSource ignores
  * the retired ones and the status poller supplies the new ones. Device paths are left alone.
  */
 async function clearCachedMediaAddresses(db) {
@@ -213,6 +213,28 @@ export const migrations = [
   },
   {
     version: 6,
+    description: "journal_entries.location_sharing, so a per-memory 'who sees the exact spot' choice is kept",
+    up: [
+      // Every phone in the wild is on v5, and a column declared only in CREATE_TABLES reaches
+      // fresh installs and nobody else -- the same trap v4 and v5 exist to avoid.
+      //
+      // SQLite applies the DEFAULT to rows that are already there, so no backfill is needed --
+      // and none is wanted. 'private' is the narrowest level and the one the picker has always
+      // shown, so an entry written before this column existed can only read back as sharing
+      // its exact position with nobody. Backfilling the account-wide default instead would
+      // widen rows nobody chose to widen, which is the one mistake with no safe side.
+      "ALTER TABLE journal_entries ADD COLUMN location_sharing TEXT NOT NULL DEFAULT 'private';",
+    ],
+    down: [
+      // SQLite cannot drop a column without rebuilding the table, and rebuilding one to undo an
+      // additive change risks the rows it is protecting. Left deliberately empty, as v5 is: the
+      // column is harmless to an older build, which simply ignores it.
+    ],
+  },
+  {
+    // 007 first wrote this as v6. main shipped its own v6 (location_sharing, PR #43) before
+    // 007 merged, so this goes on top: a phone already on main's v6 would skip a second v6.
+    version: 7,
     description: 'media_queue.display_server_url, and clear cached thumbnail/display addresses (007 R10)',
     up: [
       'ALTER TABLE media_queue ADD COLUMN display_server_url TEXT;',

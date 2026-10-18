@@ -230,7 +230,9 @@ describe('what is actually sent (C3)', () => {
   it('sends the same in the one-by-one fallback', async () => {
     SyncQueue.getPendingOperations.mockResolvedValue([op({ data: stale })]);
     DatabaseService.getEntryByLocalId.mockResolvedValue(entryWith([uploaded]));
-    JournalApi.batchSync.mockRejectedValue(new Error('boom'));
+    // A 400: the server answered and committed nothing, which is the only kind of batch
+    // failure after which main (#42) lets a create fall back to the single endpoint.
+    JournalApi.batchSync.mockRejectedValue(Object.assign(new Error('bad request'), { status: 400 }));
 
     await SyncEngine._pushLocalChanges();
 

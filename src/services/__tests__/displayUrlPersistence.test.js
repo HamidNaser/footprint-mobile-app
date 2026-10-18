@@ -27,7 +27,8 @@ describe('display address column', () => {
     expect(m).toBeDefined();
     expect(m.up.join('\n')).toMatch(/ALTER TABLE media_queue ADD COLUMN display_server_url/i);
     expect(m.version).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(6);
+    // v7, not v6: main shipped its own v6 (location_sharing) first, and a shipped number is fixed.
+    expect(SCHEMA_VERSION).toBe(7);
   });
 
   it('is read and written by the media row mapping', async () => {
@@ -151,7 +152,7 @@ describe('migration safety', () => {
 
   it('runs every step and the version insert inside one exclusive transaction', async () => {
     const { db, calls } = sqliteLikeDb({ media_queue: [], journal_entries: [] });
-    await applyMigration(db, v(6));
+    await applyMigration(db, v(7));
 
     expect(db.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
     expect(calls.direct).toEqual([]); // nothing escaped the transaction
@@ -164,23 +165,25 @@ describe('migration safety', () => {
       if (/PRAGMA/i.test(sql)) return [];
       throw new Error('disk full');
     });
-    await expect(applyMigration(db, v(6))).rejects.toThrow('disk full');
+    await expect(applyMigration(db, v(7))).rejects.toThrow('disk full');
     expect(calls.txn.some((s) => /schema_version/i.test(s))).toBe(false);
   });
 
   it('is a no-op when run a second time', async () => {
     const { db } = sqliteLikeDb({ media_queue: [], journal_entries: [] });
-    await applyMigration(db, v(6));
-    await expect(applyMigration(db, v(6))).resolves.toBe(true);
+    await applyMigration(db, v(7));
+    await expect(applyMigration(db, v(7))).resolves.toBe(true);
   });
 
-  it('succeeds on a fresh install, where CREATE_TABLES already has the columns (v5 and v6)', async () => {
+  it('succeeds on a fresh install, where CREATE_TABLES already has the columns (v5, v6 and v7)', async () => {
     const { db } = sqliteLikeDb({
       media_queue: ['local_id', 'display_server_url'],
-      journal_entries: ['local_id', 'date_precision'],
+      journal_entries: ['local_id', 'date_precision', 'location_sharing'],
     });
     await expect(applyMigration(db, v(5))).resolves.toBe(true);
+    // main's v6 has no guard of its own; the shared one in applyMigration covers it.
     await expect(applyMigration(db, v(6))).resolves.toBe(true);
+    await expect(applyMigration(db, v(7))).resolves.toBe(true);
   });
 
   it('still adds the column when it is genuinely missing', async () => {
@@ -188,7 +191,9 @@ describe('migration safety', () => {
     const { db } = sqliteLikeDb(columns);
     await applyMigration(db, v(5));
     await applyMigration(db, v(6));
+    await applyMigration(db, v(7));
     expect(columns.journal_entries).toContain('date_precision');
+    expect(columns.journal_entries).toContain('location_sharing');
     expect(columns.media_queue).toContain('display_server_url');
   });
 });

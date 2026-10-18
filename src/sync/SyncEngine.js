@@ -229,6 +229,10 @@ class SyncEngineClass {
       conflicts: 0,
       errors: 0,
       mediaUploaded: 0,
+      // One entry per change the server refused, each carrying the server's own reason.
+      // Empty on a sync where nothing was refused, which is every sync that used to
+      // report a clean result whether it deserved one or not.
+      conflictDetails: [],
     };
 
     try {
@@ -247,6 +251,7 @@ class SyncEngineClass {
       results.pushed = pushResult.succeeded;
       results.errors += pushResult.failed;
       results.conflicts += pushResult.conflicts;
+      results.conflictDetails.push(...pushResult.conflictDetails);
 
       // Step 3: Pull remote changes
       const pullResult = await this._pullRemoteChanges();
@@ -257,7 +262,12 @@ class SyncEngineClass {
       console.log('[SyncEngine] Sync completed in', duration, 'ms', results);
 
       return {
-        success: true,
+        // The sync ran to completion, but a refusal is not a success: a caller that
+        // checks only this field must not be told everything went through when a memory
+        // was turned away. Keyed on conflicts alone, deliberately -- `errors` covers
+        // transient failures that reported success before and still do, so folding them
+        // in here would change the behaviour of syncs that have no conflicts at all.
+        success: results.conflicts === 0,
         duration,
         ...results,
       };
@@ -270,7 +280,7 @@ class SyncEngineClass {
    * Push local changes to server
    */
   async _pushLocalChanges() {
-    const result = { succeeded: 0, failed: 0, conflicts: 0 };
+    const result = { succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [] };
 
     // Get pending operations from queue
     const operations = await this._withoutHeldEntries(
@@ -304,9 +314,18 @@ class SyncEngineClass {
       }
     }
 
-    // Try batch sync first
+    // Try batch sync first.
+    //
+    // The network call, and NOTHING else, belongs inside this try. The result processing
+    // below writes to SQLite -- JournalRepository.markSynced and SyncQueue.markCompleted
+    // -- and a locked database or a full disk throwing from there used to land in the
+    // fallback's catch, which re-sends every operation in the batch, including the ones
+    // the server had just accepted. That made a second copy on the server, and because
+    // the local row then carried the retry's server id the first copy was orphaned and
+    // pulled back down as a brand-new entry: two memories on the person's own phone.
+    let batchResult;
     try {
-      const batchResult = await JournalApi.batchSync({
+      batchResult = await JournalApi.batchSync({
         creates: creates.map(op => op.data),
         updates: updates.map(op => ({
           entry: op.data,
@@ -315,10 +334,32 @@ class SyncEngineClass {
         })),
         deletes: deletes.map(op => op.serverId).filter(Boolean),
       });
+    } catch (error) {
+      return await this._fallbackToSingleOperations(operations, result, error);
+    }
 
-      // Process results
+    try {
+      // Process results.
+      //
+      // The reply is keyed by `clientId`, not `localId` -- SyncResultItem.ClientId, which
+      // the Hub's camelCase policy serialises as `clientId`. Matching on `localId` found
+      // nothing, so the operation was never marked completed and the next sync pushed it
+      // again, producing a duplicate memory every retry. The local column is still
+      // `local_id`; only the wire name is the server's.
       for (const created of batchResult.created) {
-        const op = creates.find(o => o.data.local_id === created.localId);
+        // A reply item with no correlation id cannot be matched to anything. Without this
+        // guard `undefined === undefined` was true, so such an item matched the first
+        // create that also had no `local_id` -- and two of them matched that same one
+        // twice: one operation claimed and stamped with the wrong server id, the other
+        // left pending forever and re-pushed, uncorrelatable, on every sync. The Hub omits
+        // `clientId` rather than writing null (JsonIgnoreCondition.WhenWritingNull), so
+        // the absent case is the normal one, not an exotic one.
+        if (!created.clientId) {
+          console.warn('[SyncEngine] Batch reply item has no clientId; cannot correlate it:', created.serverId);
+          continue;
+        }
+
+        const op = creates.find(o => o.data.local_id === created.clientId);
         if (op) {
           await this._handleCreateSuccess(op, created.serverId);
           await SyncQueue.markCompleted(op.id, { serverId: created.serverId });
@@ -326,8 +367,11 @@ class SyncEngineClass {
         }
       }
 
-      for (const serverId of batchResult.updated) {
-        const op = updates.find(o => o.serverId === serverId);
+      // `updated` is a list of SyncResultItem objects, not of server id strings -- only
+      // `deleted` below is strings. Iterating it as strings meant `o.serverId === <object>`
+      // never matched, so accepted updates were re-pushed on every sync forever.
+      for (const updatedItem of batchResult.updated) {
+        const op = updates.find(o => o.serverId === updatedItem.serverId);
         if (op) {
           await this._handleUpdateSuccess(op);
           await SyncQueue.markCompleted(op.id);
@@ -343,38 +387,179 @@ class SyncEngineClass {
         }
       }
 
-      // Handle conflicts
+      // Handle conflicts -- that is, the entries the server refused.
+      //
+      // Every one of these must be *settled*. Left pending, the operation is picked up by
+      // the next sync and the next one after that, re-sending something the server has
+      // already said no to, for as long as the app is installed -- and because the refusal
+      // used to be discarded, `sync()` reported a clean success throughout. A memory the
+      // server would not accept sat on the phone indefinitely with nothing to show it.
+      //
+      // Settled as CONFLICT rather than FAILED, which is a deliberate departure from
+      // "mark it failed":
+      //   - `getPendingOperations()` takes PENDING, plus FAILED with retry_count < 3.
+      //     CONFLICT appears in neither, so the re-sending stops immediately rather than
+      //     after two more pointless round trips.
+      //   - `markFailed` increments retry_count, spending a budget that exists for flaky
+      //     networks. "Not authorized to update this entry" is not flaky; it will be
+      //     refused identically every time.
+      //   - `resetFailedOperations()` -- what `retryFailed()` calls -- resets FAILED rows
+      //     back to PENDING. A refusal re-armed that way starts the loop again.
+      //   - It is already visible without any new UI: `SyncQueue.getStats()` counts it,
+      //     and SyncContext already folds `stats.conflict` into its failed count, which
+      //     `syncBadgeStatus` renders as a failure.
+      // No new column and no new status: `conflict` and `conflict_data` both already
+      // exist and are already what the single-operation path uses.
       if (batchResult.conflicts && batchResult.conflicts.length > 0) {
-        const conflictResults = await ConflictResolver.processServerConflicts(
+        const refusals = await ConflictResolver.processServerConflicts(
           batchResult.conflicts
         );
-        result.conflicts = conflictResults.filter(
-          r => r.result !== ResolutionResult.NO_CONFLICT
-        ).length;
+
+        for (const refusal of refusals) {
+          const op = this._findRefusedOperation(refusal, { creates, updates, deletes });
+
+          if (op) {
+            await SyncQueue.markConflict(op.id, {
+              result: refusal.result,
+              reason: refusal.reason,
+              serverId: refusal.serverId,
+              clientId: refusal.clientId,
+              refusedAt: new Date().toISOString(),
+            });
+          } else {
+            // Reported, not swallowed. A refusal we cannot tie to an operation still has
+            // to be counted, or we are back to claiming a clean sync. It happens today
+            // for a refused *create*: the server can only echo `ClientId`, and this client
+            // sends the local id as `localId`, so it comes back null. That correlation gap
+            // is PR #42's, not this change's.
+            console.warn(
+              '[SyncEngine] Server refused a change that matches no queued operation:',
+              { clientId: refusal.clientId, serverId: refusal.serverId, reason: refusal.reason }
+            );
+          }
+
+          result.conflicts++;
+          result.conflictDetails.push({
+            reason: refusal.reason,
+            serverId: refusal.serverId,
+            clientId: refusal.clientId,
+            operationId: op?.id || null,
+            operationType: op?.type || null,
+            localId: op?.entityId || null,
+            // False means the operation could not be identified, so it is still pending
+            // and will be re-sent. Said out loud rather than implied.
+            settled: Boolean(op),
+          });
+
+          this._emit(SyncEvent.CONFLICT, {
+            localId: op?.entityId || null,
+            serverId: refusal.serverId,
+            reason: refusal.reason,
+            resolution: refusal.result,
+          });
+        }
       }
 
     } catch (error) {
-      // Fall back to individual operations
-      console.log('[SyncEngine] Batch sync failed, falling back to individual ops:', error.message);
-      
-      for (const op of operations) {
-        try {
-          await this._processSingleOperation(op);
-          result.succeeded++;
-        } catch (opError) {
-          // The response body, not just the status. A 400 here says the server rejected
-          // the payload and nothing else; without the body there is no way to tell which
-          // field it objected to, and the operation retries against the same objection
-          // until it exhausts its attempts. Logged rather than surfaced -- this is for
-          // diagnosis, and the queue's own handling is unchanged.
-          const detail = opError?.data ? JSON.stringify(opError.data).slice(0, 500) : null;
-          console.error(
-            '[SyncEngine] Operation failed:', op.id, op.type, opError.message,
-            detail ? `| server said: ${detail}` : '| server sent no body'
-          );
-          await SyncQueue.markFailed(op.id, opError.message);
-          result.failed++;
-        }
+      // The batch itself was accepted; only the local bookkeeping after it failed. There
+      // is deliberately no fallback here -- re-sending work the server has already done
+      // is what duplicated the memory. Whatever was not marked completed stays pending,
+      // and the next batch, which is idempotent on `clientId`, settles it against the
+      // entry already on the server instead of making another.
+      console.error(
+        '[SyncEngine] Batch sync was accepted but recording it locally failed:',
+        error?.message,
+        '| operations left pending for the next batch'
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Does this batch-sync failure prove the server never processed the request?
+   *
+   * Only a "yes" makes it safe to re-send a CREATE down POST /journals/entries, because
+   * CreateJournalEntryRequest carries no ClientId and the controller never sets one: that
+   * endpoint has no idempotency guard and the row it writes has no correlation id on it,
+   * so a create sent there twice is two memories and nothing can ever tell.
+   *
+   * Classified against what src/api/ApiClient.js actually throws:
+   *
+   *   SAFE   code 'OFFLINE'          ApiError.offlineError(), thrown by request() before
+   *                                  fetch is called at all -- the server saw nothing.
+   *   SAFE   status 400..499         Came back from _handleResponse, so the server
+   *                                  answered and refused the payload. Nothing committed,
+   *                                  and the batch will refuse it identically next time,
+   *                                  so holding it back would strand it. (The synthetic
+   *                                  401 AUTH_REQUIRED is also pre-flight, so also safe.)
+   *   UNSAFE code 'TIMEOUT'          ApiError.timeoutError(), from _fetchWithTimeout's
+   *                                  AbortController. The abort is client-side; the
+   *                                  server may have committed and only the reply was
+   *                                  lost. This is the commonest mobile failure there is.
+   *   UNSAFE code 'NETWORK_ERROR'    ApiError.networkError(error.message), the catch-all
+   *                                  for a fetch rejection. React Native reports both a
+   *                                  DNS failure (never sent) and a connection dropped
+   *                                  after delivery as the same "Network request failed",
+   *                                  with nothing on the error to tell them apart -- so
+   *                                  the pre-flight case is NOT separable here and the
+   *                                  whole code has to be treated as unsafe.
+   *   UNSAFE status >= 500           A gateway or load balancer can answer 502/504 after
+   *                                  the origin has already written.
+   *   UNSAFE anything else           Includes a plain Error thrown locally, e.g. by
+   *                                  JournalApi's own response mapping after a successful
+   *                                  POST. Unknown means unsafe.
+   *
+   * The cost of the unsafe cases is one sync interval: the create stays pending and the
+   * next batch attempt carries it, correlated. The cost of getting it wrong the other way
+   * is a duplicate memory that neither side can detect.
+   */
+  _batchFailureProvesNothingWasSent(error) {
+    if (error?.code === 'OFFLINE') return true;
+
+    const status = error?.status;
+    if (typeof status === 'number' && status >= 400 && status < 500) return true;
+
+    return false;
+  }
+
+  /**
+   * The batch endpoint could not be reached, so try each operation on its own.
+   */
+  async _fallbackToSingleOperations(operations, result, error) {
+    console.log('[SyncEngine] Batch sync failed, falling back to individual ops:', error?.message);
+
+    const safeToResendCreates = this._batchFailureProvesNothingWasSent(error);
+
+    for (const op of operations) {
+      // Updates and deletes are idempotent -- a repeated PATCH or DELETE cannot make a
+      // second memory -- so they always fall back. A create cannot, unless we know the
+      // batch never landed.
+      if (op.type === SyncOperationType.CREATE_ENTRY && !safeToResendCreates) {
+        console.log(
+          '[SyncEngine] Holding a create back rather than re-sending it unguarded:',
+          op.id, '| batch failed with', error?.code || error?.status || 'an unknown error',
+          '| it stays pending for the next batch, which deduplicates on clientId'
+        );
+        continue;
+      }
+
+      try {
+        await this._processSingleOperation(op);
+        result.succeeded++;
+      } catch (opError) {
+        // The response body, not just the status. A 400 here says the server rejected
+        // the payload and nothing else; without the body there is no way to tell which
+        // field it objected to, and the operation retries against the same objection
+        // until it exhausts its attempts. Logged rather than surfaced -- this is for
+        // diagnosis, and the queue's own handling is unchanged.
+        const detail = opError?.data ? JSON.stringify(opError.data).slice(0, 500) : null;
+        console.error(
+          '[SyncEngine] Operation failed:', op.id, op.type, opError.message,
+          detail ? `| server said: ${detail}` : '| server sent no body'
+        );
+        await SyncQueue.markFailed(op.id, opError.message);
+        result.failed++;
       }
     }
 
@@ -487,6 +672,39 @@ class SyncEngineClass {
       sendable.push({ ...op, data: { ...data, contentBlocks: plan.wire } });
     }
     return sendable;
+  }
+
+  /**
+   * Find the queued operation a server refusal belongs to.
+   *
+   * Server id first, because it is unambiguous and it is what a refused update or delete
+   * carries. Client id second, because a refused *create* has `ServerId = string.Empty`
+   * (see `BatchSync` in the Hub's JournalsController) and `ClientId` is then the only
+   * correlating field there is.
+   *
+   * Returns null when neither matches, which the caller reports rather than ignores.
+   *
+   * @param {object} refusal - normalised `{ clientId, serverId, reason }`
+   * @param {object} queued - the `creates` / `updates` / `deletes` operations just pushed
+   */
+  _findRefusedOperation(refusal, { creates, updates, deletes }) {
+    if (refusal.serverId) {
+      const byServerId =
+        updates.find(op => op.serverId === refusal.serverId) ||
+        deletes.find(op => op.serverId === refusal.serverId);
+      if (byServerId) return byServerId;
+    }
+
+    if (refusal.clientId) {
+      // Both spellings: the queued payload is a SQLite row (`local_id`) on some paths and
+      // an in-memory entry (`localId`) on others.
+      const byClientId = creates.find(
+        op => (op.data?.local_id || op.data?.localId) === refusal.clientId
+      );
+      if (byClientId) return byClientId;
+    }
+
+    return null;
   }
 
   /**

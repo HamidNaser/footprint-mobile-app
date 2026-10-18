@@ -260,11 +260,17 @@ class JournalApiClass {
     const response = await ApiClient.post(url, payload);
 
     return {
-      created: response.created || [],      // Array of { localId, serverId }
-      updated: response.updated || [],      // Array of serverId
-      deleted: response.deleted || [],      // Array of serverId
+      // BatchSyncResponse. `created` and `updated` are both lists of SyncResultItem --
+      // { clientId, serverId, serverTimestamp } -- and only `deleted` is a list of bare
+      // server ids. Treating `updated` as strings was a second, separate break.
+      created: response.created || [],      // Array of { clientId, serverId, serverTimestamp }
+      updated: response.updated || [],      // Array of { clientId, serverId, serverTimestamp }
+      deleted: response.deleted || [],      // Array of serverId (strings)
       conflicts: response.conflicts || [],  // Array of conflict details
-      serverChanges: response.serverChanges || [], // Server-side changes to pull
+      // No `serverChanges`: BatchSyncResponse declares Created, Updated, Deleted,
+      // Conflicts and ServerTimestamp and nothing else, so the field was always [] and
+      // nothing read it. Dead, and worse than dead -- it read as a pull that happens on
+      // the push path and does not.
       serverTimestamp: response.serverTimestamp,
     };
   }
@@ -288,7 +294,14 @@ class JournalApiClass {
         : undefined;
 
     return {
-      localId: entry.local_id || entry.localId,
+      // The correlation id, under the name the server binds. CreateSyncEntry.ClientId and
+      // UpdateSyncEntry.ClientId carry no JsonPropertyName, so the Hub's camelCase policy
+      // binds them from `clientId` and from nothing else. Sent as `localId` it arrived as
+      // null, which skipped the server's idempotency guard and left the reply unmatchable
+      // -- so every retried batch sync made another copy of the same memory.
+      //
+      // The local SQLite column stays `local_id`: this is a wire name only.
+      clientId: entry.local_id || entry.localId,
       journalId: entry.journal_id || entry.journalId,
       // The calendar day the memory happened. This was missing, so the server saw
       // no date and defaulted it to year 1 -- invisible on the device that wrote
