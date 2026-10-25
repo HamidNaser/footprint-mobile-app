@@ -32,7 +32,9 @@ import { CREATE_TABLES, SCHEMA_VERSION } from './schema';
 import { migrations } from './migrations';
 
 /** The migration that adds the column, found by what it does rather than by its position. */
-const adding = migrations.find((m) => m.up.some((sql) => /location_sharing/i.test(sql)));
+const adding = migrations.find((m) =>
+  m.up.some((sql) => typeof sql === 'string' && /location_sharing/i.test(sql))
+);
 
 /**
  * `journal_entries` as v5 declared it: production's own statement with the new column taken back
@@ -148,9 +150,12 @@ describe('journal_entries.location_sharing', () => {
   });
 
   it('moves the schema version on, so the migration actually runs', () => {
-    // A migration that is not the latest version never executes: initializeDatabase only runs
-    // what is above the version the database records.
-    expect(adding.version).toBe(SCHEMA_VERSION);
+    // initializeDatabase only runs what is above the version the database records, so a
+    // migration numbered beyond SCHEMA_VERSION never executes. Stated as a relation: v6 shipped,
+    // and 007's v7 now sits above it, so "is the latest" stopped being true without anything
+    // about location sharing changing.
+    expect(adding.version).toBe(6);
+    expect(adding.version).toBeLessThanOrEqual(SCHEMA_VERSION);
     expect(Math.max(...migrations.map((m) => m.version))).toBe(SCHEMA_VERSION);
   });
 

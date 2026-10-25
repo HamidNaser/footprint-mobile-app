@@ -1,3 +1,4 @@
+jest.unmock('../MediaApi');
 /**
  * The media upload has to speak the server's contract, field for field.
  *

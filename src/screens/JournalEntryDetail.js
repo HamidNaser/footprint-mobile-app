@@ -25,6 +25,8 @@ import {
   FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../components/media/DerivativeImage';
+import { FailedSlot } from '../components/media/FailedTile';
 import { parseDateKey } from '../utils/journalDate';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { AudioPlayer } from '../components/media/AudioPlayer';
@@ -90,8 +92,9 @@ const ImageViewerModal = ({ visible, images, initialIndex, onClose }) => {
 
   const renderItem = ({ item }) => (
     <View style={styles.viewerImageContainer}>
-      <Image
-        source={{ uri: item.localPath || item.serverUrl }}
+      <DerivativeImage
+        media={item}
+        variant="display"
         style={styles.viewerImage}
         resizeMode="contain"
       />
@@ -339,20 +342,26 @@ export const JournalEntryDetail = ({
           <View style={styles.mediaSection}>
             <View style={styles.photoGrid}>
               {photos.map((photo, index) => (
-                <TouchableOpacity
+                // A failed photo's Try again sits beside the touchable, not inside it.
+                <FailedSlot
                   key={photo.localId || index}
                   style={[
                     styles.photoItem,
                     photos.length === 1 && styles.photoItemSingle,
                   ]}
-                  onPress={() => openImageViewer(index)}
                 >
-                  <Image
-                    source={{ uri: photo.localPath || photo.serverUrl }}
-                    style={styles.photo}
-                    resizeMode="cover"
-                  />
-                </TouchableOpacity>
+                  {(onFailedOwner) => (
+                    <TouchableOpacity style={{ flex: 1 }} onPress={() => openImageViewer(index)}>
+                      <DerivativeImage
+                        media={photo}
+                        variant={photos.length === 1 ? 'display' : 'grid'}
+                        style={styles.photo}
+                        resizeMode="cover"
+                        onFailedOwner={onFailedOwner}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </FailedSlot>
               ))}
             </View>
           </View>
@@ -364,21 +373,22 @@ export const JournalEntryDetail = ({
             <Text style={styles.mediaSectionTitle}>Videos</Text>
             <View style={styles.videoGrid}>
               {videos.map((video, index) => (
-                <TouchableOpacity
-                  key={video.localId || index}
-                  style={styles.videoItem}
-                  onPress={() => openVideoPlayer(video)}
-                >
-                  <VideoThumbnail
-                    videoUri={video.localPath || video.serverUrl}
-                    thumbnailUri={video.thumbnailUrl}
-                    duration={video.duration}
-                    width={(SCREEN_WIDTH - 48) / 2}
-                    height={100}
-                    showDuration
-                    showPlayIcon
-                  />
-                </TouchableOpacity>
+                // A failed video's Try again sits beside the touchable, not inside it.
+                <FailedSlot key={video.localId || video.id || index} style={styles.videoItem}>
+                  {(onFailedOwner) => (
+                    <TouchableOpacity onPress={() => openVideoPlayer(video)}>
+                      <VideoThumbnail
+                        media={video}
+                        duration={video.duration}
+                        width={(SCREEN_WIDTH - 48) / 2}
+                        height={100}
+                        showDuration
+                        showPlayIcon
+                        onFailedOwner={onFailedOwner}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </FailedSlot>
               ))}
             </View>
           </View>

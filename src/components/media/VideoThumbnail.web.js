@@ -5,8 +5,10 @@
  */
 
 import React from 'react';
-import { View, Text, StyleSheet, Image } from 'react-native';
+import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { thumbnailSource, videoSource } from '../../utils/mediaSource';
+import { VideoPosterTile } from './VideoPosterTile';
 
 /**
  * Generate thumbnail - returns null on web
@@ -33,14 +35,33 @@ export const clearThumbnailCache = async () => {
 /**
  * VideoThumbnail component
  */
-export const VideoThumbnail = ({
-  videoUri,
+/**
+ * 007 (FR-024): with `media`, shows the server's poster frame (`thumbnailSource`) under a play
+ * overlay, and a tap calls `onPress({ videoUri, thumbnailUri, duration, media })` with the
+ * ORIGINAL (`videoSource`). The original is never an <Image>: with no poster this is a plate.
+ */
+export const VideoThumbnail = (props) =>
+  // With a media item the poster is watched by media id (final review I1): same lifecycle as
+  // native, minus the device frame (a browser cannot make one here).
+  props.media && props.thumbnailUri == null && props.videoUri == null ? (
+    <VideoPosterTile width={100} height={100} {...props} />
+  ) : (
+    <LegacyVideoThumbnail {...props} />
+  );
+
+const LegacyVideoThumbnail = ({
+  media,
+  videoUri: videoUriProp,
+  thumbnailUri: thumbnailUriProp,
   duration,
   width = 100,
   height = 100,
   showDuration = true,
+  onPress,
   style,
 }) => {
+  const videoUri = videoUriProp ?? videoSource(media);
+  const thumbnailUri = thumbnailUriProp ?? (media ? thumbnailSource({ ...media, localPath: null }) : null);
   const formatDuration = (ms) => {
     if (!ms) return '';
     const seconds = Math.floor(ms / 1000);
@@ -50,10 +71,22 @@ export const VideoThumbnail = ({
   };
 
   return (
-    <View style={[styles.container, { width, height }, style]}>
-      <View style={styles.placeholder}>
-        <Ionicons name="videocam" size={24} color="#8E8E93" />
-      </View>
+    <TouchableOpacity
+      style={[styles.container, { width, height }, style]}
+      onPress={() => onPress?.({ videoUri, thumbnailUri, duration, media })}
+      disabled={!onPress}
+      activeOpacity={onPress ? 0.8 : 1}
+      accessibilityRole="button"
+      accessibilityLabel="Play video"
+      testID="video-play-overlay"
+    >
+      {thumbnailUri ? (
+        <Image source={{ uri: thumbnailUri }} style={{ width, height }} resizeMode="cover" />
+      ) : (
+        <View style={styles.placeholder}>
+          <Ionicons name="videocam" size={24} color="#8E8E93" />
+        </View>
+      )}
       {showDuration && duration && (
         <View style={styles.durationBadge}>
           <Text style={styles.durationText}>{formatDuration(duration)}</Text>
@@ -62,7 +95,7 @@ export const VideoThumbnail = ({
       <View style={styles.playIcon}>
         <Ionicons name="play" size={16} color="#FFF" />
       </View>
-    </View>
+    </TouchableOpacity>
   );
 };
 

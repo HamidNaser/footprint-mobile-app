@@ -6,6 +6,58 @@
  * run multiple times.
  */
 
+const CACHED_ADDRESS_KEYS = [
+  'thumbnailUrl',
+  'thumbnailUri',
+  'displayUrl',
+  'displayUri',
+  'thumbnailServerUrl', // a video's preview address
+];
+
+/** A server address, as opposed to the device's own file:// copy. */
+const isRemoteAddress = (v) => typeof v === 'string' && /^(https?:\/\/|\/)/i.test(v);
+
+/**
+ * v7 step: drop cached rendition addresses from every entry's media. mediaSource ignores
+ * the retired ones and the status poller supplies the new ones. Device paths are left alone.
+ */
+async function clearCachedMediaAddresses(db) {
+  const rows = await db.getAllAsync('SELECT local_id, content_blocks FROM journal_entries');
+  for (const row of rows || []) {
+    let blocks;
+    try {
+      blocks = JSON.parse(row.content_blocks || '[]');
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(blocks)) continue;
+
+    let changed = false;
+    const cleaned = blocks.map((block) => {
+      if (!block || !Array.isArray(block.media)) return block;
+      const media = block.media.map((m) => {
+        if (!m || typeof m !== 'object') return m;
+        const next = { ...m };
+        for (const key of CACHED_ADDRESS_KEYS) {
+          if (isRemoteAddress(next[key])) {
+            delete next[key];
+            changed = true;
+          }
+        }
+        return next;
+      });
+      return { ...block, media };
+    });
+
+    if (changed) {
+      await db.runAsync('UPDATE journal_entries SET content_blocks = ? WHERE local_id = ?', [
+        JSON.stringify(cleaned),
+        row.local_id,
+      ]);
+    }
+  }
+}
+
 /**
  * Migration definitions
  * Each migration has:
@@ -179,6 +231,25 @@ export const migrations = [
       // column is harmless to an older build, which simply ignores it.
     ],
   },
+  {
+    // 007 first wrote this as v6. main shipped its own v6 (location_sharing, PR #43) before
+    // 007 merged, so this goes on top: a phone already on main's v6 would skip a second v6.
+    version: 7,
+    description: 'media_queue.display_server_url, and clear cached thumbnail/display addresses (007 R10)',
+    up: [
+      'ALTER TABLE media_queue ADD COLUMN display_server_url TEXT;',
+      // Addresses cached before renditions were replaced point at the retired
+      // /api/v1/media/t/ route. Cleared, not rewritten: the server owns them.
+      'UPDATE media_queue SET thumbnail_server_url = NULL, display_server_url = NULL;',
+      // Cached entries carry the same addresses inside content_blocks.
+      clearCachedMediaAddresses,
+      // No pull-cursor reset (R-a): mediaSource ignores the retired addresses and the status
+      // poller supplies the new ones, and a reset would need a full re-pull and miss deletions.
+    ],
+    down: [
+      // Additive column, harmless to an older build; cleared addresses repopulate from the server.
+    ],
+  },
 ];
 
 /**
@@ -209,18 +280,37 @@ export const applyMigration = async (db, migration) => {
   console.log(`[Migration] Applying v${migration.version}: ${migration.description}`);
   
   try {
-    // Run all up statements
-    for (const statement of migration.up) {
-      if (statement && statement.trim()) {
-        await db.runAsync(statement);
+    const run = async (conn) => {
+      for (const statement of migration.up) {
+        if (typeof statement === 'function') {
+          await statement(conn);
+        } else if (statement && statement.trim()) {
+          // A fresh install builds its tables from CREATE_TABLES, which already has every
+          // column, and then runs each migration from v1. Adding a column that is there is a
+          // "duplicate column" crash, so look first.
+          const add = /^\s*ALTER TABLE (\w+) ADD COLUMN (\w+)/i.exec(statement);
+          if (add) {
+            const columns = await conn.getAllAsync(`PRAGMA table_info(${add[1]})`);
+            if ((columns || []).some((c) => c.name === add[2])) continue;
+          }
+          await conn.runAsync(statement);
+        }
       }
+
+      // Record the migration
+      await conn.runAsync(
+        'INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)',
+        [migration.version, Date.now()]
+      );
+    };
+
+    // All or nothing: a migration that dies half way must not leave a half-cleared cache
+    // with no version recorded.
+    if (typeof db.withExclusiveTransactionAsync === 'function') {
+      await db.withExclusiveTransactionAsync(run);
+    } else {
+      await run(db);
     }
-    
-    // Record the migration
-    await db.runAsync(
-      'INSERT OR REPLACE INTO schema_version (version, applied_at) VALUES (?, ?)',
-      [migration.version, Date.now()]
-    );
     
     console.log(`[Migration] Successfully applied v${migration.version}`);
     return true;

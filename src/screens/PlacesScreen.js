@@ -39,6 +39,8 @@ import MemoryDetailModal from '../components/places/MemoryDetailModal';
 import { pickThenNow } from '../utils/thenNow';
 import MemoryRequestCard from '../components/places/MemoryRequestCard';
 import PlaceMapPreview from '../components/map/PlaceMapPreview';
+import DerivativeImage from '../components/media/DerivativeImage';
+import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -189,7 +191,7 @@ const PlaceCard = memo(({ place, isSelected, onPress, onYearPress }) => {
       >
         <View style={styles.placeImageWrapper}>
           {place.image ? (
-            <Image source={{ uri: place.image }} style={styles.placeImage} />
+            <DerivativeImage media={place.image} style={styles.placeImage} />
           ) : (
             // Nobody has photographed this place yet. A monogram from its own name,
             // so a list of unphotographed places still reads as distinct places
@@ -256,9 +258,10 @@ const ImageCarousel = memo(({ photos }) => {
         scrollEventThrottle={16}
       >
         {photos.map((photo, index) => (
-          <Image
-            key={index}
-            source={{ uri: photo }}
+          <DerivativeImage
+            key={photo.id || index}
+            media={photo}
+            variant="display"
             style={styles.carouselImage}
             resizeMode="cover"
           />
@@ -638,7 +641,7 @@ export default function PlacesScreen() {
       />
 
       {/* Places List */}
-      <ScrollView 
+      <ViewportScrollView 
         style={styles.placesList}
         contentContainerStyle={styles.placesListContent}
         showsVerticalScrollIndicator={false}
@@ -657,13 +660,14 @@ export default function PlacesScreen() {
           </View>
         ) : filteredPlaces.length > 0 ? (
           filteredPlaces.map((place, index) => (
-            <PlaceCard
-              key={place.id}
-              place={place}
-              isSelected={selectedPlace?.id === place.id}
-              onPress={handlePlacePress}
-              onYearPress={handleYearPress}
-            />
+            <ViewportTile key={place.id}>
+              <PlaceCard
+                place={place}
+                isSelected={selectedPlace?.id === place.id}
+                onPress={handlePlacePress}
+                onYearPress={handleYearPress}
+              />
+            </ViewportTile>
           ))
         ) : loadError ? (
           <View style={styles.emptyState}>
@@ -694,7 +698,7 @@ export default function PlacesScreen() {
             </Text>
           </View>
         )}
-      </ScrollView>
+      </ViewportScrollView>
 
       {/* Place Detail Modal */}
       <PlaceDetailModal
