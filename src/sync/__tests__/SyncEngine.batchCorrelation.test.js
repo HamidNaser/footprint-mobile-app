@@ -315,8 +315,8 @@ describe('batch sync correlates creates with the server reply', () => {
     // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
     // rather than loosened to toMatchObject: the strictness is the point -- an
     // unexpected field appearing in this result is exactly what this assertion should
-    // catch, and it did.
-    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [] });
+    // catch, and it did. `held` is 007's (media still uploading), and it was caught too.
+    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [], held: 0 });
     expect(queue.completed.has('op-create-1')).toBe(true);
 
     // Nothing pending means no second request at all.
@@ -434,8 +434,8 @@ describe('a batch whose reply is lost does not duplicate the memory', () => {
     // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
     // rather than loosened to toMatchObject: the strictness is the point -- an
     // unexpected field appearing in this result is exactly what this assertion should
-    // catch, and it did.
-    expect(result).toEqual({ succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [] });
+    // catch, and it did. `held` is 007's (media still uploading), and it was caught too.
+    expect(result).toEqual({ succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [], held: 0 });
 
     const settled = await SyncEngine._pushLocalChanges();
     expect(settled.succeeded).toBe(1);
@@ -626,8 +626,8 @@ describe('batch sync correlates updates with the server reply', () => {
     // conflictDetails arrives with the refused-memory work (PR #44). Kept inside toEqual
     // rather than loosened to toMatchObject: the strictness is the point -- an
     // unexpected field appearing in this result is exactly what this assertion should
-    // catch, and it did.
-    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [] });
+    // catch, and it did. `held` is 007's (media still uploading), and it was caught too.
+    expect(result).toEqual({ succeeded: 1, failed: 0, conflicts: 0, conflictDetails: [], held: 0 });
     expect(queue.completed.has('op-update-1')).toBe(true);
 
     await SyncEngine._pushLocalChanges();

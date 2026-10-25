@@ -12,7 +12,6 @@ import Avatar from '../Avatar';
 import {
   View,
   Text,
-  Image,
   TouchableOpacity,
   StyleSheet,
   Dimensions,
@@ -22,7 +21,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 import { AudioPlayer } from '../media/AudioPlayer';
 import { EngagementSection } from './EngagementSection';
-import { thumbnailSource } from '../../utils/mediaSource';
+import DerivativeImage from '../media/DerivativeImage';
+import { FailedSlot } from '../media/FailedTile';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
@@ -85,13 +85,43 @@ const TextBlock = memo(({ content, isFirst }) => {
 });
 
 /**
+ * A photo that can never upload says so (007 R-c), rather than showing a blank tile.
+ * Module-level on purpose: a component defined inside PhotoBlock is a new type on every
+ * render, so its hook (the display-copy lifecycle) would restart each time.
+ */
+const NotUploadedTile = ({ style }) => (
+  <View style={[styles.photo, style, { alignItems: 'center', justifyContent: 'center', backgroundColor: '#E0E0E0' }]}>
+    <Text style={styles.failedTileText}>Photo couldn't be uploaded</Text>
+  </View>
+);
+
+/**
+ * One grid tile. Takes the media item, never a URL: DerivativeImage picks the thumbnail
+ * (device copy first) and renders the pending placeholder when there is no source yet.
+ */
+const PhotoImage = ({ media, style, onPress, failed }) =>
+  failed ? (
+    <NotUploadedTile style={style} />
+  ) : (
+    // The owner's Try again / Download original for a failed photo render beside the touchable
+    // (FailedSlot), not inside it: no button nested in another.
+    <FailedSlot style={styles.photoSlot}>
+      {(onFailedOwner) => (
+        <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
+          <DerivativeImage media={media} style={[styles.photo, style]} resizeMode="cover" onFailedOwner={onFailedOwner} />
+        </TouchableOpacity>
+      )}
+    </FailedSlot>
+  );
+
+/**
  * Photo block - displays photos in a grid
  * Uses native img on web (RN Image has issues), RN Image on native
  */
 /**
  * A grid tile is a postage stamp. Loading the full-size original into one costs 76 KB
  * where the Hub will serve a 7 KB rendition -- and the person opening the photograph
- * properly still gets the original, because the viewer picks its own source.
+ * properly gets the display copy, because the viewer picks its own source.
  */
 const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   if (!photos || photos.length === 0) return null;
@@ -99,41 +129,11 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   const PHOTO_HEIGHT = 200;
   const GRID_GAP = 4;
   
-  // Web-specific image component using native img element
-  const WebImage = ({ uri, style, onPress }) => (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
-      <img 
-        src={uri}
-        alt="photo"
-        style={{ 
-          width: '100%',
-          height: style?.height || PHOTO_HEIGHT, 
-          objectFit: 'cover',
-          borderRadius: 12, 
-          backgroundColor: '#E0E0E0',
-          display: 'block',
-        }}
-      />
-    </TouchableOpacity>
-  );
-  
-  // Native image component
-  const NativeImage = ({ uri, style, onPress }) => (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
-      <Image
-        source={{ uri }}
-        style={[styles.photo, style]}
-        resizeMode="cover"
-      />
-    </TouchableOpacity>
-  );
-  
-  // Choose the appropriate image component
-  const PhotoImage = Platform.OS === 'web' ? WebImage : NativeImage;
 
   const renderSinglePhoto = () => (
     <PhotoImage 
-      uri={thumbnailSource(photos[0])}
+      media={photos[0]}
+      failed={photos[0]?.uploadFailed || photos[0]?.missingFile}
       style={{ height: PHOTO_HEIGHT }}
       onPress={() => onPhotoPress?.(photos, 0)}
     />
@@ -147,7 +147,8 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
           style={{ flex: 1, marginLeft: index > 0 ? GRID_GAP : 0 }}
         >
           <PhotoImage
-            uri={thumbnailSource(photo)}
+            media={photo}
+            failed={photo?.uploadFailed || photo?.missingFile}
             style={{ height: PHOTO_HEIGHT }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
@@ -160,7 +161,8 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
     <View style={styles.photoRow}>
       <View style={{ flex: 2 }}>
         <PhotoImage
-          uri={thumbnailSource(photos[0])}
+          media={photos[0]}
+          failed={photos[0]?.uploadFailed || photos[0]?.missingFile}
           style={{ height: PHOTO_HEIGHT }}
           onPress={() => onPhotoPress?.(photos, 0)}
         />
@@ -172,7 +174,8 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
             style={{ marginTop: index > 0 ? GRID_GAP : 0, flex: 1 }}
           >
             <PhotoImage
-              uri={thumbnailSource(photo)}
+              media={photo}
+              failed={photo?.uploadFailed || photo?.missingFile}
               style={{ height: (PHOTO_HEIGHT - GRID_GAP) / 2 }}
               onPress={() => onPhotoPress?.(photos, index + 1)}
             />
@@ -190,7 +193,8 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
           style={styles.gridPhotoContainer}
         >
           <PhotoImage
-            uri={thumbnailSource(photo)}
+            media={photo}
+            failed={photo?.uploadFailed || photo?.missingFile}
             style={{ height: '100%' }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
@@ -226,8 +230,7 @@ const VideoBlock = memo(({ videos, onVideoPress }) => {
         {videos.slice(0, 4).map((video, index) => (
           <View key={video.localId || video.id || index} style={styles.videoContainer}>
             <VideoThumbnail
-              videoUri={video.localPath || video.serverUrl}
-              thumbnailUri={video.thumbnailUrl}
+              media={video}
               duration={video.duration}
               width={videos.length === 1 ? CONTENT_WIDTH - 32 : (CONTENT_WIDTH - 36) / 2}
               height={videos.length === 1 ? 200 : 100}
@@ -578,6 +581,8 @@ const styles = StyleSheet.create({
   },
 
   // Photo styles
+  // Holds the touchable and, for the owner of a failed photo, Try again beside it.
+  photoSlot: { flex: 1 },
   photo: {
     width: '100%',
     borderRadius: 12,
@@ -607,6 +612,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  failedTileText: {
+    color: '#555',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingHorizontal: 8,
   },
   moreText: {
     color: '#FFF',

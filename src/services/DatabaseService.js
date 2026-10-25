@@ -366,9 +366,18 @@ class DatabaseServiceClass {
       const media = block.media.map((m) => {
         if (!m || typeof m !== 'object') return m;
         const serverUrl = m.serverUrl || m.url || null;
-        const thumbnail = m.thumbnailUri || m.thumbnailUrl || m.localPath || serverUrl;
+        // An item with a media id never previews its original (007 FR-023): no thumbnail means
+        // none yet, so the tile shows "Preparing photo…" and watches for the grid copy. Only an
+        // id-less legacy item, which has no copies to wait for, keeps the old fallback.
+        const hasMediaId = !!(m.id || m.mediaId);
+        const thumbnail = m.thumbnailUri || m.thumbnailUrl || m.localPath || (hasMediaId ? null : serverUrl);
+        // The full-size copy (007 R10). Mirrored both ways but never defaulted to the original
+        // or the thumbnail: absent means "not generated yet", and the UI shows a placeholder.
+        const display = m.displayUrl || m.displayUri || null;
         return {
           ...m,
+          displayUrl: display,
+          displayUri: display,
           serverUrl,
           url: m.url || serverUrl,
           thumbnailUrl: m.thumbnailUrl || thumbnail,
@@ -490,6 +499,10 @@ class DatabaseServiceClass {
       fields.push('thumbnail_server_url = ?');
       values.push(updates.thumbnailServerUrl);
     }
+    if (updates.displayServerUrl !== undefined) {
+      fields.push('display_server_url = ?');
+      values.push(updates.displayServerUrl);
+    }
     if (updates.retryCount !== undefined) {
       fields.push('retry_count = ?');
       values.push(updates.retryCount);
@@ -539,6 +552,7 @@ class DatabaseServiceClass {
       serverUrl: row.server_url,
       thumbnailPath: row.thumbnail_path,
       thumbnailServerUrl: row.thumbnail_server_url,
+      displayServerUrl: row.display_server_url,
       uploadStatus: row.upload_status,
       retryCount: row.retry_count,
       errorMessage: row.error_message,

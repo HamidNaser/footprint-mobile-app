@@ -4,9 +4,9 @@ name: CI
 # Releases are deliberate and live in release.yml (manual trigger).
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'release/**']
   push:
-    branches: [main]
+    branches: [main, 'release/**']
 
 env:
   # Matched to release.yml, which had to move to 22 for eas-cli. Nothing here needs

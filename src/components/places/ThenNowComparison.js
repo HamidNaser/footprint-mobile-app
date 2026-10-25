@@ -24,6 +24,7 @@ import {
   PanResponder,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -58,11 +59,7 @@ const SideBySideView = memo(({ thenMemory, nowMemory, onImagePress }) => (
       onPress={() => onImagePress?.(thenMemory)}
       activeOpacity={0.9}
     >
-      <Image 
-        source={{ uri: thenMemory.media[0].uri }} 
-        style={styles.halfImage}
-        resizeMode="cover"
-      />
+      <DerivativeImage media={thenMemory.media[0]} variant="display" style={styles.halfImage} resizeMode="cover" />
       <YearBadge year={thenMemory.year} author={thenMemory.author} position="left" />
     </TouchableOpacity>
     
@@ -79,11 +76,7 @@ const SideBySideView = memo(({ thenMemory, nowMemory, onImagePress }) => (
       onPress={() => onImagePress?.(nowMemory)}
       activeOpacity={0.9}
     >
-      <Image 
-        source={{ uri: nowMemory.media[0].uri }} 
-        style={styles.halfImage}
-        resizeMode="cover"
-      />
+      <DerivativeImage media={nowMemory.media[0]} variant="display" style={styles.halfImage} resizeMode="cover" />
       <YearBadge year={nowMemory.year} author={nowMemory.author} position="right" />
     </TouchableOpacity>
   </View>
@@ -109,11 +102,7 @@ const SliderView = memo(({ thenMemory, nowMemory }) => {
   return (
     <View style={styles.sliderContainer}>
       {/* Now image (full width, behind) */}
-      <Image 
-        source={{ uri: nowMemory.media[0].uri }} 
-        style={styles.sliderImage}
-        resizeMode="cover"
-      />
+      <DerivativeImage media={nowMemory.media[0]} variant="display" style={styles.sliderImage} resizeMode="cover" />
       
       {/* Then image (clipped by slider position) */}
       <Animated.View 
@@ -122,11 +111,7 @@ const SliderView = memo(({ thenMemory, nowMemory }) => {
           { width: slidePosition }
         ]}
       >
-        <Image 
-          source={{ uri: thenMemory.media[0].uri }} 
-          style={[styles.sliderImage, { width: SCREEN_WIDTH }]}
-          resizeMode="cover"
-        />
+        <DerivativeImage media={thenMemory.media[0]} variant="display" style={[styles.sliderImage, { width: SCREEN_WIDTH }]} resizeMode="cover" />
       </Animated.View>
       
       {/* Slider handle */}

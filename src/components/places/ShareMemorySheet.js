@@ -24,6 +24,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 // Theme colors
 const PRIMARY_COLOR = '#4361ee';
@@ -59,10 +60,7 @@ const SendToPerson = memo(({ person, onPress }) => (
  */
 const MemoryPreview = memo(({ memory }) => (
   <View style={styles.preview}>
-    <Image 
-      source={{ uri: memory.media[0].uri }} 
-      style={styles.previewImage} 
-    />
+    <DerivativeImage media={memory.media[0]} style={styles.previewImage} />
     <View style={styles.previewInfo}>
       <Text style={styles.previewCaption} numberOfLines={2}>
         {memory.caption || 'Memory'}

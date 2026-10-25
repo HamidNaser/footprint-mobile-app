@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  View, Text, Image, StyleSheet, TouchableOpacity, ScrollView,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView,
   TextInput, ActivityIndicator, SafeAreaView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../components/media/DerivativeImage';
+import { FailedSlot } from '../components/media/FailedTile';
+import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
 
 import HoldingAreaApi from '../api/HoldingAreaApi';
 import JournalApi from '../api/JournalApi';
@@ -155,7 +158,7 @@ export default function UndatedPhotosScreen({ navigation }) {
         <View style={{ width: 26 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
+      <ViewportScrollView contentContainerStyle={styles.body}>
         <Text style={styles.lede}>
           These photographs carry no date the import could read. Choose some, say when they were
           taken, and they become one entry. If you only know the year, say the year.
@@ -215,15 +218,17 @@ export default function UndatedPhotosScreen({ navigation }) {
           {held?.photos.map((photo) => {
             const isSelected = selected.includes(photo.mediaId);
             return (
+              <ViewportTile key={photo.mediaId} style={styles.tileCell}>
+              <FailedSlot style={[styles.tile, isSelected && styles.tileSelected]}>
+              {(onFailedOwner) => (
               <TouchableOpacity
-                key={photo.mediaId}
-                style={[styles.tile, isSelected && styles.tileSelected]}
+                style={{ flex: 1 }}
                 onPress={() => toggle(photo.mediaId)}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: isSelected }}
                 accessibilityLabel={`Select ${photo.originalFileName ?? photo.mediaId}`}
               >
-                <Image source={{ uri: photo.thumbnailUrl ?? photo.url }} style={styles.thumb} />
+                <DerivativeImage media={photo} style={styles.thumb} onFailedOwner={onFailedOwner} />
                 {isSelected && (
                   <View style={styles.tick}>
                     <Ionicons name="checkmark-circle" size={22} color={PRIMARY_COLOR} />
@@ -235,6 +240,9 @@ export default function UndatedPhotosScreen({ navigation }) {
                   {photo.originalFileName ?? photo.mediaId}
                 </Text>
               </TouchableOpacity>
+              )}
+              </FailedSlot>
+              </ViewportTile>
             );
           })}
         </View>
@@ -285,7 +293,7 @@ export default function UndatedPhotosScreen({ navigation }) {
             </TouchableOpacity>
           </View>
         )}
-      </ScrollView>
+      </ViewportScrollView>
     </SafeAreaView>
   );
 }
@@ -316,8 +324,10 @@ const styles = StyleSheet.create({
   },
   hintButtonText: { color: PRIMARY_COLOR, fontSize: 13 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 8 },
+  // The three-up width lives on the ViewportTile wrapper (the grid's direct child); the tile fills it.
+  tileCell: { width: '31%' },
   tile: {
-    width: '31%', borderRadius: 8, overflow: 'hidden', backgroundColor: '#FFF',
+    width: '100%', borderRadius: 8, overflow: 'hidden', backgroundColor: '#FFF',
     borderWidth: 2, borderColor: 'transparent',
   },
   tileSelected: { borderColor: PRIMARY_COLOR },
