@@ -19,6 +19,12 @@
  * transaction applyMigration opens and the PRAGMA guard that keeps a fresh install from adding
  * a column CREATE_TABLES already made.
  * </p>
+ *
+ * <p>
+ * The same guard covers a phone left part-way: v5 or v6 added its column but the app died before
+ * the version was recorded (PR #47). The column is there and the version says it is not, so the
+ * migration runs again and must not crash on "duplicate column".
+ * </p>
  */
 
 import { DatabaseSync } from 'node:sqlite';
@@ -209,5 +215,31 @@ describe('upgrade paths', () => {
       'https://api/api/v1/media/t/srv-1'
     );
     expect(versionOf(again)).toBe(SCHEMA_VERSION);
+  });
+
+  it('column present at schema version 4 (killed between the ALTER and the version write) completes', async () => {
+    const raw = installedAt(4, {
+      dropColumns: { journal_entries: ['location_sharing'], media_queue: ['display_server_url'] },
+    });
+    seedEntry(raw, { date_precision: 'month' });
+
+    await open(raw);
+
+    expect(columns(raw, 'journal_entries')).toContain('location_sharing');
+    const entry = raw.prepare("SELECT * FROM journal_entries WHERE local_id = 'e1'").get();
+    expect(entry.date_precision).toBe('month');
+    expect(entry.location_sharing).toBe('private');
+    expect(versionOf(raw)).toBe(SCHEMA_VERSION);
+  });
+
+  it('v6 has the same exposure: location_sharing present at schema version 5 completes', async () => {
+    const raw = installedAt(5, { dropColumns: { media_queue: ['display_server_url'] } });
+    seedEntry(raw, { location_sharing: 'family' });
+
+    await open(raw);
+
+    const entry = raw.prepare("SELECT * FROM journal_entries WHERE local_id = 'e1'").get();
+    expect(entry.location_sharing).toBe('family');
+    expect(versionOf(raw)).toBe(SCHEMA_VERSION);
   });
 });
