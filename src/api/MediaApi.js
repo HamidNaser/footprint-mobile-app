@@ -162,6 +162,7 @@ class MediaApiClass {
       mediaId: result.mediaId,
       url: result.url,
       thumbnailUrl: result.thumbnailUrl,
+      displayUrl: result.displayUrl,
       uploadId: presignedData.uploadId,
     };
   }
@@ -250,6 +251,27 @@ class MediaApiClass {
   async getMedia(mediaId) {
     const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.GET_MEDIA, { id: mediaId });
     return ApiClient.get(url);
+  }
+
+  /**
+   * Which display copies are ready (007, contracts/media-status.md). Up to 100 ids per call;
+   * the poller does the chunking. Resolves to `{ items, partial }`.
+   * @param {string[]} ids - Media ids
+   */
+  async status(ids) {
+    const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.STATUS);
+    return ApiClient.post(url, { ids });
+  }
+
+  /**
+   * The owner's Try again for a photo that could not be prepared (007, contracts/derivative-retry.md).
+   * 202 `{ id, status: "pending", updatedAt }`; 409 when it is not failed (any more) -- the caller
+   * treats that as "look again". 404 for anyone but the owner. No body.
+   * @param {string} mediaId - Server media ID
+   */
+  async retry(mediaId) {
+    const url = buildUrl(this.baseUrl, MEDIA_ENDPOINTS.RETRY_DERIVATIVES, { id: mediaId });
+    return ApiClient.post(url);
   }
 
   // ============================================================
@@ -356,6 +378,7 @@ class MediaApiClass {
       mediaId: response.id,
       url: response.url,
       thumbnailUrl: response.thumbnailUrl,
+      displayUrl: response.displayUrl,
     };
   }
 

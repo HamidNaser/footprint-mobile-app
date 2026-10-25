@@ -283,7 +283,10 @@ class SyncEngineClass {
     const result = { succeeded: 0, failed: 0, conflicts: 0, conflictDetails: [] };
 
     // Get pending operations from queue
-    const operations = await SyncQueue.getPendingOperations();
+    const operations = await this._withoutHeldEntries(
+      await SyncQueue.getPendingOperations(),
+      result
+    );
     
     if (operations.length === 0) {
       console.log('[SyncEngine] No pending operations to push');
@@ -564,6 +567,114 @@ class SyncEngineClass {
   }
 
   /**
+   * True when a media item is a device file the server has no media id for (007 FR-040, R12).
+   * An item uploaded before mediaId was recorded carries its server url and keeps the id it
+   * was given then; only an item with neither has not been uploaded.
+   */
+  _isUnuploadedItem(item) {
+    return !!((item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url));
+  }
+
+  /** Held by this feature: has a file that can still upload (not flagged as lost). */
+  _isHeldEntry(entry) {
+    return (entry?.contentBlocks || []).some((block) =>
+      (Array.isArray(block?.media) ? block.media : []).some(
+        (item) => this._isUnuploadedItem(item) && !item.uploadFailed
+      )
+    );
+  }
+
+  /** True when an entry still references such a file: its reference would be a local id. */
+  _hasUnuploadedMedia(entry) {
+    return (entry?.contentBlocks || []).some((block) =>
+      (Array.isArray(block?.media) ? block.media : []).some((item) => this._isUnuploadedItem(item))
+    );
+  }
+
+  /**
+   * Decide what to do with an entry's unuploaded media (FR-040, R-b, R-c).
+   * - a file still on disk can upload: the entry is held;
+   * - a file that is gone can never upload: it is left off the wire and flagged on the
+   *   device (uploadFailed/missingFile), so its tile says so, and the entry is not blocked.
+   * `wire` is what to send (device-only fields removed); `saved` is what to keep locally.
+   */
+  async _planEntryMedia(entry) {
+    let hold = false;
+    let flagged = false;
+    const saved = [];
+    const wire = [];
+    for (const block of entry.contentBlocks || []) {
+      if (!Array.isArray(block?.media)) {
+        saved.push(block);
+        wire.push(block);
+        continue;
+      }
+      const savedMedia = [];
+      const wireMedia = [];
+      for (const item of block.media) {
+        if (!this._isUnuploadedItem(item)) {
+          const { localPath, uri, uploadFailed, missingFile, ...onWire } = item || {};
+          savedMedia.push(item);
+          wireMedia.push(onWire);
+        } else if (await JournalService.fileService.getFileInfo(item.localPath || item.uri)) {
+          hold = true;
+          // Readable again: the label no longer applies.
+          const { uploadFailed, missingFile, ...rest } = item;
+          flagged = flagged || !!(uploadFailed || missingFile);
+          savedMedia.push(rest);
+        } else {
+          flagged = flagged || !item.uploadFailed;
+          savedMedia.push({ ...item, uploadFailed: true, missingFile: true });
+        }
+      }
+      saved.push({ ...block, media: savedMedia });
+      wire.push({ ...block, media: wireMedia });
+    }
+    return { hold, flagged, saved, wire };
+  }
+
+  /**
+   * Prepare create/update operations for sending. An entry whose media can still upload is
+   * held -- left Pending, counted, never dropped -- and the device keeps rendering
+   * localPath. The rest are sent with the entry's CURRENT blocks, not the snapshot taken
+   * when the operation was queued.
+   */
+  async _withoutHeldEntries(operations, result) {
+    result.held = 0;
+    const sendable = [];
+    for (const op of operations) {
+      const isWrite =
+        op.type === SyncOperationType.CREATE_ENTRY || op.type === SyncOperationType.UPDATE_ENTRY;
+      const entry = isWrite && op.entityId
+        ? await DatabaseService.getEntryByLocalId(op.entityId).catch(() => null)
+        : null;
+      if (!entry) {
+        sendable.push(op);
+        continue;
+      }
+      const plan = await this._planEntryMedia(entry);
+      if (plan.hold) {
+        console.warn('[SyncEngine] Holding entry until its media has a server id:', op.entityId);
+        if (plan.flagged) {
+          await DatabaseService.updateEntry(op.entityId, { contentBlocks: plan.saved });
+        }
+        if (entry.syncStatus === SyncStatus.FAILED) {
+          await DatabaseService.updateEntry(op.entityId, { syncStatus: SyncStatus.PENDING });
+        }
+        result.held++;
+        continue;
+      }
+      if (plan.flagged) {
+        await DatabaseService.updateEntry(op.entityId, { contentBlocks: plan.saved });
+      }
+      // content_blocks (the snapshot) wins over contentBlocks in the API formatter, so drop it.
+      const { content_blocks, ...data } = op.data || {};
+      sendable.push({ ...op, data: { ...data, contentBlocks: plan.wire } });
+    }
+    return sendable;
+  }
+
+  /**
    * Find the queued operation a server refusal belongs to.
    *
    * Server id first, because it is unambiguous and it is what a refused update or delete
@@ -618,7 +729,10 @@ class SyncEngineClass {
     const currentEntry = operation.entityId
       ? await DatabaseService.getEntryByLocalId(operation.entityId).catch(() => null)
       : null;
-    const payload = currentEntry || operation.data;
+    // The fresh row, with the blocks _withoutHeldEntries prepared for sending (when it ran).
+    const payload = currentEntry
+      ? { ...currentEntry, contentBlocks: operation.data?.contentBlocks ?? currentEntry.contentBlocks }
+      : operation.data;
 
     switch (operation.type) {
       case SyncOperationType.CREATE_ENTRY: {
@@ -801,6 +915,10 @@ class SyncEngineClass {
       return;
     }
 
+    // An entry this feature is holding (unsent, media still uploading) keeps its local blocks:
+    // overwriting it would lose the photo reference. Every other entry takes the usual path.
+    if (localEntry.syncStatus !== SyncStatus.SYNCED && this._isHeldEntry(localEntry)) return;
+
     // Check for conflict
     const conflict = ConflictResolver.detectConflict(localEntry, serverEntry);
 
@@ -881,12 +999,17 @@ class SyncEngineClass {
         if (localPath !== media.local_uri) return item;
 
         changed = true;
+        const { uploadFailed, missingFile, ...rest } = item; // it uploaded: no label
         return {
-          ...item,
-          id: uploadResult.mediaId || item.id,
+          ...rest,
+          // The server's id, never the local one (007 R12). _uploadPendingMedia refuses
+          // an upload that returned none, so this is always set by the time it runs.
+          id: uploadResult.mediaId,
+          mediaId: uploadResult.mediaId,
           serverUrl: uploadResult.url,
           url: uploadResult.url,
           thumbnailUrl: uploadResult.thumbnailUrl || item.thumbnailUrl,
+          displayUrl: uploadResult.displayUrl || item.displayUrl,
         };
       });
 
@@ -950,6 +1073,12 @@ class SyncEngineClass {
           entryId: media.entry_id,
           filename: media.filename,
         });
+
+        // No media id means nothing the entry can safely reference (007 R12). Failed, not
+        // completed: it is retried, and the entry stays held until an upload returns one.
+        if (!uploadResult?.mediaId) {
+          throw new Error('Upload returned no media id');
+        }
 
         // Mark as completed
         await DatabaseService.updateMediaQueueItem(media.id, {

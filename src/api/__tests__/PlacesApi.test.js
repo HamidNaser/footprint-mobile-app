@@ -28,11 +28,21 @@ jest.mock('../ApiClient', () => ({
   },
 }));
 
+// contracts/media-item.md: image and photos are media items, not URL strings.
+const item = (id, extra = {}) => ({
+  id,
+  kind: 'photo',
+  thumbnailUrl: `https://cdn/${id}/grid.webp`,
+  displayUrl: `https://cdn/${id}/display.webp`,
+  unresolved: false,
+  ...extra,
+});
+
 const detailFixture = () => ({
   id: 'paris',
   name: 'Paris',
   subtitle: 'France',
-  image: 'https://cdn/paris.jpg',
+  image: item('paris'),
   lat: 48.8566,
   lng: 2.3522,
   entriesCount: 2,
@@ -52,7 +62,7 @@ const detailFixture = () => ({
           authorAvatar: 'https://cdn/a.jpg',
           date: '2023-06-15T00:00:00Z',
           text: 'Great trip',
-          photos: ['https://cdn/p1.jpg', 'https://cdn/p2.jpg'],
+          photos: [item('p1'), item('p2'), item('p1')],
           isCurrentUser: true,
         },
       ],
@@ -87,7 +97,7 @@ const listFixture = (overrides = {}) => ({
       id: 'paris',
       name: 'Paris',
       subtitle: 'France',
-      image: 'https://cdn/paris.jpg',
+      image: item('paris'),
       lat: 48.8566,
       lng: 2.3522,
       entriesCount: 2,
@@ -152,14 +162,46 @@ describe('getPlaces', () => {
   it('still uses the photograph when there is one', async () => {
     // The other half: removing the invented photo must not lose the real one.
     ApiClient.get.mockResolvedValue({
-      places: [{ id: 'p1', name: 'Paris', image: 'https://cdn/paris.jpg', years: [] }],
+      places: [{ id: 'p1', name: 'Paris', image: item('paris'), years: [] }],
     });
 
     const [place] = await getPlaces();
 
-    expect(place.image).toBe('https://cdn/paris.jpg');
+    expect(place.image).toEqual(item('paris'));
+    expect(place.photos).toEqual([item('paris')]);
   });
 
+});
+
+describe('media-item shape (contracts/media-item.md)', () => {
+  it('keeps an unresolved reference as an item with no urls, never a string', async () => {
+    ApiClient.get.mockResolvedValue({
+      places: [{ id: 'p', name: 'X', image: { id: null, kind: 'photo', thumbnailUrl: null, displayUrl: null, unresolved: true }, years: [] }],
+    });
+    const [place] = await getPlaces();
+    expect(place.image.unresolved).toBe(true);
+    expect(place.image.id).toBeNull();
+  });
+
+  // I3 / MEDIA-Q3 option A: `originalUrl` is present only for the media's owner. It must
+  // survive the adapters onto every list surface, and its absence must stay an absence.
+  it('carries the owner-only originalUrl on image, photos and memory media; omitted stays omitted', async () => {
+    const mine = item('mine', { originalUrl: 'https://cdn/mine/original.heic' });
+    ApiClient.get.mockResolvedValue({ places: [{ id: 'p', name: 'X', image: mine, years: [] }] });
+    const [place] = await getPlaces();
+    expect(place.image.originalUrl).toBe('https://cdn/mine/original.heic');
+    expect(place.photos[0].originalUrl).toBe('https://cdn/mine/original.heic');
+
+    const detail = detailFixture();
+    detail.years[0].memories[0].photos = [mine, item('theirs')];
+    ApiClient.get.mockResolvedValue(detail);
+    const adapted = await getPlace('paris');
+    const [mineOut, theirsOut] = adapted.years[0].memories[0].media;
+    expect(mineOut.originalUrl).toBe('https://cdn/mine/original.heic');
+    expect('originalUrl' in theirsOut).toBe(false);
+    expect(adapted.photos.find((p) => p.id === 'mine').originalUrl).toBe('https://cdn/mine/original.heic');
+    expect('originalUrl' in adapted.photos.find((p) => p.id === 'theirs')).toBe(false);
+  });
 });
 
 describe('getPlace', () => {
@@ -178,8 +220,9 @@ describe('getPlace', () => {
     expect(place.years).toHaveLength(2);
     expect(place.years[0].memoryCount).toBe(1);
     expect(place.years[0].memories[0].caption).toBe('Great trip');
-    // photos are collected from all memories, de-duplicated.
-    expect(place.photos).toEqual(['https://cdn/p1.jpg', 'https://cdn/p2.jpg']);
+    // photos are media items collected from all memories, de-duplicated by media id.
+    expect(place.photos).toEqual([item('p1'), item('p2')]);
+    expect(place.image).toEqual(item('paris'));
   });
 
   it('throws when the place is not found', async () => {
@@ -204,10 +247,18 @@ describe('getPlaceYearMemories', () => {
       firstName: 'Hamid',
       avatar: 'https://cdn/a.jpg',
     });
-    expect(m.media).toEqual([
-      { uri: 'https://cdn/p1.jpg', type: 'photo' },
-      { uri: 'https://cdn/p2.jpg', type: 'photo' },
-    ]);
+    // Media items, not URL strings. `uri` stays as the display copy for the older detail
+    // views that read it; it is never the original.
+    expect(m.media.map((x) => x.id)).toEqual(['p1', 'p2', 'p1']);
+    expect(m.media[0]).toMatchObject({
+      id: 'p1',
+      kind: 'photo',
+      type: 'photo',
+      thumbnailUrl: 'https://cdn/p1/grid.webp',
+      displayUrl: 'https://cdn/p1/display.webp',
+      unresolved: false,
+    });
+    expect(m.media[0].uri).toBe('https://cdn/p1/display.webp');
     expect(m.isCurrentUser).toBe(true);
   });
 

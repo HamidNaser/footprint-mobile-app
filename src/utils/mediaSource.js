@@ -1,44 +1,56 @@
 /**
- * Which copy of a photograph to load, and when.
+ * Which copy of a media item to load, and when (007 research R10).
  *
  * A media item can exist in three places at once, and the right one depends on what it is
- * for. A grid of thumbnails the size of a postage stamp should not download the full-size
- * original, which is what the journal did: measured against production, a grid image was
- * **76 KB** as the original and **7 KB** as the rendition the Hub now serves.
+ * for:
  *
- * Over a feed of forty entries that is the difference between a scroll that works on a
- * train and one that does not.
+ * - small views (grid tile, card, strip) use the server-computed `thumbnailUrl`;
+ * - full-size views use `displayUrl`;
+ * - the original is for video playback and download only.
+ *
+ * `localPath`, the device's own copy, always comes first: instant, free, and works with no
+ * signal. A remote source that does not exist yet yields null, so the caller renders a
+ * placeholder (and watches mediaStatusPoller) rather than quietly loading the original.
+ *
+ * The SQLite cache holds server-sent addresses from before renditions were replaced,
+ * pointing at the old `/api/v1/media/t/` route. Those are never used.
  */
 
-/**
- * The source for a small image — a grid tile, a card, a strip.
- *
- * Order matters:
- *
- * 1. `localPath` — the device's own copy. Instant, free, and works with no signal. Always
- *    preferred, even though it is full-size, because loading it costs nothing.
- * 2. `thumbnailUri` — the small remote copy, which is what saves the bandwidth.
- * 3. `serverUrl` — the full-size original, only when nothing better exists.
- *
- * @param {object} media
- * @returns {string|null} null when the item has no loadable source at all, so callers can
- *   render a placeholder rather than an <Image> pointed at undefined.
- */
-export function thumbnailSource(media) {
-  if (!media) return null;
-  return media.localPath || media.thumbnailUri || media.thumbnailUrl || media.serverUrl || null;
+const OLD_RENDITION_ROUTE = '/api/v1/media/t/';
+
+/** The first candidate that is a string and not an address on the retired rendition route. */
+function firstUsable(...candidates) {
+  for (const c of candidates) {
+    if (typeof c === 'string' && c && !c.includes(OLD_RENDITION_ROUTE)) return c;
+  }
+  return null;
 }
 
 /**
- * The source for viewing a photograph properly — full screen, or a single hero image.
+ * The source for a small image. localPath, then thumbnailUrl (or its SQLite mirror
+ * `thumbnailUri`), else null -- never the display copy or the original.
  *
- * Deliberately skips the thumbnail. Someone who has opened a photograph to look at it is
- * asking for the real thing, and a 320px rendition stretched across a phone screen is
- * visibly worse than waiting a moment for the original.
+ * @param {object} media
+ * @returns {string|null}
+ */
+export function thumbnailSource(media) {
+  if (!media) return null;
+  return firstUsable(media.localPath, media.thumbnailUrl, media.thumbnailUri);
+}
+
+/**
+ * The source for viewing a photograph properly. localPath, then displayUrl (or its mirror
+ * `displayUri`), else null -- never the original.
  */
 export function fullSizeSource(media) {
   if (!media) return null;
-  return media.localPath || media.serverUrl || media.url || null;
+  return firstUsable(media.localPath, media.displayUrl, media.displayUri);
+}
+
+/** The source for video playback: the device copy, else the original. */
+export function videoSource(media) {
+  if (!media) return null;
+  return firstUsable(media.localPath, media.serverUrl, media.url);
 }
 
 export default thumbnailSource;

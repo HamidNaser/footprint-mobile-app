@@ -27,6 +27,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { getQuestionsForMemory } from '../../data/placesData';
 import { buildStoryPrompts } from '../../utils/storyPrompts';
+import DerivativeImage from '../media/DerivativeImage';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -84,7 +85,7 @@ const MemoryCard = memo(({
   const relationshipColor = RELATIONSHIP_COLORS[author.relationship] || RELATIONSHIP_COLORS.friend;
   
   // Get primary image
-  const primaryImage = media[0]?.uri;
+  const primaryMedia = media[0]; // a media item, rendered through DerivativeImage
   const additionalCount = media.length - 1;
 
   // Get questions for this memory
@@ -105,7 +106,7 @@ const MemoryCard = memo(({
         onPress={() => onPress?.(memory)}
         activeOpacity={0.9}
       >
-        <Image source={{ uri: primaryImage }} style={styles.gridImage} />
+        <DerivativeImage media={primaryMedia} style={styles.gridImage} />
         {additionalCount > 0 && (
           <View style={styles.gridBadge}>
             <Text style={styles.gridBadgeText}>+{additionalCount}</Text>
@@ -130,7 +131,7 @@ const MemoryCard = memo(({
         onPress={() => onPress?.(memory)}
         activeOpacity={0.9}
       >
-        <Image source={{ uri: primaryImage }} style={styles.compactImage} />
+        <DerivativeImage media={primaryMedia} style={styles.compactImage} />
         <View style={styles.compactContent}>
           <View style={styles.compactHeader}>
             <Image source={{ uri: author.avatar }} style={styles.compactAvatar} />
@@ -182,7 +183,7 @@ const MemoryCard = memo(({
         onPress={() => onPress?.(memory)}
         activeOpacity={0.95}
       >
-        <Image source={{ uri: primaryImage }} style={styles.mainImage} />
+        <DerivativeImage media={primaryMedia} style={styles.mainImage} />
         {additionalCount > 0 && (
           <View style={styles.additionalBadge}>
             <Ionicons name="images" size={14} color="#FFF" />

@@ -6,28 +6,37 @@
  * or an icon indicating the entry type.
  */
 
-import React, { memo, useMemo } from 'react';
+import React, { memo, useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
-  Image,
   StyleSheet,
   Platform,
 } from 'react-native';
 import { Marker, Callout } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
+import DerivativeImage from '../media/DerivativeImage';
 
 const PRIMARY_COLOR = '#4361ee';
 
 /**
- * Get the first photo from entry content blocks
+ * A native marker is a snapshot of its view: with tracksViewChanges off it never repaints,
+ * so a photo that becomes ready later stays a grey square. Track while the photo is pending
+ * or loading; stop once it has settled, or after this long so a marker that never settles
+ * does not repaint forever. The next state change turns it back on.
+ */
+export const TRACKING_CAP_MS = 5000;
+const SETTLED = new Set(['loaded', 'unavailable', 'loadFailed', 'failed', 'uploadFailed']);
+
+/**
+ * Get the first photo (a media item) from entry content blocks
  */
 const getFirstPhoto = (entry) => {
   if (!entry?.contentBlocks) return null;
   
   for (const block of entry.contentBlocks) {
     if (block.type === 'photos' && block.media?.length > 0) {
-      return block.media[0].localPath || block.media[0].remoteUrl;
+      return block.media[0]; // a media item; DerivativeImage picks the small copy
     }
   }
   return null;
@@ -79,15 +88,16 @@ const getTextPreview = (entry, maxLength = 50) => {
 /**
  * Custom marker content
  */
-const MarkerContent = memo(({ entry, size = 40, primaryColor = PRIMARY_COLOR }) => {
+const MarkerContent = memo(({ entry, size = 40, primaryColor = PRIMARY_COLOR, onPhotoState }) => {
   const photo = useMemo(() => getFirstPhoto(entry), [entry]);
   const icon = useMemo(() => getEntryIcon(entry), [entry]);
 
   if (photo) {
     return (
       <View style={[styles.photoMarker, { width: size, height: size }]}>
-        <Image
-          source={{ uri: photo }}
+        <DerivativeImage
+          media={photo}
+          onStateChange={onPhotoState}
           style={[styles.photoImage, { width: size - 4, height: size - 4 }]}
           resizeMode="cover"
         />
@@ -116,11 +126,7 @@ const CalloutContent = memo(({ entry, primaryColor = PRIMARY_COLOR }) => {
   return (
     <View style={styles.calloutContainer}>
       {photo && (
-        <Image
-          source={{ uri: photo }}
-          style={styles.calloutImage}
-          resizeMode="cover"
-        />
+        <DerivativeImage media={photo} style={styles.calloutImage} resizeMode="cover" />
       )}
       <View style={styles.calloutContent}>
         <Text style={styles.calloutLocation} numberOfLines={1}>
@@ -150,6 +156,33 @@ export const EntryMarker = memo(({
   coordinate,
   ...props
 }) => {
+  const hasPhoto = useMemo(() => !!getFirstPhoto(entry), [entry]);
+  // Icon-only markers start settled; a photo marker tracks until its photo settles.
+  const [tracking, setTracking] = useState(hasPhoto);
+  const capRef = useRef(null);
+  const clearCap = useCallback(() => {
+    if (capRef.current !== null) {
+      clearTimeout(capRef.current);
+      capRef.current = null;
+    }
+  }, []);
+  const onPhotoState = useCallback(
+    (status) => {
+      clearCap();
+      if (SETTLED.has(status)) {
+        setTracking(false);
+      } else {
+        setTracking(true);
+        capRef.current = setTimeout(() => {
+          capRef.current = null;
+          setTracking(false);
+        }, TRACKING_CAP_MS);
+      }
+    },
+    [clearCap]
+  );
+  useEffect(() => clearCap, [clearCap]);
+
   // Use provided coordinate or entry's location
   const markerCoordinate = coordinate || {
     latitude: entry.location?.lat,
@@ -165,13 +198,14 @@ export const EntryMarker = memo(({
     <Marker
       coordinate={markerCoordinate}
       onPress={onPress}
-      tracksViewChanges={false}
+      tracksViewChanges={tracking}
       {...props}
     >
       <MarkerContent 
         entry={entry} 
         size={markerSize} 
         primaryColor={primaryColor}
+        onPhotoState={onPhotoState}
       />
       {showCallout && (
         <Callout 
