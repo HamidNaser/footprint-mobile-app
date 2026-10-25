@@ -23,9 +23,9 @@
     "sourcePath": "Footprint.Hub/src/Footprint.Hub.Contracts/Api/Journals/sync-contract.record.json",
     "generatedBy": "Footprint.Hub.UnitTests/SyncContract/SyncContractRecordTests.cs",
     "takenFromBackendBranch": "test/sync-contract-record",
-    "takenOn": "2026-10-17",
+    "takenOn": "2026-10-25",
     "isCopy": true,
-    "takenFromBackendCommit": "8e58a2a752ba7577f6de4ed1db05babf149318d4"
+    "takenFromBackendCommit": "772b3960f39ead8b58e588617ac44b4eb78cc911"
   },
   "serializerOptions": {
     "propertyNamingPolicy": "camelCase",
@@ -528,6 +528,12 @@
       "clrType": "Footprint.Hub.Contracts.Api.Journals.MediaInfoResponse",
       "properties": [
         {
+          "name": "displayUrl",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
           "name": "height",
           "shape": "integer",
           "required": false,
@@ -550,6 +556,12 @@
           "shape": "string",
           "required": false,
           "omittedWhenNull": true
+        },
+        {
+          "name": "unresolved",
+          "shape": "boolean",
+          "required": false,
+          "omittedWhenNull": false
         },
         {
           "name": "url",
