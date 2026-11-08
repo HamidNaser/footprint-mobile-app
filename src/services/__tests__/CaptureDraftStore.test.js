@@ -70,6 +70,46 @@ function deferred() {
 /** While set, the next draft write waits for it. One-shot: the write that takes it clears it. */
 let stallNextWrite = null;
 
+/** While set, every media copy waits for it -- two shutter taps with both copies in flight. */
+let stallCopies = null;
+
+/** While set, every draft write throws it: a disk that has no room for the row. */
+let failDraftWrites = null;
+
+/** While set, the next entries read waits for it -- suspending a load part-way. One-shot. */
+let stallNextEntryRead = null;
+
+/**
+ * Wait until something has actually happened.
+ *
+ * Needed because a locked call does not begin synchronously: it is queued behind the lock, so a
+ * test that fires a call and then does the "concurrent" thing on the next line has not opened the
+ * window at all -- the second thing happens first. These tests wait until the copy is genuinely
+ * under way before interfering with it.
+ */
+async function until(predicate, what) {
+  for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (!predicate()) {
+    throw new Error(`waited for ${what} and it never happened`);
+  }
+}
+
+/**
+ * Let whatever is already in flight get as far as it can, without insisting that it gets
+ * anywhere. The companion to `until`, for the case where the thing being waited for is a call
+ * that *should* be stuck behind the lock: `until` would have to throw to say so, and that is the
+ * passing outcome.
+ */
+async function settle(ticks = 20) {
+  for (let tick = 0; tick < ticks; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+const copiesStarted = () => mockFileSystem.copyAsync.mock.calls.length;
+
 const mockFileSystem = {
   documentDirectory: DOCS,
   getInfoAsync: jest.fn(async (uri) => ({
@@ -81,6 +121,7 @@ const mockFileSystem = {
     dirs.add(uri);
   }),
   copyAsync: jest.fn(async ({ from, to }) => {
+    if (stallCopies) await stallCopies.promise;
     if (copyFails) throw copyFails;
     if (!files.has(from)) files.add(from);
     trail.push(`copy ${from} -> ${to}`);
@@ -121,6 +162,9 @@ function adapter(raw) {
         stallNextWrite = null;
         await gate.promise;
       }
+      if (failDraftWrites && /INSERT INTO capture_drafts/i.test(text)) {
+        throw failDraftWrites;
+      }
       return raw.prepare(text).run(...params);
     },
     getAllAsync: async (text, params = []) => {
@@ -129,6 +173,11 @@ function adapter(raw) {
     },
     getFirstAsync: async (text, params = []) => {
       note(text);
+      if (stallNextEntryRead && /FROM journal_entries/i.test(text)) {
+        const gate = stallNextEntryRead;
+        stallNextEntryRead = null;
+        await gate.promise;
+      }
       return raw.prepare(text).get(...params) ?? null;
     },
     // A no-op: the phone's storage outlives the app, and so must this database.
@@ -251,6 +300,9 @@ beforeEach(async () => {
   copyFails = null;
   deleteFails = null;
   stallNextWrite = null;
+  stallCopies = null;
+  failDraftWrites = null;
+  stallNextEntryRead = null;
 
   raw = new DatabaseSync(':memory:');
   await bootDatabase();
@@ -317,6 +369,29 @@ describe('CaptureDraftStore: capturing a piece (M2, FR-012)', () => {
     expect(piecesOf('new')).toEqual(recorded);
     expect((await store.load('new')).pieces.map((piece) => piece.localId)).toEqual(['p1']);
     expect(files.has(`${NEW_DIR}p2.jpg`)).toBe(false);
+  });
+
+  it("never records a piece whose file the slot's own cleanup has just deleted", async () => {
+    // The memory being edited is deleted on another device, the app is killed, and the next
+    // thing the person does on reopening it is tap Photo. With nothing in hand, `addPiece` has
+    // to `load` -- and `load` sweeps an edit of a memory that has gone, folder and all. That
+    // folder is where the copy lands, so the sweep has to happen BEFORE the copy. The other way
+    // round the draft is left listing a photograph whose file the store itself just deleted:
+    // present in the list, missing on screen, which is the rule above exactly inverted.
+    seedEntry('e1', { deleted_at: 1700000000 });
+    await store.startEdit('e1', [note('t1', 'mid-sentence')]);
+
+    jest.resetModules();
+    await bootDatabase();
+    const restarted = loadStore();
+
+    const stored = await restarted.addPiece('edit', photo('p1'));
+
+    expect(stored.uri).toBe(`${EDIT_DIR}p1.jpg`);
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(true);
+    expect(piecesOf('edit').map((piece) => piece.localId)).toEqual(['p1']);
+    // The sweep did happen: the slot no longer claims to be an edit of the deleted memory.
+    expect(rowFor('edit').entry_local_id).toBeNull();
   });
 
   it('never copies an existing server media item, even one with a local file in hand', async () => {
@@ -492,6 +567,100 @@ describe('CaptureDraftStore: a write in flight (FR-012)', () => {
   });
 });
 
+/**
+ * Two things can change a draft while a media copy is still running, and a copy is long: it is a
+ * photograph being written to disk. FR-008 gives each tap of Photo its own photograph, and the
+ * spec's own scenario is somebody tapping Photo twice in quick succession on a bus -- so two
+ * copies in flight at once is the designed use of this store, not an exotic race. SC-004 allows
+ * zero pieces lost.
+ */
+describe('CaptureDraftStore: two things happening at once (FR-008, SC-004)', () => {
+  it('two photographs taken in quick succession both land', async () => {
+    const gate = deferred();
+    stallCopies = gate;
+
+    const first = store.addPiece('new', photo('p1'));
+    await until(() => copiesStarted() === 1, 'the first copy to start');
+    const second = store.addPiece('new', photo('p2'));
+    // The second tap gets as far as it can. Behind the lock that is nowhere -- which is the
+    // point, and why this cannot be an `until`: with the fix in place the second copy never
+    // starts, and without it both copies are in flight before the first is let go.
+    await settle();
+    gate.release();
+    stallCopies = null;
+    const [one, two] = await Promise.all([first, second]);
+
+    // Neither tap may be the one that "did not count".
+    expect(piecesOf('new').map((piece) => piece.localId)).toEqual(['p1', 'p2']);
+    expect(files.has(one.uri)).toBe(true);
+    expect(files.has(two.uri)).toBe(true);
+  });
+
+  it('a removal while a photograph is being copied is not undone by it', async () => {
+    await store.addPiece('new', photo('p1'));
+    await store.addPiece('new', note('t1', 'a line'));
+
+    const gate = deferred();
+    stallCopies = gate;
+    const adding = store.addPiece('new', photo('p2'));
+    // Two copies so far, not three: a text piece has no file, so it never reaches `copyAsync`.
+    await until(() => copiesStarted() === 2, 'the copy to be under way');
+    const removing = store.removePiece('new', 'p1');
+    gate.release();
+    stallCopies = null;
+    await Promise.all([adding, removing]);
+
+    // The removal stays done, and -- the inversion removePiece's own ordering exists to prevent
+    // -- the draft must not list a piece whose media has already been deleted. Two mechanisms
+    // hold this jointly and either alone is enough, so it goes red only when both are undone:
+    // the lock, which puts the removal strictly after the capture; and the capture reading the
+    // draft after its copy, which keeps the ordering honest if the lock is ever taken away.
+    expect(piecesOf('new').map((piece) => piece.localId)).toEqual(['t1', 'p2']);
+    expect(files.has(`${NEW_DIR}p1.jpg`)).toBe(false);
+    expect(files.has(`${NEW_DIR}p2.jpg`)).toBe(true);
+  });
+
+  it('a draft discarded while a photograph is being copied does not come back', async () => {
+    await store.addPiece('new', photo('p1'));
+
+    const gate = deferred();
+    stallCopies = gate;
+    const adding = store.addPiece('new', photo('p2'));
+    await until(() => copiesStarted() === 2, 'the copy to be under way');
+    // The person taps Discard and confirms while the shutter is still writing to disk.
+    const discarding = store.discard('new');
+    gate.release();
+    stallCopies = null;
+    await Promise.all([adding, discarding]);
+
+    // Discard means gone (FR-015). A capture that was already in flight must not write the slot
+    // back afterwards: that would leave a draft the person threw away, listing a photograph whose
+    // file the discard had already deleted.
+    expect(rowFor('new')).toBeNull();
+    expect([...files].filter((path) => path.startsWith(NEW_DIR))).toEqual([]);
+    await expect(store.load('new')).resolves.toBeNull();
+  });
+
+  it('typing while a photograph is being copied is not lost', async () => {
+    await store.addPiece('new', note('t1', ''));
+
+    const gate = deferred();
+    stallCopies = gate;
+    const adding = store.addPiece('new', photo('p1'));
+    await until(() => copiesStarted() === 1, 'the copy to be under way');
+    // A keystroke cannot wait for a lock -- updateText is synchronous by design -- so the piece
+    // being recorded has to read the draft as it stands when the copy finishes, not as it stood
+    // when the shutter was tapped.
+    store.updateText('new', 't1', 'what she said next');
+    gate.release();
+    stallCopies = null;
+    await adding;
+
+    expect(piecesOf('new').map((piece) => piece.localId)).toEqual(['t1', 'p1']);
+    expect(textIn('new', 't1')).toBe('what she said next');
+  });
+});
+
 describe('CaptureDraftStore: surviving the app being killed (M1, FR-012)', () => {
   it('restores every piece, in order, after the module is loaded afresh', async () => {
     await store.addPiece('new', photo('p1'));
@@ -600,6 +769,28 @@ describe("CaptureDraftStore: the edit slot's lifecycle (FR-013, FR-015)", () => 
     expect(JSON.parse(row.pieces_json).map((piece) => piece.localId)).toEqual(['t2']);
   });
 
+  it('takes the previous edit away even when its write never landed', async () => {
+    seedEntry('e1');
+    seedEntry('e2');
+
+    // A disk with no room for the row. The draft stays in hand on purpose -- the next flush
+    // retries it -- so "there is no row" does not mean "there is no previous edit".
+    failDraftWrites = new Error('ENOSPC: no space left on device');
+    await expect(store.startEdit('e1', [note('t1', 'first edit')])).rejects.toThrow('ENOSPC');
+    await expect(store.addPiece('edit', photo('p1'))).rejects.toThrow('ENOSPC');
+    failDraftWrites = null;
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(true);
+    expect(rowFor('edit')).toBeNull();
+
+    await store.startEdit('e2', [note('t2', 'a different memory')]);
+
+    // The store's own rule -- the draft in hand wins while it is unwritten -- has to apply here
+    // too, or the previous memory's photograph stays in this memory's draft folder.
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(false);
+    expect(rowFor('edit').entry_local_id).toBe('e2');
+    expect(piecesOf('edit').map((piece) => piece.localId)).toEqual(['t2']);
+  });
+
   it('starting an edit of the SAME memory keeps its draft, folder and creation time', async () => {
     seedEntry('e1');
     await store.startEdit('e1', [note('t1', 'first change')]);
@@ -670,6 +861,29 @@ describe('CaptureDraftStore: letting go of a draft (M3, FR-015, FR-016)', () => 
     await expect(store.clearAfterSave('new')).resolves.toBeUndefined();
     expect(rowFor('new')).toBeNull();
     await expect(store.load('new')).resolves.toBeNull();
+  });
+
+  it('a read overtaken by the save does not leave the cleared draft in hand', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', [note('t1', 'changed')]);
+    await store.addPiece('edit', photo('p1'));
+
+    // The Journal is asking "does this memory have an unfinished edit?" at the moment the save
+    // completes. Its read is suspended part-way, on the lookup of the memory itself.
+    const gate = deferred();
+    stallNextEntryRead = gate;
+    const asking = store.getEditFor('e1');
+    const saving = store.clearAfterSave('edit');
+    gate.release();
+    stallNextEntryRead = null;
+    await Promise.all([asking, saving]);
+
+    expect(rowFor('edit')).toBeNull();
+    // Nothing may be left in hand: a keystroke would otherwise re-persist the draft the save has
+    // just cleared, and the card would offer "Unfinished edit -- continue" for a saved memory.
+    expect(() => store.updateText('edit', 't1', 'more')).toThrow(/load/i);
+    expect(rowFor('edit')).toBeNull();
+    await expect(store.getEditFor('e1')).resolves.toBeNull();
   });
 
   it('leaves the other slot alone', async () => {

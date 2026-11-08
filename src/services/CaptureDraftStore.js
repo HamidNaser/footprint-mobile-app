@@ -9,7 +9,7 @@ import { getDatabase } from '../database';
  * operating system reclaiming the app takes everything captured with it. This store is what
  * stops that, and it is the load-bearing piece of "nothing captured is ever lost" (FR-012).
  *
- * Three rules matter more than anything else here:
+ * Four rules matter more than anything else here:
  *
  * 1. **Media is copied somewhere durable before the piece is recorded** (research R7). A piece
  *    pointing at a cache file the system may purge is worse than no piece: it reads as present
@@ -26,6 +26,17 @@ import { getDatabase } from '../database';
  *    to land in the gap caches a draft that is behind the database and the next write persists
  *    it over the top of the typing. The test for that is "while it is unwritten", **not** "while
  *    a timer is pending": a write that has started has no timer and has not landed either.
+ * 4. **One change to a slot at a time.** Every call that reads the draft, changes it and writes
+ *    it back holds the slot's lock for the whole of that, because such a change spans a media
+ *    copy and a copy is long. Two taps of Photo in quick succession is the *designed* use of the
+ *    camera this store serves (FR-008), and two of them interleaving would lose one photograph
+ *    outright. `updateText` and `flush` take no lock — a keystroke handler cannot wait, and
+ *    backgrounding is the one moment the app may be killed — which is safe because neither reads
+ *    the draft and writes a changed one back: `updateText` only replaces the draft in hand, and
+ *    `flush` only asks for the draft in hand to be written now. So a locked call reads the draft
+ *    in hand **after** its copy, and carries typing done during the copy rather than overwriting
+ *    it. What it must *not* leave until after the copy is any cleanup that could take the slot's
+ *    folder with it — see `addPiece`, which settles that before the copy lands in it.
  *
  * A slot and its folder are deleted only **after** the save has succeeded on the phone
  * (FR-016), or when the person discards the draft (FR-015).
@@ -82,6 +93,28 @@ const timers = new Map();
  * could otherwise land in either order, and an older draft landing last would undo the newer.
  */
 const writeChains = new Map();
+
+/**
+ * The tail of each slot's lock queue — the same chaining idea one level up, around a whole
+ * read-modify-write rather than around a single write.
+ */
+const locks = new Map();
+
+const ignore = () => {};
+
+/**
+ * Run `task` once nothing else is changing this slot.
+ *
+ * Held by every call that reads the draft, changes it and writes it back. The lock is released
+ * when the task settles, whether it resolved or threw, and the stored tail never rejects, so one
+ * failed call cannot wedge the slot.
+ */
+function withSlotLock(slot, task) {
+  const previous = locks.get(slot) ?? Promise.resolve();
+  const run = previous.then(task);
+  locks.set(slot, run.then(ignore, ignore));
+  return run;
+}
 
 const nowIso = () => new Date().toISOString();
 
@@ -248,7 +281,12 @@ async function editIsLive(db, entryLocalId) {
  * @returns {Promise<{id: string, entryLocalId: string|null, createdAt: string,
  *   updatedAt: string, pieces: object[]}|null>}
  */
-export async function load(slot) {
+export function load(slot) {
+  return withSlotLock(slot, () => loadHeld(slot));
+}
+
+/** `load`, with the slot's lock already held. */
+async function loadHeld(slot) {
   const db = await getDatabase();
   const row = await db.getFirstAsync('SELECT * FROM capture_drafts WHERE id = ?', [slot]);
 
@@ -263,7 +301,7 @@ export async function load(slot) {
   }
 
   if (slot === DraftSlot.EDIT && !(await editIsLive(db, draft.entryLocalId))) {
-    await discard(slot);
+    await removeHeld(slot);
     return null;
   }
 
@@ -274,16 +312,41 @@ export async function load(slot) {
 /**
  * Record one captured piece, media and all.
  *
- * The copy happens first and the piece is recorded only once it has succeeded, so the stored
- * draft never points at a file that was never made durable (research R7).
+ * The copy happens before the piece is recorded, and the piece is recorded only once the copy has
+ * succeeded, so the stored draft never points at a file that was never made durable (research R7).
+ *
+ * Three steps, and the order of all three matters:
+ *
+ * 1. **Settle the slot first**, with nothing in hand. `load` is what discards an `edit` slot whose
+ *    memory has gone, **and it deletes the slot's folder** — the folder the copy is about to land
+ *    in. Left until after the copy, it would take the copy with it and the piece would be recorded
+ *    pointing at a file that had just been deleted: rule 1 exactly inverted.
+ * 2. **Copy.**
+ * 3. **Read the draft in hand last**, after the copy. A copy is long enough for the person to have
+ *    typed into a note meanwhile, and a draft snapshotted beforehand would throw that typing away
+ *    — the lock cannot help there, because `updateText` is synchronous and takes none. Nothing is
+ *    awaited between this read and the write, so the two are one step.
  *
  * @param {'new'|'edit'} slot
  * @param {object} piece - a `Piece` (data-model); `uri` is where it was captured, if anywhere
  * @returns {Promise<object>} the piece as stored, with `uri` pointing at the durable copy
  */
-export async function addPiece(slot, piece) {
-  const draft = cache.get(slot) ?? (await load(slot)) ?? emptyDraft(slot);
+export function addPiece(slot, piece) {
+  return withSlotLock(slot, () => addPieceHeld(slot, piece));
+}
+
+async function addPieceHeld(slot, piece) {
+  // Step 1: settle the slot before the copy. `loadHeld` is the only thing here that can delete
+  // this slot's folder, and the copy is about to land in it.
+  if (!cache.has(slot)) {
+    await loadHeld(slot);
+  }
+
+  // Step 2.
   const stored = await adoptMedia(slot, piece);
+
+  // Step 3: the draft as it stands now, which is where any typing during the copy went.
+  const draft = cache.get(slot) ?? emptyDraft(slot);
 
   await commit(slot, {
     ...draft,
@@ -304,8 +367,12 @@ export async function addPiece(slot, piece) {
  *
  * @returns {Promise<object|null>} the draft as it now stands, or null if the slot holds none
  */
-export async function removePiece(slot, localId) {
-  const draft = cache.get(slot) ?? (await load(slot));
+export function removePiece(slot, localId) {
+  return withSlotLock(slot, () => removePieceHeld(slot, localId));
+}
+
+async function removePieceHeld(slot, localId) {
+  const draft = cache.get(slot) ?? (await loadHeld(slot));
   if (!draft) {
     return null;
   }
@@ -336,6 +403,11 @@ export async function removePiece(slot, localId) {
 /**
  * A text piece's content changed. The draft is written within half a second of the last
  * keystroke (FR-012); a keystroke before then restarts the clock.
+ *
+ * Deliberately **not** behind the slot's lock, and deliberately synchronous: a keystroke handler
+ * cannot wait, and typing must never queue behind a photograph being copied. What makes that safe
+ * is that it only changes the draft in hand — and the locked calls read the draft after their
+ * copy, so they pick this up rather than overwrite it.
  *
  * @throws Error if the slot has not been loaded. Returning quietly would throw the typing away
  *   where nobody could see it happen, which is the one outcome FR-012 forbids.
@@ -377,6 +449,12 @@ export function updateText(slot, localId, content) {
  * Write the slot now, cancelling any pending debounced write. What text blur and `AppState` →
  * `background`/`inactive` call, so leaving the foreground loses nothing (FR-012).
  *
+ * Not behind the slot's lock either, and for a sharper reason than `updateText`: backgrounding is
+ * the one moment the operating system may kill the app, so a flush must not wait behind a
+ * photograph being copied. Safe unlocked because it never changes the draft — it only asks for
+ * whatever the draft in hand is to be written now rather than in a moment, through the same
+ * serialised chain every other write goes through.
+ *
  * A slot with nothing unwritten is already safe, and writing it again would be a write for
  * nothing.
  */
@@ -403,22 +481,25 @@ export async function flush(slot) {
  * @param {object[]} pieces - the memory's pieces as loaded; remote media is kept by its server
  *   `id`/`url` and is never copied or re-uploaded
  */
-export async function startEdit(entryLocalId, pieces = []) {
-  const db = await getDatabase();
-  const existing = await db.getFirstAsync(
-    'SELECT entry_local_id, created_at FROM capture_drafts WHERE id = ?',
-    [DraftSlot.EDIT]
-  );
-  const continuing = existing && (existing.entry_local_id ?? null) === entryLocalId;
+export function startEdit(entryLocalId, pieces = []) {
+  return withSlotLock(DraftSlot.EDIT, () => startEditHeld(entryLocalId, pieces));
+}
+
+async function startEditHeld(entryLocalId, pieces) {
+  // Asked of the draft, not of the row: the draft in hand wins while it is unwritten, and a
+  // previous edit whose write failed is exactly that — no row, but a previous edit all the same,
+  // with its media sitting in the folder this one is about to use.
+  const existing = await loadHeld(DraftSlot.EDIT);
+  const continuing = !!existing && existing.entryLocalId === entryLocalId;
 
   if (existing && !continuing) {
-    await remove(DraftSlot.EDIT);
+    await removeHeld(DraftSlot.EDIT);
   }
 
   return commit(DraftSlot.EDIT, {
     id: DraftSlot.EDIT,
     entryLocalId,
-    createdAt: continuing ? existing.created_at : nowIso(),
+    createdAt: continuing ? existing.createdAt : nowIso(),
     updatedAt: nowIso(),
     pieces,
   });
@@ -428,18 +509,28 @@ export async function startEdit(entryLocalId, pieces = []) {
  * The unsaved edit of this memory, or null — what the Journal card's "Unfinished edit —
  * continue" and Edit ask. An unsaved edit of a *different* memory is not this one's.
  */
-export async function getEditFor(entryLocalId) {
-  const draft = await load(DraftSlot.EDIT);
-  return draft && draft.entryLocalId === entryLocalId ? draft : null;
+export function getEditFor(entryLocalId) {
+  return withSlotLock(DraftSlot.EDIT, async () => {
+    const draft = await loadHeld(DraftSlot.EDIT);
+    return draft && draft.entryLocalId === entryLocalId ? draft : null;
+  });
 }
 
-async function remove(slot) {
+async function removeHeld(slot) {
   cancelPendingWrite(slot);
   cache.delete(slot);
   unwritten.delete(slot);
 
-  // Let a write already under way finish first. It finds no draft in hand and writes nothing,
-  // and waiting means it cannot land behind the delete and resurrect the row.
+  // Nothing can queue a *new* write behind this, and each of the four writers is stopped by a
+  // different thing, so they are worth naming one at a time: `commit` only ever runs holding this
+  // slot's lock, which this call holds; the debounced write has just been cancelled; `flush`
+  // writes only a slot that is unwritten, which the line above cleared; and `updateText`, the one
+  // thing that would schedule a fresh debounce, throws with no draft in hand, which the line
+  // above also cleared.
+  //
+  // What that leaves is a write already under way, which none of the above can touch. Awaiting
+  // the chain is for exactly that one: without it, a persist in flight would land behind the
+  // DELETE and resurrect the row.
   await (writeChains.get(slot) ?? Promise.resolve()).catch(() => {});
   writeChains.delete(slot);
 
@@ -460,8 +551,8 @@ async function remove(slot) {
  * Throw the unsaved memory away, pieces and media together (FR-015). The caller confirms with
  * the person first — this does not ask.
  */
-export async function discard(slot) {
-  await remove(slot);
+export function discard(slot) {
+  return withSlotLock(slot, () => removeHeld(slot));
 }
 
 /**
@@ -469,8 +560,8 @@ export async function discard(slot) {
  * `createEntry` / `updateEntry` has resolved: a save that failed must leave the draft exactly
  * where it was (FR-016).
  */
-export async function clearAfterSave(slot) {
-  await remove(slot);
+export function clearAfterSave(slot) {
+  return withSlotLock(slot, () => removeHeld(slot));
 }
 
 export default {
