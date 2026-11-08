@@ -46,11 +46,29 @@ const dirs = new Set();
 /** Set to an Error to make the next copy fail, the way a full disk does. */
 let copyFails = null;
 
+/** Set to an Error to make a delete of this path fail. */
+let deleteFails = null;
+
 /** Everything that happened, file operations and SQL together, in order. */
 const trail = [];
 
 /** Just the SQL, as the store issued it. */
 const sql = [];
+
+/**
+ * A promise somebody else resolves. Used to hold a draft write in flight so a test can stand
+ * inside the window between "the write started" and "the write landed".
+ */
+function deferred() {
+  let release;
+  const promise = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+/** While set, the next draft write waits for it. One-shot: the write that takes it clears it. */
+let stallNextWrite = null;
 
 const mockFileSystem = {
   documentDirectory: DOCS,
@@ -69,6 +87,7 @@ const mockFileSystem = {
     files.add(to);
   }),
   deleteAsync: jest.fn(async (uri) => {
+    if (deleteFails) throw deleteFails;
     trail.push(`delete ${uri}`);
     dirs.delete(uri);
     for (const path of [...files]) {
@@ -97,6 +116,11 @@ function adapter(raw) {
     },
     runAsync: async (text, params = []) => {
       note(text);
+      if (stallNextWrite && /INSERT INTO capture_drafts/i.test(text)) {
+        const gate = stallNextWrite;
+        stallNextWrite = null;
+        await gate.promise;
+      }
       return raw.prepare(text).run(...params);
     },
     getAllAsync: async (text, params = []) => {
@@ -202,13 +226,18 @@ const note = (localId, content) => ({
   content,
 });
 
-/** An existing server media item in an edit: never copied, never re-uploaded. */
-const remotePhoto = (localId) => ({
+/**
+ * An existing server media item in an edit: never copied, never re-uploaded. `uri` is optional
+ * because an edit loaded from the server may also have a local file in hand to show on screen --
+ * which is the shape that would tempt the copy path if `remote` were not honoured.
+ */
+const remotePhoto = (localId, uri) => ({
   localId,
   kind: 'photo',
   capturedAt: '2019-06-01T12:00:00.000Z',
   location: null,
   remote: { id: 'srv-1', url: 'https://cdn/orig.jpg' },
+  ...(uri ? { uri } : {}),
 });
 
 beforeEach(async () => {
@@ -220,6 +249,8 @@ beforeEach(async () => {
   trail.length = 0;
   sql.length = 0;
   copyFails = null;
+  deleteFails = null;
+  stallNextWrite = null;
 
   raw = new DatabaseSync(':memory:');
   await bootDatabase();
@@ -288,14 +319,20 @@ describe('CaptureDraftStore: capturing a piece (M2, FR-012)', () => {
     expect(files.has(`${NEW_DIR}p2.jpg`)).toBe(false);
   });
 
-  it('never copies an existing server media item in an edit', async () => {
+  it('never copies an existing server media item, even one with a local file in hand', async () => {
     seedEntry('e1');
-    await store.startEdit('e1', [remotePhoto('r1')]);
+    await store.startEdit('e1', []);
+
+    // The realistic edit shape: an item the server holds, which this phone also happens to have
+    // a local copy of to show on screen. The server's copy is the real one -- copying it into the
+    // draft folder would make a second durable copy of something already safe, and re-uploading
+    // it would duplicate the memory's media.
+    const stored = await store.addPiece('edit', remotePhoto('r1', 'file:///cache/r1-display.jpg'));
 
     expect(mockFileSystem.copyAsync).not.toHaveBeenCalled();
-    const [piece] = (await store.getEditFor('e1')).pieces;
-    expect(piece.remote).toEqual({ id: 'srv-1', url: 'https://cdn/orig.jpg' });
-    expect(piece.uri).toBeUndefined();
+    expect(stored.uri).toBe('file:///cache/r1-display.jpg');
+    expect(stored.remote).toEqual({ id: 'srv-1', url: 'https://cdn/orig.jpg' });
+    expect(files.has(`${EDIT_DIR}r1.jpg`)).toBe(false);
   });
 });
 
@@ -353,6 +390,106 @@ describe('CaptureDraftStore: writing text (FR-012)', () => {
     await jest.advanceTimersByTimeAsync(5000);
     expect(draftWrites()).toHaveLength(1);
   });
+
+  it('throws rather than losing the keystrokes when the slot was never loaded', () => {
+    // A cold start: the screen typed before loading. Returning quietly would throw the typing
+    // away where nobody could see it happen, which is the one outcome FR-012 forbids.
+    expect(() => store.updateText('new', 't1', 'into the void')).toThrow(/load/i);
+  });
+});
+
+/**
+ * The window the first round's guard missed. The cache is allowed to be ahead of the row -- that
+ * is what the debounce is for -- but every read has to be given the newer of the two, and a
+ * pending timer is not what "newer" means. A write that has started has no timer and has not
+ * landed, and anything handed the row in that window re-caches a draft that is behind the
+ * database. The next write then persists it, and the keystrokes in flight are gone for good.
+ */
+describe('CaptureDraftStore: a write in flight (FR-012)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('a read after the debounce has fired but before the write lands keeps the newest text', async () => {
+    await store.addPiece('new', note('t1', ''));
+
+    const gate = deferred();
+    stallNextWrite = gate;
+    store.updateText('new', 't1', 'A');
+    await jest.advanceTimersByTimeAsync(store.TEXT_DEBOUNCE_MS);
+
+    // The timer has fired and deleted itself; the write is in flight and the row is still old.
+    expect(textIn('new', 't1')).toBe('');
+    const seen = await store.load('new');
+    expect(seen.pieces[0].content).toBe('A');
+
+    gate.release();
+    await store.flush('new');
+    expect(textIn('new', 't1')).toBe('A');
+
+    // And the draft the store went on to build was the newer one, so a later write cannot
+    // resurrect the empty text over the top of it.
+    await store.addPiece('new', note('t2', 'B'));
+    await store.flush('new');
+    expect(textIn('new', 't1')).toBe('A');
+    expect(textIn('new', 't2')).toBe('B');
+  });
+
+  it('a read during a flush keeps the newest text', async () => {
+    await store.addPiece('new', note('t1', ''));
+    store.updateText('new', 't1', 'A');
+
+    const gate = deferred();
+    stallNextWrite = gate;
+    const flushing = store.flush('new');
+
+    // flush cancelled the timer first, so "a timer is pending" is false here too.
+    const seen = await store.load('new');
+    expect(seen.pieces[0].content).toBe('A');
+
+    gate.release();
+    await flushing;
+    expect(textIn('new', 't1')).toBe('A');
+  });
+
+  it('never lets an older draft land on top of a newer one', async () => {
+    await store.addPiece('new', note('t1', ''));
+
+    const gate = deferred();
+    stallNextWrite = gate;
+    store.updateText('new', 't1', 'A');
+    await jest.advanceTimersByTimeAsync(store.TEXT_DEBOUNCE_MS);
+
+    // More typing, and a blur, while the first write is still in flight.
+    store.updateText('new', 't1', 'AB');
+    const flushing = store.flush('new');
+
+    gate.release();
+    await flushing;
+
+    // Whatever order the two writes resolved in, the database ends with the later text.
+    expect(textIn('new', 't1')).toBe('AB');
+  });
+
+  it('backgrounding during a pending debounce leaves the newest text in the database', async () => {
+    await store.addPiece('new', note('t1', ''));
+    sql.length = 0;
+
+    store.updateText('new', 't1', 'A');
+    store.updateText('new', 't1', 'AB');
+
+    // AppState -> background: the screen flushes, and the phone may be killed a moment later.
+    await store.flush('new');
+    expect(textIn('new', 't1')).toBe('AB');
+
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(textIn('new', 't1')).toBe('AB');
+    expect(draftWrites()).toHaveLength(1);
+  });
 });
 
 describe('CaptureDraftStore: surviving the app being killed (M1, FR-012)', () => {
@@ -406,6 +543,84 @@ describe('CaptureDraftStore: one new and one edit, no more (FR-013)', () => {
     await expect(store.getEditFor('e2')).resolves.toBeNull();
   });
 
+  it('discards an edit row that names no memory at all, with its folder', async () => {
+    // Reachable without anybody misusing the store: the memory is deleted on another device
+    // mid-edit, the next load clears the row and the cache, and a capture still on screen adds
+    // a piece to a slot that no longer knows what it is editing. The row that leaves behind
+    // matches no card and no cleanup can reach it, so it is swept on the next load.
+    seedEntry('e1', { deleted_at: 1700000000 });
+    await store.startEdit('e1', [note('t1', 'mid-sentence')]);
+    await store.load('edit');
+    await store.addPiece('edit', photo('p1'));
+    expect(rowFor('edit').entry_local_id).toBeNull();
+
+    await expect(store.load('edit')).resolves.toBeNull();
+    expect(rowFor('edit')).toBeNull();
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(false);
+  });
+});
+
+/**
+ * The edit slot is a slot, not a drawer. Moving it to a different memory has to pass through
+ * (none), because that is what takes the previous memory's media with it; and an edit of a memory
+ * that is gone has to take itself away. Fake timers so "a new draft, not the old row renamed" is
+ * an exact claim about `created_at` rather than a race with the millisecond clock.
+ */
+describe("CaptureDraftStore: the edit slot's lifecycle (FR-013, FR-015)", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('starting an edit of a different memory takes the previous one away first', async () => {
+    seedEntry('e1');
+    seedEntry('e2');
+    await store.startEdit('e1', [note('t1', 'first edit')]);
+    await store.addPiece('edit', photo('p1'));
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(true);
+    const firstCreatedAt = rowFor('edit').created_at;
+    await jest.advanceTimersByTimeAsync(1000);
+
+    await store.startEdit('e2', [note('t2', 'a different memory')]);
+
+    // The lifecycle passes through (none), and that is what takes the folder with it: the
+    // previous memory's photographs must not be sitting in a different memory's draft folder,
+    // where discarding this one would be the only thing that ever removed them.
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(false);
+    expect(mockFileSystem.deleteAsync).toHaveBeenCalledWith(EDIT_DIR, { idempotent: true });
+
+    // And it is a new draft, not the old row wearing a new name: its creation time is its own.
+    const row = rowFor('edit');
+    expect(row.entry_local_id).toBe('e2');
+    expect(row.created_at).not.toBe(firstCreatedAt);
+    expect(row.created_at).toBe((await store.getEditFor('e2')).createdAt);
+    expect(JSON.parse(row.pieces_json).map((piece) => piece.localId)).toEqual(['t2']);
+  });
+
+  it('starting an edit of the SAME memory keeps its draft, folder and creation time', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', [note('t1', 'first change')]);
+    await store.addPiece('edit', photo('p1'));
+    const firstCreatedAt = rowFor('edit').created_at;
+    mockFileSystem.deleteAsync.mockClear();
+    await jest.advanceTimersByTimeAsync(1000);
+
+    await store.startEdit('e1', [note('t1', 'another change')]);
+
+    // Task 57 reopens an unsaved edit of the same memory; nothing here may throw its media away.
+    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(true);
+
+    // The row and the draft in hand agree about when the edit began -- one of them silently
+    // winning at the next restart is exactly the sort of disagreement that is never noticed.
+    const row = rowFor('edit');
+    expect(row.created_at).toBe(firstCreatedAt);
+    expect((await store.getEditFor('e1')).createdAt).toBe(firstCreatedAt);
+  });
+
   it('discards an unsaved edit of a memory that no longer exists, with its folder', async () => {
     seedEntry('gone');
     await store.startEdit('gone', [note('t1', 'mid-sentence')]);
@@ -445,6 +660,18 @@ describe('CaptureDraftStore: letting go of a draft (M3, FR-015, FR-016)', () => 
     await expect(store.load('new')).resolves.toBeNull();
   });
 
+  it('still lets go of the draft when the folder cannot be deleted', async () => {
+    await store.addPiece('new', photo('p1'));
+    deleteFails = new Error('EBUSY: resource busy');
+
+    // A save that succeeded must not report an error, or the person saves again and ends up with
+    // the memory twice. Files nobody can reach are harmless -- no screen reads the folder -- but
+    // a draft that outlives its save is not.
+    await expect(store.clearAfterSave('new')).resolves.toBeUndefined();
+    expect(rowFor('new')).toBeNull();
+    await expect(store.load('new')).resolves.toBeNull();
+  });
+
   it('leaves the other slot alone', async () => {
     seedEntry('e1');
     await store.addPiece('new', photo('p1'));
@@ -454,6 +681,75 @@ describe('CaptureDraftStore: letting go of a draft (M3, FR-015, FR-016)', () => 
 
     expect(rowFor('new')).toBeNull();
     expect((await store.getEditFor('e1')).pieces).toHaveLength(1);
+  });
+});
+
+/**
+ * `spec.md`'s edit scenario is "adds or removes pieces", and FR-013 counts a removal as the
+ * change that makes an edit unsaved. Removal is an edit-mode need: nothing asks for it while a
+ * new memory is being captured.
+ */
+describe('CaptureDraftStore: taking a piece back out (FR-013)', () => {
+  it('removes the piece from the draft and its file from the phone', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', []);
+    await store.addPiece('edit', photo('p1'));
+    await store.addPiece('edit', note('t1', 'a line'));
+    await store.addPiece('edit', photo('p2'));
+
+    const draft = await store.removePiece('edit', 'p1');
+
+    expect(draft.pieces.map((piece) => piece.localId)).toEqual(['t1', 'p2']);
+    expect(piecesOf('edit').map((piece) => piece.localId)).toEqual(['t1', 'p2']);
+    expect(files.has(`${EDIT_DIR}p1.jpg`)).toBe(false);
+    // The pieces that stayed keep their media.
+    expect(files.has(`${EDIT_DIR}p2.jpg`)).toBe(true);
+  });
+
+  it('records the removal before deleting the file, never the other way round', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', []);
+    await store.addPiece('edit', photo('p1'));
+    trail.length = 0;
+
+    await store.removePiece('edit', 'p1');
+
+    // The mirror of the capture rule: a draft must never hold a piece whose file has already
+    // gone, which is what a failed write after a successful delete would leave behind.
+    const recordedAt = trail.findIndex((step) => /INSERT INTO capture_drafts/i.test(step));
+    const deletedAt = trail.findIndex((step) => step === `delete ${EDIT_DIR}p1.jpg`);
+    expect(recordedAt).toBeGreaterThanOrEqual(0);
+    expect(deletedAt).toBeGreaterThan(recordedAt);
+  });
+
+  it('never deletes a file the phone does not own', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', []);
+    // An item the server holds, with a local copy on hand for the screen...
+    await store.addPiece('edit', remotePhoto('r1', 'file:///cache/r1-display.jpg'));
+    // ...and a text piece, which has no file at all.
+    await store.addPiece('edit', note('t1', 'a line'));
+    mockFileSystem.deleteAsync.mockClear();
+
+    await store.removePiece('edit', 'r1');
+    await store.removePiece('edit', 't1');
+
+    // Deleting the server's media from under it, or a file this store never copied, is not
+    // this store's business.
+    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalled();
+    expect(piecesOf('edit')).toEqual([]);
+  });
+
+  it('does nothing for a piece that is not there', async () => {
+    seedEntry('e1');
+    await store.startEdit('e1', [note('t1', 'a line')]);
+    sql.length = 0;
+
+    await expect(store.removePiece('edit', 'nope')).resolves.toMatchObject({
+      pieces: [expect.objectContaining({ localId: 't1' })],
+    });
+    expect(draftWrites()).toHaveLength(0);
+    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalled();
   });
 });
 
@@ -477,6 +773,8 @@ describe('CaptureDraftStore: invisible to sync (FR-014, SC-004)', () => {
     // ...and an edit captured, found again and discarded.
     await store.startEdit('e1', [note('t2', 'changed')]);
     await store.addPiece('edit', photo('p2'));
+    await store.addPiece('edit', photo('p3'));
+    await store.removePiece('edit', 'p3');
     await store.getEditFor('e1');
     await store.discard('edit');
 
