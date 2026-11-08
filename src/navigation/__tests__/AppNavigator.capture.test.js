@@ -5,12 +5,16 @@
  *
  * Two different things are being checked here, and they need two different renders:
  *
- * - **Behaviour** -- the tab list, and what tapping the FAB actually does -- is checked by
- *   mounting the real `@react-navigation/bottom-tabs` and `@react-navigation/native-stack`,
- *   with only the leaf screens replaced by trivial stand-ins (so this file is about
- *   navigation shape, not about what any one screen renders -- mounting the real screens
- *   would drag in SQLite, location, sync and media dependencies that have nothing to do
- *   with the question being asked here).
+ * - **Behaviour** -- the tab list, and what the FAB actually does -- is checked by mounting
+ *   the real `@react-navigation/bottom-tabs` and `@react-navigation/native-stack`, with
+ *   only the leaf screens replaced by trivial stand-ins (so this file is about navigation
+ *   shape, not about what any one screen renders -- mounting the real screens would drag
+ *   in SQLite, location, sync and media dependencies that have nothing to do with the
+ *   question being asked here). The FAB is `CaptureFab` mounted once per tab screen (see
+ *   `withCaptureFab` in `AppNavigator.js`), which makes "on every tab" six independent
+ *   wirings rather than one structurally-unbreakable overlay -- so a dedicated test
+ *   navigates to each of the six tabs in turn and checks that one is there, rather than
+ *   trusting that finding one proves all six.
  *
  * - **Registration** -- whether `Capture` and `Events` are configured on the root stack at
  *   all, and with what `options` -- is a fact about *configuration*, not *behaviour*.
@@ -19,7 +23,10 @@
  *   find there. This file's second describe block replaces `createNativeStackNavigator`
  *   with a dumb pass-through (`Navigator` renders `children` as-is, `Screen` renders
  *   nothing) so every `<Stack.Screen>` becomes a real, inspectable node carrying its own
- *   `name` and `options` props.
+ *   `name` and `options` props. The leaf screens are still replaced with stand-ins here too
+ *   -- `Screen` renders nothing, so skipping that mock would happen to pass today, but only
+ *   by accident, and the real screens' module-level imports (SQLite, location, media) are
+ *   exactly the dependencies this file exists to stay clear of.
  *
  * Both groups need their own, different mock of the same module paths, so this file uses
  * `jest.doMock` + `jest.resetModules()` + `require` throughout (never the hoisted
@@ -49,6 +56,16 @@ const SCREEN_NAMES = [
   'EventFormScreen',
 ];
 
+/** The six tabs, paired with the module name their `withCaptureFab` wrapper carries. */
+const TABS = [
+  ['Home', 'HomeScreen'],
+  ['Journal', 'JournalScreen'],
+  ['Family', 'FamilyScreen'],
+  ['Friends', 'FriendsScreen'],
+  ['Places', 'PlacesScreen'],
+  ['Timeline', 'TimelineScreen'],
+];
+
 /** Every screen AppNavigator imports, replaced with a one-line stand-in. */
 function mockLeafScreens() {
   SCREEN_NAMES.forEach((name) => {
@@ -66,6 +83,18 @@ function mockAuth() {
   jest.doMock('../../context/AuthContext', () => ({
     useAuth: () => ({ isAuthenticated: true, isLoading: false }),
   }));
+}
+
+/**
+ * The `capture-fab` testID, found without descending into a match's own subtree.
+ * `TouchableOpacity` forwards `testID` through several of its own internal layers (checked
+ * directly under jest: `SimpleFAB` itself, two `TouchableOpacity` fibers, `Animated.View`,
+ * and two host `View`s all carry the same `testID` for one logical button -- a plain
+ * `findAllByProps` would report 6 matches for a single FAB). `{ deep: false }` stops at the
+ * first (outermost) match per branch, which is what "how many FABs" actually means here.
+ */
+function fabsIn(instance) {
+  return instance.findAllByProps({ testID: 'capture-fab' }, { deep: false });
 }
 
 describe('MainTabs: the six tabs, and the capture entry point over them', () => {
@@ -110,8 +139,46 @@ describe('MainTabs: the six tabs, and the capture entry point over them', () => 
     });
   });
 
-  it('renders a CaptureFab over the tabs that opens Capture in one tap, with { mode: "new" } (FR-001)', async () => {
-    const { TouchableOpacity } = require('react-native');
+  it('renders a CaptureFab on every one of the six tabs, not just the one shown first (FR-001)', async () => {
+    const { BottomTabBar } = require('@react-navigation/bottom-tabs');
+
+    let tree;
+    await act(async () => {
+      tree = create(React.createElement(AppNavigator));
+    });
+
+    // The tab navigator's own `navigation` prop (the one BottomTabBar's default buttons
+    // use to switch tabs), so each tab actually gets focused and mounted in turn, rather
+    // than asserting against whatever a previous tab left behind.
+    const { navigation } = tree.root.findByType(BottomTabBar).props;
+
+    for (const [routeName, screenModuleName] of TABS) {
+      await act(async () => {
+        navigation.navigate(routeName);
+      });
+
+      // Scoped to *this* tab's own wrapper -- not the whole tree -- so a FAB left mounted
+      // by an earlier tab (lazy screens stay mounted once visited) can't be mistaken for
+      // this one having its own. `withCaptureFab`'s wrapper carries the wrapped screen's
+      // module name in its displayName, which is how it's found here.
+      const wrapper = tree.root.find(
+        (node) => node.type && node.type.displayName === `withCaptureFab(${screenModuleName})`
+      );
+
+      // { deep: false }: TouchableOpacity forwards `testID` through several of its own
+      // internal layers (checked directly: SimpleFAB itself, two TouchableOpacity fibers,
+      // Animated.View, two host Views all carry the same testID for one logical button),
+      // so a deep findAllByProps would report 6 for a single FAB. `deep: false` stops
+      // descending once it matches the outermost one, which is what "exactly one FAB" means.
+      expect(fabsIn(wrapper)).toHaveLength(1);
+    }
+
+    await act(async () => {
+      tree.unmount();
+    });
+  });
+
+  it('opens Capture with { mode: "new" } when the FAB is pressed (FR-001)', async () => {
     const CaptureScreen = require('../../screens/capture/CaptureScreen').default;
 
     let tree;
@@ -119,10 +186,7 @@ describe('MainTabs: the six tabs, and the capture entry point over them', () => 
       tree = create(React.createElement(AppNavigator));
     });
 
-    // Every leaf screen is a trivial <Text> stand-in, so the one TouchableOpacity on
-    // screen is the FAB's -- this is itself part of what FR-001 asks: a single "+",
-    // reachable from the tab currently showing.
-    const fab = tree.root.findByType(TouchableOpacity);
+    const [fab] = fabsIn(tree.root);
 
     await act(async () => {
       fab.props.onPress();
@@ -149,6 +213,7 @@ describe('the root stack: Capture registered as a modal, Events left alone', () 
     ({ create, act } = require('react-test-renderer'));
 
     mockAuth();
+    mockLeafScreens();
 
     // Stack.Navigator/Stack.Screen become dumb pass-throughs instead of the real
     // navigator: Navigator renders its children untouched, and Screen is a real (if
