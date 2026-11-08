@@ -16,6 +16,23 @@
  *   - Done calls `onDone`;
  *   - a denied camera permission shows the inline message with Open Settings and no shutters.
  *
+ * Added in T026's first review round, all of it about a capture that produced nothing:
+ *   - **every failed capture is signalled** through `onCaptureFailed`, never swallowed --
+ *     `recordAsync` rejecting, `recordAsync` resolving `undefined` (which its own typings
+ *     declare), `takePictureAsync` rejecting, a picture with no `uri`, and a parent whose
+ *     `onShot` threw. Each carries `kind`, `reason`, `error`, `capturedAt` and `duration`,
+ *     and each means *no piece was added*; a lost recording also says so on screen;
+ *   - **Video is unavailable while a photo is in flight** -- the mirror of Photo being
+ *     unavailable while recording, and reachable by an ordinary fast double-tap;
+ *   - a second Video tap *inside* the microphone dialog asks once and records once, and a
+ *     permission ask that *rejects* is a refusal rather than a dead Video shutter;
+ *   - a clip ended by the camera's own cap never reports more than the cap;
+ *   - `stopRecording()` throwing does not take the press handler down with it, and does not
+ *     stamp the clip from a stop that failed;
+ *   - the mount flag survives an effect being torn down and set up again (StrictMode, and
+ *     React Fast Refresh in development), which otherwise discards every video;
+ *   - a photo reaches the `onShot` the parent has *now*, not the one the tap closed over.
+ *
  * `capturedAt` is the instant the capture **started** (research R8). For a photo that is the
  * shutter tap. For a video it is the tap that started it, not the tap that stopped it -- the
  * difference is the whole length of the clip, and getting it wrong puts the video in the
@@ -128,9 +145,20 @@ jest.mock('expo-camera', () => {
 
   let cameraPermission = grant();
   let microphonePermission = grant();
+  /** What the microphone *dialog* answers, when that differs from the hook's state. */
+  let microphoneAnswer = null;
+  /** Dialogs still on screen, oldest first -- only when asking is held open. */
+  let microphoneAsks = null;
 
   const requestCameraPermission = jest.fn(async () => cameraPermission);
-  const requestMicrophonePermission = jest.fn(async () => microphonePermission);
+  const requestMicrophonePermission = jest.fn(() => {
+    const answer = microphoneAnswer ?? microphonePermission;
+    if (!microphoneAsks) return Promise.resolve(answer);
+    // Held open, the way an OS permission dialog is: it answers when the test says so.
+    return new Promise((resolve) => {
+      microphoneAsks.push(() => resolve(answer));
+    });
+  });
 
   const api = {
     CameraView,
@@ -153,6 +181,24 @@ jest.mock('expo-camera', () => {
     __refuseMicrophone: () => {
       microphonePermission = refuse();
     },
+    /**
+     * The microphone has not been asked for yet, and the dialog is held open: a Video tap
+     * reaches `requestMicrophonePermission` and waits there until `__answerMicrophoneAsk`.
+     */
+    __askMicrophoneSlowly: () => {
+      microphonePermission = {
+        granted: false,
+        status: 'undetermined',
+        canAskAgain: true,
+        expires: 'never',
+      };
+      microphoneAnswer = grant();
+      microphoneAsks = [];
+    },
+    __pendingMicrophoneAsks: () => (microphoneAsks ? microphoneAsks.length : 0),
+    __answerMicrophoneAsk: () => {
+      microphoneAsks.shift()();
+    },
     __reset: () => {
       photoCount = 0;
       videoCount = 0;
@@ -160,6 +206,8 @@ jest.mock('expo-camera', () => {
       inFlight = null;
       cameraPermission = grant();
       microphonePermission = grant();
+      microphoneAnswer = null;
+      microphoneAsks = null;
       takePictureAsync.mockClear();
       recordAsync.mockClear();
       stopRecording.mockClear();
@@ -183,7 +231,18 @@ let trees = [];
 let onShot;
 let onDone;
 let onClose;
+let onCaptureFailed;
 let openSettings;
+
+const element = (props = {}) => (
+  <DualShutterCamera
+    onShot={onShot}
+    onDone={onDone}
+    onClose={onClose}
+    onCaptureFailed={onCaptureFailed}
+    {...props}
+  />
+);
 
 /**
  * Awaited, not synchronous: `@expo/vector-icons` loads its font asynchronously and sets
@@ -193,9 +252,21 @@ let openSettings;
 const render = async (props = {}) => {
   let tree;
   await act(async () => {
-    tree = renderer.create(
-      <DualShutterCamera onShot={onShot} onDone={onDone} onClose={onClose} {...props} />,
-    );
+    tree = renderer.create(element(props));
+  });
+  trees.push(tree);
+  return tree;
+};
+
+/**
+ * The same component under `StrictMode`, which tears an effect down and sets it up again
+ * on mount -- what React Fast Refresh does in development, and what turning StrictMode on
+ * would do in production code paths.
+ */
+const renderStrict = async (props = {}) => {
+  let tree;
+  await act(async () => {
+    tree = renderer.create(<React.StrictMode>{element(props)}</React.StrictMode>);
   });
   trees.push(tree);
   return tree;
@@ -259,6 +330,7 @@ beforeEach(() => {
   onShot = jest.fn();
   onDone = jest.fn();
   onClose = jest.fn();
+  onCaptureFailed = jest.fn();
   openSettings = jest.spyOn(Linking, 'openSettings').mockImplementation(async () => {});
 });
 
@@ -640,5 +712,427 @@ describe('DualShutterCamera: a denied microphone', () => {
     await tap(tree, 'camera-photo-button');
     expect(onShot).toHaveBeenCalledTimes(1);
     expect(onShot.mock.calls[0][0].kind).toBe('photo');
+  });
+});
+
+describe('DualShutterCamera: a capture that produced nothing is signalled, not swallowed', () => {
+  // There is no crash reporting in this app (`CLAUDE.md`), so a `console.warn` is not a
+  // signal, and going back to the idle shutters is exactly what "you have not captured
+  // anything yet" looks like. `CaptureScreen` owns the inline failed-capture message for
+  // the capture screen as a whole (UI contract) and cannot show one it is never told about.
+  it('reports a recording whose recordAsync rejected, and hands up no piece', async () => {
+    const tree = await render();
+
+    // The most likely real-device failure of the `mode`-a-render-early design: the very
+    // first Video tap rejects. Silent, it is indistinguishable from nothing happening.
+    camera.__recordAsync.mockImplementationOnce(async () => {
+      throw new Error('the camera could not start recording');
+    });
+
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+
+    const failure = onCaptureFailed.mock.calls[0][0];
+    expect(failure.kind).toBe('video');
+    expect(failure.reason).toBe('capture-failed');
+    expect(failure.error).toBeInstanceOf(Error);
+    // Enough for the screen to say something true about what was lost.
+    expect(failure.capturedAt).toBe(START_ISO);
+    expect(failure.duration).toBe(0);
+
+    // And the camera says it on screen itself, as it does for a refused microphone.
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+    expect(textAt(tree, 'camera-capture-failed-message')).toMatch(/video/i);
+
+    // Back to idle, and usable.
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    expect(pressable(tree, 'camera-photo-button').props.disabled).toBeFalsy();
+  });
+
+  it('reports a long recording that resolved with no file at all', async () => {
+    const tree = await render();
+
+    // `CameraView.d.ts` declares `recordAsync(): Promise<{uri: string} | undefined>`, so
+    // `undefined` is documented, not theoretical. Fifty seconds, a tap on stop, no piece.
+    let finishRecording;
+    camera.__recordAsync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRecording = () => resolve(undefined);
+        }),
+    );
+
+    await tap(tree, 'camera-video-button');
+    await elapse(50000);
+    await tap(tree, 'camera-video-button');
+    await act(async () => {
+      finishRecording();
+    });
+
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+
+    const failure = onCaptureFailed.mock.calls[0][0];
+    expect(failure.kind).toBe('video');
+    expect(failure.reason).toBe('no-file');
+    expect(failure.error).toBeNull();
+    expect(failure.capturedAt).toBe(START_ISO);
+    expect(failure.duration).toBe(50);
+
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+  });
+
+  it('reports a photo whose takePictureAsync rejected, and stays usable', async () => {
+    const tree = await render();
+
+    camera.__takePictureAsync.mockImplementationOnce(async () => {
+      throw new Error('the shutter failed');
+    });
+
+    await tap(tree, 'camera-photo-button');
+
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+
+    const failure = onCaptureFailed.mock.calls[0][0];
+    expect(failure.kind).toBe('photo');
+    expect(failure.reason).toBe('capture-failed');
+    expect(failure.error).toBeInstanceOf(Error);
+    expect(failure.capturedAt).toBe(START_ISO);
+    expect(failure.duration).toBe(0);
+
+    // One lost photo does not end the session.
+    await tap(tree, 'camera-photo-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a photo that resolved without naming a file', async () => {
+    const tree = await render();
+
+    camera.__takePictureAsync.mockImplementationOnce(async () => ({
+      width: 4032,
+      height: 3024,
+    }));
+
+    await tap(tree, 'camera-photo-button');
+
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed.mock.calls[0][0].kind).toBe('photo');
+    expect(onCaptureFailed.mock.calls[0][0].reason).toBe('no-file');
+    expect(onCaptureFailed.mock.calls[0][0].error).toBeNull();
+    // Nothing in the strip either: a thumbnail for a piece nobody has is the same lie.
+    expect(nodeAt(tree, 'camera-thumb-0')).toBeUndefined();
+  });
+
+  it('reports a piece the parent itself failed to keep, and shows no thumbnail for it', async () => {
+    const tree = await render();
+
+    // tasks.md's T029 case is "`addPiece` rejects (storage full)"; a handler that throws
+    // synchronously is the same shape, and `onShot` is called, not awaited.
+    onShot.mockImplementationOnce(() => {
+      throw new Error('storage full');
+    });
+
+    await tap(tree, 'camera-photo-button');
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed.mock.calls[0][0].kind).toBe('photo');
+    expect(onCaptureFailed.mock.calls[0][0].reason).toBe('handler-failed');
+    expect(nodeAt(tree, 'camera-thumb-0')).toBeUndefined();
+
+    // And the camera still works.
+    await tap(tree, 'camera-photo-button');
+    expect(onShot).toHaveBeenCalledTimes(2);
+    expect(nodeAt(tree, 'camera-thumb-0')).toBeDefined();
+  });
+
+  it('signals nothing at all when the photo and the video are both fine', async () => {
+    const tree = await render();
+
+    await tap(tree, 'camera-photo-button');
+    await tap(tree, 'camera-video-button');
+    await elapse(3000);
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot).toHaveBeenCalledTimes(2);
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+  });
+
+  it('clears the notice when the next recording is started', async () => {
+    const tree = await render();
+
+    camera.__recordAsync.mockImplementationOnce(async () => {
+      throw new Error('the camera could not start recording');
+    });
+    await tap(tree, 'camera-video-button');
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+
+    await tap(tree, 'camera-video-button');
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+
+    await elapse(2000);
+    await tap(tree, 'camera-video-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+  });
+});
+
+describe('DualShutterCamera: a photo in flight blocks the Video shutter (FR-008)', () => {
+  // `mode` flips `picture` -> `video` on the Video tap. Issuing that flip, and `recordAsync`
+  // with it, while a still capture is in flight is the mirror of the guard that stops Photo
+  // during a recording. On a device `takePictureAsync` takes hundreds of milliseconds, so
+  // this is an ordinary fast double-tap, not a theoretical window.
+  it('disables Video while a photo is being taken, and records nothing if it is reached', async () => {
+    const tree = await render();
+
+    let finishPhoto;
+    camera.__takePictureAsync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPhoto = () => resolve({ uri: camera.__photoUri(1), width: 4032, height: 3024 });
+        }),
+    );
+
+    await tap(tree, 'camera-photo-button');
+    expect(onShot).not.toHaveBeenCalled(); // still in flight
+
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBe(true);
+
+    // Belt and braces: even reached directly, it must not flip the preview or record.
+    await tap(tree, 'camera-video-button');
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(preview(tree).props.mode).toBe('picture');
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+
+    await act(async () => {
+      finishPhoto();
+    });
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].kind).toBe('photo');
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+
+    // And Video works again the moment the photo has landed.
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBeFalsy();
+    await tap(tree, 'camera-video-button');
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    expect(preview(tree).props.mode).toBe('video');
+  });
+});
+
+describe('DualShutterCamera: a second Video tap inside the permission ask', () => {
+  // The guard at the top of `beginRecording` is evaluated, then the microphone permission
+  // is awaited -- an OS dialog, open for as long as the person leaves it. Only a flag set
+  // *before* that await can stop a second tap, because no state has changed yet.
+  it('asks once and records once when the second tap lands while the dialog is up', async () => {
+    camera.__askMicrophoneSlowly();
+    const tree = await render();
+
+    const button = pressable(tree, 'camera-video-button');
+
+    await act(async () => {
+      button.props.onPress();
+    });
+    expect(camera.__pendingMicrophoneAsks()).toBe(1);
+
+    await act(async () => {
+      button.props.onPress();
+    });
+    expect(camera.__pendingMicrophoneAsks()).toBe(1);
+
+    await elapse(4000);
+    await act(async () => {
+      camera.__answerMicrophoneAsk();
+    });
+
+    // No second dialog left hanging, and one recording for one recording's worth of taps.
+    expect(camera.__pendingMicrophoneAsks()).toBe(0);
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+
+    await elapse(6000);
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].duration).toBe(6);
+
+    // And the pending flag was not left set by the tap that was refused: a stale one would
+    // refuse every recording from here on.
+    await tap(tree, 'camera-video-button');
+    expect(camera.__pendingMicrophoneAsks()).toBe(1);
+    await act(async () => {
+      camera.__answerMicrophoneAsk();
+    });
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks again after a refusal rather than going quietly dead', async () => {
+    camera.__refuseMicrophone();
+    const tree = await render();
+
+    await tap(tree, 'camera-video-button');
+    await tap(tree, 'camera-video-button');
+
+    expect(camera.useMicrophonePermissions()[1]).toHaveBeenCalledTimes(2);
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-microphone-denied')).toBe(true);
+  });
+});
+
+describe('DualShutterCamera: the mounted flag survives an effect re-run', () => {
+  // `mountedRef` is `useRef(true)` and the mount effect's cleanup sets it `false`. React
+  // Fast Refresh in development, and `StrictMode`, tear an effect down and set it up again
+  // -- after which the flag is `false` for the rest of the component's life and **every
+  // video is silently discarded**.
+  it('still hands up the video under StrictMode', async () => {
+    // react-native's own `TouchableOpacity` reaches for `findNodeHandle` to animate its
+    // opacity, which StrictMode deprecates -- its warning, not this component's, and the
+    // only reason this suite is not silent. Anything *else* console.error says is still a
+    // failure, which is what `unexpected` is for.
+    const unexpected = [];
+    const consoleError = jest.spyOn(console, 'error').mockImplementation((...args) => {
+      const first = typeof args[0] === 'string' ? args[0] : String(args[0]);
+      // The format string, before `%s` substitution: "%s is deprecated in StrictMode…".
+      if (!first.includes('is deprecated in StrictMode')) unexpected.push(first);
+    });
+
+    try {
+      const tree = await renderStrict();
+
+      await tap(tree, 'camera-video-button');
+      await elapse(5000);
+      await tap(tree, 'camera-video-button');
+
+      expect(onShot).toHaveBeenCalledTimes(1);
+      expect(onShot.mock.calls[0][0].kind).toBe('video');
+      expect(onShot.mock.calls[0][0].duration).toBe(5);
+      expect(onCaptureFailed).not.toHaveBeenCalled();
+      expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    } finally {
+      // Unmounted here rather than in the shared teardown, so the same react-native
+      // warning on the way out is not printed after the test has finished.
+      trees.forEach((tree) => act(() => tree.unmount()));
+      trees = [];
+      consoleError.mockRestore();
+    }
+
+    expect(unexpected).toEqual([]);
+  });
+});
+
+describe('DualShutterCamera: a capped clip never reports more than the cap (FR-008)', () => {
+  // The length is measured from the clock, because `recordAsync` carries no duration --
+  // and the clock is read after the camera's own cap has resolved the recording, so a
+  // capped clip measures a little over 60 s. A reader of FR-008's "limited to 60 seconds"
+  // could reject 60.4.
+  it('clamps a clip ended by the camera to the cap', async () => {
+    const tree = await render();
+
+    await tap(tree, 'camera-video-button');
+    await elapse(60400);
+
+    expect(camera.__stopRecording).not.toHaveBeenCalled(); // the cap was the camera's
+    expect(onShot).toHaveBeenCalledTimes(1);
+
+    const [piece] = onShot.mock.calls[0];
+    expect(piece.duration).toBe(60);
+  });
+
+  it('leaves a clip inside the cap exactly as measured', async () => {
+    const tree = await render();
+
+    await tap(tree, 'camera-video-button');
+    await elapse(7500);
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot.mock.calls[0][0].duration).toBe(7.5);
+  });
+});
+
+describe('DualShutterCamera: a stop that throws', () => {
+  // The unmount cleanup wraps `stopRecording()` in a `try`/`catch` and its comment concedes
+  // the call can throw. The same call from a press handler needs the same guard -- and the
+  // window is real: the camera's own cap can resolve the recording natively a moment before
+  // this component has committed `setIsRecording(false)`.
+  it('survives it, and does not stamp the clip from a stop that failed', async () => {
+    const tree = await render();
+
+    await tap(tree, 'camera-video-button');
+    await elapse(2000);
+
+    camera.__stopRecording.mockImplementationOnce(() => {
+      throw new Error('nothing is recording');
+    });
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot).not.toHaveBeenCalled();
+
+    // The recording is still the camera's, and its own cap ends it -- with the clip's real
+    // length, not the length up to the stop that failed.
+    await elapse(58000);
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].duration).toBe(60);
+    expect(onShot.mock.calls[0][0].capturedAt).toBe(START_ISO);
+  });
+});
+
+describe('DualShutterCamera: a photo reaches the latest onShot', () => {
+  // `takePictureAsync` is awaited, and that await can outlive the `onShot` the tap closed
+  // over -- the same weakness the video path already holds `addShotRef` for.
+  it('hands the photo to the onShot the parent has now, not the one at the tap', async () => {
+    const tree = await render();
+
+    let finishPhoto;
+    camera.__takePictureAsync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPhoto = () => resolve({ uri: camera.__photoUri(1), width: 4032, height: 3024 });
+        }),
+    );
+
+    await tap(tree, 'camera-photo-button');
+
+    const later = jest.fn();
+    await act(async () => {
+      tree.update(element({ onShot: later }));
+    });
+
+    await act(async () => {
+      finishPhoto();
+    });
+
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(later.mock.calls[0][0].uri).toBe(camera.__photoUri(1));
+    expect(onShot).not.toHaveBeenCalled();
+  });
+});
+
+describe('DualShutterCamera: a permission ask that rejects', () => {
+  // The pending flag is now set *before* the microphone await, which is what stops a second
+  // tap inside the dialog. That makes an ask that *throws* the one way the flag could be
+  // left set for good -- after which Video is permanently dead and silent about it.
+  it('treats it as a refusal rather than leaving the Video shutter dead', async () => {
+    camera.__refuseMicrophone();
+    const tree = await render();
+
+    camera.useMicrophonePermissions()[1].mockImplementationOnce(() =>
+      Promise.reject(new Error('the permission dialog could not be shown')),
+    );
+
+    await tap(tree, 'camera-video-button');
+
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-microphone-denied')).toBe(true);
+
+    // And the next tap still reaches the ask.
+    await tap(tree, 'camera-video-button');
+    expect(camera.useMicrophonePermissions()[1]).toHaveBeenCalledTimes(2);
   });
 });
