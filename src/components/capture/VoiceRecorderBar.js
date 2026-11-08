@@ -195,6 +195,10 @@ export default function VoiceRecorderBar({
 
     // No file means nothing was recorded; a piece pointing at nothing is worse than none.
     if (uri) onClip?.(clip);
+
+    // Released only now the clip is out: the guard is "one clip per recording", not "one
+    // clip ever". US1 captures two clips in one memory.
+    finishingRef.current = false;
   }, [onClip, recorder]);
 
   const startRecording = useCallback(async () => {
@@ -223,6 +227,16 @@ export default function VoiceRecorderBar({
   }, [isRecording, onPermissionDenied, recorder]);
 
   /**
+   * Held in a ref so the effect below runs when the *status* changes and not every time
+   * the parent hands down a fresh `onClip` closure -- which would otherwise re-run it on
+   * the same status and record the same level twice in the waveform.
+   */
+  const finishClipRef = useRef(finishClip);
+  useEffect(() => {
+    finishClipRef.current = finishClip;
+  }, [finishClip]);
+
+  /**
    * Elapsed time, waveform levels and the 5:00 cap, all from the polled status.
    */
   useEffect(() => {
@@ -237,8 +251,8 @@ export default function VoiceRecorderBar({
     }
 
     // The cap stops the recording; it never throws the clip away (FR-006).
-    if (ms >= maxDurationMs) finishClip();
-  }, [finishClip, isRecording, maxDurationMs, status]);
+    if (ms >= maxDurationMs) finishClipRef.current();
+  }, [isRecording, maxDurationMs, status]);
 
   if (!isRecording) {
     return (

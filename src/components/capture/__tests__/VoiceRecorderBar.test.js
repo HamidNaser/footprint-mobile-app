@@ -233,6 +233,35 @@ describe('VoiceRecorderBar: one tap to start, one tap to stop (FR-006)', () => {
     expect(has(tree, 'voice-recorder-bar')).toBe(false);
   });
 
+  // US1 captures two clips in one memory ("a note, a clip, two photos, a video and a
+  // second clip"), so finishing one recording must leave the bar able to start another.
+  it('records again after a clip: each stop adds its own piece', async () => {
+    const tree = render();
+
+    await tap(tree, 'voice-record-button');
+    await elapse(4000);
+    await tap(tree, 'voice-stop-button');
+
+    await elapse(10000); // a pause between the two clips
+    const secondStart = new Date().toISOString();
+
+    await tap(tree, 'voice-record-button');
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+    await elapse(6000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(2);
+    // prepareToRecordAsync is required before *every* recording, not just the first.
+    expect(audio.__recorder.prepareToRecordAsync).toHaveBeenCalledTimes(2);
+
+    const [first] = onClip.mock.calls[0];
+    const [second] = onClip.mock.calls[1];
+    expect(first.capturedAt).toBe(START_ISO);
+    expect(first.duration).toBe(4);
+    expect(second.capturedAt).toBe(secondStart);
+    expect(second.duration).toBe(6);
+  });
+
   it('gives the clip a waveform: levels in 0..1, bounded, loud above quiet', async () => {
     const tree = render();
     audio.__setMetering(audio.QUIET_DB);
