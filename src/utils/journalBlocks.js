@@ -47,6 +47,12 @@
  * The legacy form takes `{text, attachedMedia, audioRecordings, textNotes, blockLocation,
  * mediaLocation}` and behaves exactly as it did before: `text` opens the entry, and the three
  * capture lists are merged by their integer `capturedAt` sequence.
+ *
+ * @throws {Error} if any piece carries a `kind` outside the four above. Nothing captured is ever
+ *   lost (FR-012), and this is the single funnel every piece passes through on its way to the
+ *   server, so a piece it cannot build refuses the whole entry rather than vanishing from it.
+ *   See `builderFor`. A caller must let this surface, not swallow it: a failed save leaves the
+ *   draft intact, so refusing keeps every piece on the device.
  */
 export function buildContentBlocks(input = {}) {
   return Array.isArray(input) ? blocksFromPieces(input) : blocksFromComposer(input);
@@ -64,9 +70,12 @@ export function buildContentBlocks(input = {}) {
  * sits between. Both forms need exactly this walk; only the block payloads differ, so they are
  * passed in.
  *
+ * A kind with no builder throws, and never silently emits nothing -- see `builderFor`.
+ *
  * @param {Array<{kind: string, item: object}>} captures - in the order they are to be emitted
  * @param {object} build - one builder per kind; `photos` takes the whole run. A builder may
  *   return nothing, which emits no block.
+ * @throws {Error} if any capture's kind has no builder
  */
 function assembleInOrder(captures, build) {
   const blocks = [];
@@ -81,16 +90,69 @@ function assembleInOrder(captures, build) {
         run.push(captures[i].item);
         i += 1;
       }
-      blocks.push(build.photos(run));
+      // Guarded like the branch below, because the contract above says a builder may return
+      // nothing. An unguarded push would put `null` in the block list -- a malformed block
+      // reaching the server, which is worse than a missing one. Neither `photos` builder
+      // returns nothing today; the guard is what makes the contract one rule rather than two.
+      const photoBlock = build.photos(run);
+      if (photoBlock) blocks.push(photoBlock);
       continue;
     }
 
-    const block = build[kind]?.(captures[i].item);
+    const { item } = captures[i];
+    const block = builderFor(build, kind, item)(item);
     if (block) blocks.push(block);
     i += 1;
   }
 
   return blocks;
+}
+
+/**
+ * The builder for one kind, or a refusal -- never a silent nothing.
+ *
+ * Two defects this closes, both of which a plain `build[kind]?.(item)` has:
+ *
+ * 1. **An unrecognised kind was discarded in silence** -- no block, no warning, no error. This
+ *    function is the single funnel every captured piece passes through on its way to the server,
+ *    and FR-012 ("nothing captured is ever lost", SC-002: zero pieces lost) is load-bearing for
+ *    this feature. A silent drop is the one failure shape that makes a loss invisible: the entry
+ *    saves, the draft is cleared, the sync succeeds, nothing logs, and the piece is not there.
+ *    The risk is not hypothetical -- kind names in this codebase do drift (`MediaPicker` calls a
+ *    gallery photo an `'image'`), so the next kind added is the next piece lost.
+ * 2. **`build[kind]` is a prototype-chain lookup.** `kind === 'constructor'` resolves to
+ *    `Object`, which called with the piece returns a truthy wrapper and is pushed as a block;
+ *    `'toString'` pushes the string `"[object Object]"`. Those are *malformed* blocks rather
+ *    than missing ones, which is worse -- the server is handed something no reader can parse.
+ *
+ * **Why it throws rather than warning.** A `console.warn` reaches no screen and no crash
+ * reporter on this app (see the repo's "no crash reporting" gap), so it is invisible to everyone
+ * but a developer with Metro open -- the same invisibility the drop had. Refusing is also the
+ * *lossless* outcome, not the harsh one: `data-model.md`'s draft lifecycle is explicit that
+ * `Save + local write fails` leaves the draft `active (unchanged, error shown)`, so a throw keeps
+ * every piece on the device, where a drop destroys one the moment the save succeeds. It is the
+ * same instinct as this project's "sharing fails closed" rule: when the whole cannot be
+ * determined, refuse rather than store a partial.
+ *
+ * It cannot fire on today's inputs. Both callers pass a closed set of kinds -- the pieces form
+ * passes through the data model's four, and the legacy form's own mapping can only produce
+ * `photo`, `video`, `audio` or `text` (every `attachedMedia` type that is not `'video'` becomes
+ * `'photo'`, and the other two lists are hardcoded). So the throw is unreachable until a later
+ * task adds a fifth kind and forgets this funnel, which is exactly when it should be heard. A
+ * caller that assembles blocks must let it surface, not swallow it.
+ */
+function builderFor(build, kind, item) {
+  // `hasOwnProperty.call`, not `build[kind]`: own keys only, so no inherited `Object` member can
+  // be mistaken for a builder.
+  if (Object.prototype.hasOwnProperty.call(build, kind) && typeof build[kind] === 'function') {
+    return build[kind];
+  }
+
+  throw new Error(
+    `buildContentBlocks: unknown piece kind "${kind}" on piece "${item?.localId}". Refusing to `
+    + 'assemble the entry rather than dropping the piece, which would lose it with nothing to '
+    + 'debug from. Add a builder for this kind, or normalise it at the producer.'
+  );
 }
 
 // ============================================================
@@ -103,12 +165,18 @@ function assembleInOrder(captures, build) {
  * No sort. Research R8: the order is the list's, and a sort on the time -- even a stable one --
  * reorders two pieces whose stamps came out of the same millisecond, which a burst of taps
  * produces routinely. The list index already carries the only ordering that is true.
+ *
+ * `kind` is the data model's closed set of four -- `text`, `audio`, `photo`, `video` -- and
+ * nothing else is accepted or rewritten here. An earlier version quietly mapped the gallery
+ * picker's `'image'` to `'photo'`, which fixed this one funnel and left every other reader of a
+ * piece (the Capture screen's renderer, `CaptureDraftStore.adoptMedia`, all of which go by
+ * `kind`) looking at a kind they do not know. Normalising a picker's label belongs at the
+ * producer, before the piece is stored; an unrecognised kind reaching here is refused.
  */
 function blocksFromPieces(pieces) {
   const captures = pieces
     .filter(Boolean)
-    // 'image' is what the gallery picker calls a photo; 'photo' is what the camera calls one.
-    .map((piece) => ({ kind: piece.kind === 'image' ? 'photo' : piece.kind, item: piece }));
+    .map((piece) => ({ kind: piece.kind, item: piece }));
 
   return assembleInOrder(captures, {
     photos: (run) => ({
@@ -150,10 +218,14 @@ function blocksFromPieces(pieces) {
  * One media item from one piece.
  *
  * A piece loaded back by an edit is already on the server: it is referenced by its server
- * `id`/`url` and carries **no** `localPath`, because a localPath is what marks an item as still
- * needing an upload (`SyncEngine._isUnuploadedItem`) -- one here would queue an upload of a file
- * that no longer exists, and hold the whole entry back waiting for it. Remote media is never
- * copied and never re-uploaded.
+ * `id`/`url` and carries **no** `localPath`. Remote media is never copied and never re-uploaded.
+ *
+ * What actually excludes it from the upload queue is the `url`:
+ * `SyncEngine._isUnuploadedItem` is
+ * `!!((localPath || uri) && !mediaId && !(serverUrl || url))`, so a remote item is already
+ * excluded by carrying a `url`, whatever its `localPath` says. `localPath` is omitted anyway so
+ * the two signals can never disagree -- an item that claims both a server copy and a pending
+ * local file is a contradiction for every later reader of it, not just for the sync engine.
  */
 function mediaItemFor(piece) {
   const common = {

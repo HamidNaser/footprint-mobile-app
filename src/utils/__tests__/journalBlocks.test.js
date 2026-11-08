@@ -307,9 +307,10 @@ describe('ordered pieces (FR-005, FR-027)', () => {
   it('emits remote media by id and url, with no localPath (edit mode)', () => {
     // An edit loads the memory's existing media back as pieces. Those are already on the
     // server: they are referenced by server id and url, never copied and never re-uploaded, and
-    // they must carry no localPath at all -- a localPath is what marks an item as still needing
-    // an upload (`SyncEngine._isUnuploadedItem`), so one here would queue an upload of a file
-    // that does not exist.
+    // they must carry no localPath at all. The `url` is what already excludes them from the
+    // upload queue (`SyncEngine._isUnuploadedItem` requires `!(serverUrl || url)`); omitting
+    // localPath is so the two signals can never disagree -- an item claiming both a server copy
+    // and a pending local file is a contradiction for every later reader of it.
     const blocks = buildContentBlocks([
       {
         localId: 'r1',
@@ -348,6 +349,12 @@ describe('ordered pieces (FR-005, FR-027)', () => {
     expect(blocks[0].media[0].localPath).toBe('p1.jpg');
     expect(blocks[0].media[0].id).toBeUndefined();
     expect(blocks[0].media[0].url).toBeUndefined();
+
+    // The piece's own localId reaches the media item. The data model mandates it ("stable
+    // within the draft") and `CaptureDraftStore` is the only producer, so this is a pin against
+    // a regression rather than a defence: nothing here invents one, because an invented id for
+    // a remote piece (no `uri` to derive from) would look valid and collide.
+    expect(blocks[0].media[0].localId).toBe('p1');
   });
 
   it('mixes remote and new media in one photo run without losing either', () => {
@@ -396,6 +403,75 @@ describe('ordered pieces (FR-005, FR-027)', () => {
     const blocks = buildContentBlocks([textAt(1, '   '), photoAt(2)]);
 
     expect(kinds(blocks)).toEqual(['photos']);
+  });
+
+  /**
+   * Nothing captured is ever lost (FR-012, SC-002: zero pieces lost).
+   *
+   * This function is the single funnel every captured piece passes through on its way to the
+   * server, and a silent drop here is the one failure shape that makes a loss invisible: the
+   * entry saves, the draft is cleared, the sync succeeds, nothing logs, and the piece is simply
+   * not there. So an unrecognised kind refuses the whole assembly instead.
+   *
+   * Refusing is the lossless outcome, not the harsh one. `data-model.md`'s draft lifecycle is
+   * explicit that a save which fails leaves the draft `active (unchanged, error shown)` -- so a
+   * throw keeps every piece on the device, where a drop destroys one the moment the save
+   * succeeds. It is the same instinct as this project's "sharing fails closed": when the whole
+   * cannot be determined, refuse rather than store a partial.
+   */
+  describe('an unrecognised kind is refused, never dropped (FR-012)', () => {
+    it('refuses to assemble, naming the kind and the piece', () => {
+      const pieces = [
+        textAt(1, 'Set off at dawn'),
+        { localId: 'x9', kind: 'voice', uri: 'x9.m4a', capturedAt: at(2) },
+        photoAt(3),
+      ];
+
+      // Named in the message so the kind that drifted and the piece that carried it are both
+      // in hand; a kind name that drifts is not hypothetical, it is what this whole case is for.
+      expect(() => buildContentBlocks(pieces)).toThrow(/unknown piece kind "voice"/);
+      expect(() => buildContentBlocks(pieces)).toThrow(/x9/);
+    });
+
+    it('still emits every known piece around it', () => {
+      // The converse, so the refusal cannot be satisfied by refusing everything: the same walk
+      // with the stranger taken out emits all three of its blocks.
+      const blocks = buildContentBlocks([textAt(1, 'Set off at dawn'), photoAt(3), audioAt(4)]);
+
+      expect(kinds(blocks)).toEqual(['text', 'photos', 'audio']);
+      expect(blocks[0].content).toBe('Set off at dawn');
+      expect(blocks[1].media[0].localPath).toBe('p3.jpg');
+    });
+
+    it('refuses a kind inherited from Object.prototype rather than emitting garbage', () => {
+      // A plain `build[kind]` is a prototype-chain lookup: 'constructor' resolves to `Object`,
+      // which called with the piece returns a truthy wrapper, and 'toString' returns the string
+      // "[object Object]". Both would be pushed as blocks -- malformed rather than missing,
+      // which is worse: the server would be handed something no reader can parse.
+      expect(() => buildContentBlocks([{ localId: 'c1', kind: 'constructor', capturedAt: at(1) }]))
+        .toThrow(/unknown piece kind "constructor"/);
+      expect(() => buildContentBlocks([{ localId: 't1', kind: 'toString', capturedAt: at(1) }]))
+        .toThrow(/unknown piece kind "toString"/);
+      expect(() => buildContentBlocks([{ localId: 'h1', kind: 'hasOwnProperty', capturedAt: at(1) }]))
+        .toThrow(/unknown piece kind "hasOwnProperty"/);
+    });
+
+    it('refuses a piece with no kind at all', () => {
+      // `kind` is not optional in the data model, so a piece without one is a producer bug, and
+      // the same reasoning applies: a drop here is a piece gone with nothing to debug from.
+      expect(() => buildContentBlocks([{ localId: 'n1', capturedAt: at(1) }]))
+        .toThrow(/unknown piece kind/);
+    });
+
+    it('refuses the gallery picker\'s "image", which is not one of the four kinds', () => {
+      // `MediaPicker` labels a gallery asset `type: 'image'`, and a producer that copies that
+      // straight onto a piece has not normalised it. This path used to quietly rewrite it to
+      // 'photo', which fixed this one funnel and left every other reader -- the Capture screen's
+      // renderer, `CaptureDraftStore.adoptMedia`, all of which go by `kind` -- still broken.
+      // The data model's four kinds are a closed set; normalising belongs at the producer.
+      expect(() => buildContentBlocks([{ localId: 'g1', kind: 'image', uri: 'g1.jpg', capturedAt: at(1) }]))
+        .toThrow(/unknown piece kind "image"/);
+    });
   });
 
   it('returns nothing for an empty list', () => {
