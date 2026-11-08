@@ -66,9 +66,20 @@ const TABS = [
   ['Timeline', 'TimelineScreen'],
 ];
 
-/** Every screen AppNavigator imports, replaced with a one-line stand-in. */
+/**
+ * Every screen AppNavigator imports, replaced with a one-line stand-in.
+ *
+ * `capture/CaptureScreen` is in here as of T030. It needed no stand-in while it was T013's
+ * placeholder, but the real screen reaches SQLite (the draft store), AsyncStorage
+ * (`SettingsService`), expo-camera and expo-audio at *module* level -- exactly the
+ * dependencies this file exists to stay clear of, and none of them is a fact about
+ * navigation. The stand-in keeps `findByType` and `props.route.params` working below,
+ * because the test and the navigator resolve the same mocked module.
+ */
+const CAPTURE_SCREEN_PATH = 'capture/CaptureScreen';
+
 function mockLeafScreens() {
-  SCREEN_NAMES.forEach((name) => {
+  [...SCREEN_NAMES, CAPTURE_SCREEN_PATH].forEach((name) => {
     jest.doMock(`../../screens/${name}`, () => {
       const ReactLib = require('react');
       const { Text } = require('react-native');

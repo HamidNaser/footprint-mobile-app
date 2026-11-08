@@ -362,6 +362,8 @@ const createEntry = journalHook.__createEntry;
 let trees = [];
 let navigation;
 let focusSpy;
+let warnSpy;
+let errorSpy;
 /**
  * Every tap the test makes, counted. SC-001 is a budget on taps, so the only honest way to
  * check it is to count them as they are made rather than to re-derive the number by hand.
@@ -483,6 +485,20 @@ beforeEach(() => {
   focusSpy = jest.spyOn(TextInput.prototype, 'focus').mockImplementation(() => {});
   jest.spyOn(Alert, 'alert').mockImplementation(() => {});
   jest.spyOn(Linking, 'openSettings').mockImplementation(() => {});
+
+  // A third of this suite drives a failure on purpose, and the screen logs each one, so a
+  // plain run would bury the result in its own expected output. The screen's own lines are
+  // captured and asserted on where they matter; **everything else still prints**, so React's
+  // "not wrapped in act" warnings -- which arrive through `console.error` -- stay visible.
+  const printWarn = console.warn;
+  const printError = console.error;
+  const mine = (args) => typeof args[0] === 'string' && args[0].startsWith('[CaptureScreen]');
+  warnSpy = jest.spyOn(console, 'warn').mockImplementation((...args) => {
+    if (!mine(args)) printWarn(...args);
+  });
+  errorSpy = jest.spyOn(console, 'error').mockImplementation((...args) => {
+    if (!mine(args)) printError(...args);
+  });
 });
 
 afterEach(() => {
@@ -598,6 +614,21 @@ describe('CaptureScreen: Type adds a note, or goes back to the last one', () => 
     expect(textAt(tree, 'piece-kind-0')).toMatch(/note/i);
     expect(textAt(tree, 'piece-kind-1')).toMatch(/voice/i);
     expect(textAt(tree, 'piece-kind-2')).toMatch(/note/i);
+  });
+
+  it('leaves one note, not two, when Type is double-tapped', async () => {
+    const tree = await render();
+    const button = pressable(tree, 'capture-type-button');
+
+    // Both presses land before the first `addPiece` has resolved, so neither can see the
+    // note the other is adding. Not counted through `tap()`: this is one intent, mis-hit.
+    await act(async () => {
+      button.props.onPress();
+      button.props.onPress();
+    });
+
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledTimes(1);
+    expect(rows(tree)).toHaveLength(1);
   });
 
   it('keeps every keystroke in the draft store (FR-012)', async () => {
@@ -1002,6 +1033,27 @@ describe('CaptureScreen: Save asks only who can see it (FR-010)', () => {
     }
   });
 
+  it('will not start a save while a recording is still running', async () => {
+    const tree = await render();
+
+    await tap(tree, 'capture-type-button');
+    await tap(tree, 'voice-record-button');
+
+    // The clip does not exist until Stop, and a save that completed first would clear the
+    // draft -- row and media folder together -- out from under the clip still being
+    // recorded. SC-002 is zero pieces lost, so the screen says what to do instead of
+    // racing. It costs no tap in the Sam scenario: she taps Stop before Save anyway.
+    await tap(tree, 'capture-save-button');
+
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/still recording|stop/i);
+
+    await tap(tree, 'voice-stop-button');
+    await tap(tree, 'capture-save-button');
+    expect(has(tree, 'audience-sheet')).toBe(true);
+  });
+
   it('saves nothing when the sheet is dismissed (FR-011, sharing fails closed)', async () => {
     const tree = await render();
 
@@ -1064,6 +1116,11 @@ describe('CaptureScreen: the draft is let go only after the memory is saved (FR-
     expect(valueAt(tree, 'piece-note-input-0')).toBe('On the 34 bus');
     expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
     expect(textAt(tree, 'capture-save-error')).not.toMatch(/lost|gone/i);
+    // And a developer can see what actually went wrong, not only the person holding it.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[CaptureScreen]'),
+      expect.any(Error),
+    );
   });
 
   it('refuses the save rather than dropping a piece it cannot build, draft intact', async () => {
@@ -1120,6 +1177,10 @@ describe('CaptureScreen: a capture that could not be kept is reported, earlier p
 
     expect(textAt(tree, 'capture-capture-error')).toMatch(/voice clip/i);
     expect(textAt(tree, 'capture-capture-error')).toMatch(/not been added|wasn|couldn/i);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[CaptureScreen]'),
+      expect.any(Error),
+    );
 
     // Everything captured before is exactly where it was, and the screen still works.
     expect(valueAt(tree, 'piece-note-input-0')).toBe('On the 34 bus');

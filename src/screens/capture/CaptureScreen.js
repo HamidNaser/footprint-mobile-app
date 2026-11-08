@@ -1,31 +1,783 @@
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+/**
+ * CaptureScreen (013 T030) -- one memory, captured on the move.
+ *
+ * This is User Story 1: a note, voice clips, photos and videos in one memory, in any order,
+ * each switch one tap away, and nothing lost on the way (FR-002, FR-003). It replaces the
+ * new-memory path of `JournalComposeModal`, which threw typed text away when the microphone
+ * opened, needed the microphone held down, and made the camera choose between photo and
+ * video before the shutter.
+ *
+ * It owns the *session* and almost no mechanism. The four pieces of mechanism it composes
+ * were each built and reviewed on their own, and the contracts it has to honour are theirs:
+ *
+ *   - **`CaptureDraftStore`** keeps the unsaved memory. Three of its rules land here:
+ *     1. **Every captured piece goes through `addPiece`**, because `addPiece`'s `adoptMedia`
+ *        is what copies media somewhere durable *before* the piece is recorded. Both capture
+ *        components hand up a raw **cache** uri by design, and a draft pointing at an evicted
+ *        cache file is a piece that exists and points at nothing. So the piece this screen
+ *        keeps is the one `addPiece` hands back, never the one it handed in.
+ *     2. **`updateText` throws on a cold cache**, deliberately, because a keystroke handler
+ *        cannot wait for a read. This screen guarantees the slot is in the store's hand
+ *        before any keystroke can reach it: a note exists only because `addPiece` or the
+ *        mount's `load` put it there.
+ *     3. **A failed `persist` leaves the slot unwritten on purpose**, so the draft survives
+ *        in hand and the next write retries it. Nothing here may therefore tell anybody a
+ *        memory was *lost*: the honest words are that it is **not saved yet**.
+ *   - **`VoiceRecorderBar`** is the dock's Voice slot rather than something a Voice tap
+ *     reveals -- one tap, not two (FR-006). `onClip` is called and **not awaited**, so a
+ *     rejected promise from `handleClip` would vanish: `addCapturedPiece` catches its own
+ *     failures. `onRecordingChange(false)` also arrives *during an unmount*, so it must be
+ *     safe to receive when the bar is already going.
+ *   - **`DualShutterCamera`** is full screen and handles its own camera/microphone refusal
+ *     inside the overlay, so it gives this screen no permission callback; the microphone
+ *     refusal that *is* this screen's to show comes from the voice bar. The camera is
+ *     mounted **over** this screen rather than instead of it, so opening it cannot unmount a
+ *     running recording.
+ *   - **`SaveAudienceSheet`** is presentational. FR-010's "an edit saves straight away,
+ *     keeping its audience, no sheet" is this screen's rule, not the sheet's.
+ *
+ * **Edit mode is T057/T058.** The slot, the title, the status line and `performSave` are
+ * already branched on it so that work is an extension rather than a rewrite, and nothing
+ * here opens the audience sheet for an edit -- FR-010 forbids it there. Nothing navigates to
+ * this screen with `mode: 'edit'` until T060.
+ *
+ * **Durability is T039/T040**: the `AppState` flush, the text-blur flush and the Try again
+ * on a failed save. What is already here is what the other rulings required: the mount's
+ * `load` (which is also what warms the draft store's cache), and a save that leaves the
+ * draft exactly where it was when anything goes wrong.
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+  Alert,
+  Linking,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { v4 as uuidv4 } from 'uuid';
+
+import CaptureDraftStore, { DraftSlot } from '../../services/CaptureDraftStore';
+import CaptureLocation from '../../services/CaptureLocation';
+import { SettingsService } from '../../services/SettingsService';
+import { useAuth } from '../../context/AuthContext';
+import { useJournal } from '../../hooks/useJournal';
+import { buildContentBlocks } from '../../utils/journalBlocks';
+import CaptureDock from '../../components/capture/CaptureDock';
+import PieceList, { kindLabel } from '../../components/capture/PieceList';
+import VoiceRecorderBar from '../../components/capture/VoiceRecorderBar';
+import DualShutterCamera from '../../components/capture/DualShutterCamera';
+import SaveAudienceSheet from '../../components/capture/SaveAudienceSheet';
 
 /**
- * `Capture` (T013). Deliberately a stub -- it renders only its title. The real screen
- * (the piece dock, voice/camera capture, the save flow) is built on top of this starting
- * at T030; see `ui-contract.md` for the header titles this mirrors.
+ * A capture that produced nothing, in words that say what was lost and what was not.
+ *
+ * Every `onCaptureFailed` reason from either component means *no piece was added*, and so
+ * does a rejected `addPiece` (a full disk), so one message covers them all -- `reason` is for
+ * the person, not for a decision. It names the kind, because "a capture failed" leaves
+ * somebody wondering which of the six things they just did is missing.
  */
-export default function CaptureScreen({ route }) {
-  const mode = route?.params?.mode ?? 'new';
-  const title = mode === 'edit' ? 'Edit memory' : 'New memory';
+const lostCaptureMessage = (kind) =>
+  `That ${kindLabel(kind).toLowerCase()} wasn’t saved, so it hasn’t been added to this ` +
+  'memory. Everything else is still here — try again.';
+
+/**
+ * FR-017, and the draft store's deliberate behaviour: a failed write leaves the slot
+ * unwritten so the next one retries it, which means the memory **is still on the phone**.
+ * Saying it was lost would be false as well as frightening.
+ */
+const SAVE_FAILED_MESSAGE = 'Couldn’t save — your memory is still here. Try again.';
+
+/** The microphone refusal the voice bar delegates upward (UI contract). */
+const MICROPHONE_DENIED_MESSAGE =
+  'Footprint can’t use the microphone, so it can’t record a voice clip. Turn it on in ' +
+  'Settings. Typing and the camera still work.';
+
+/**
+ * The one outcome FR-012 forbids is typing that reaches no draft. It cannot happen -- a note
+ * exists only because the slot was already loaded -- but it is said rather than swallowed,
+ * because swallowing it is precisely how it would become invisible.
+ */
+const TEXT_NOT_KEPT_MESSAGE =
+  'What you just typed isn’t being kept yet. Close this screen and open it again, and ' +
+  'nothing already captured is lost.';
+
+/**
+ * Saving while a recording runs would clear the draft -- its row **and its media folder** --
+ * out from under a clip that does not exist yet, and the clip would land in a slot that had
+ * just been deleted. SC-002 is zero pieces lost, so the screen asks for the Stop tap rather
+ * than racing it. It costs no tap in SC-001's scenario, where Stop comes before Save anyway.
+ */
+const STOP_RECORDING_FIRST_MESSAGE =
+  'You’re still recording. Tap Stop to keep that clip, then save — nothing is lost by ' +
+  'waiting.';
+
+/** "Draft kept · n pieces" (UI contract), in English for one. */
+const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
+
+export default function CaptureScreen({ route, navigation }) {
+  const isEditMode = route?.params?.mode === 'edit';
+  const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
+
+  const { user } = useAuth();
+  const [journalId, setJournalId] = useState(null);
+  const { createEntry } = useJournal(journalId, { autoFetch: false });
+
+  /** The memory being captured, in capture order. The array *is* the order (FR-005). */
+  const [pieces, setPieces] = useState([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [isAudienceSheetOpen, setIsAudienceSheetOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [captureError, setCaptureError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+  const [permissionNotice, setPermissionNotice] = useState(null);
+  /** Which note should take the keyboard, and a nonce so the same one can be asked twice. */
+  const [focusRequest, setFocusRequest] = useState(null);
+
+  const mountedRef = useRef(true);
+  /** A note being added, as a second tap can see it before any render has happened. */
+  const typeInFlightRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /** Which journal a saved memory belongs to, as `JournalScreen` resolves it. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await SettingsService.getOrCreateDefaultJournal(user?.id ?? null);
+        if (!cancelled) setJournalId(id);
+      } catch (error) {
+        // Nothing is shown here: it costs nothing until Save, and Save reports its own
+        // failure with the draft left intact rather than guessing at a journal.
+        console.warn('[CaptureScreen] could not resolve the default journal', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  /**
+   * The unsaved memory, if there is one (FR-013: tapping + reopens it).
+   *
+   * It is also what puts this slot in the draft store's hand before anything can type into
+   * it -- `updateText` is synchronous and throws on a cold cache, by design.
+   *
+   * Edit mode does **not** load here: an edit's pieces come from the memory itself, and its
+   * slot is written only on the first change, so that opening Edit and closing unchanged
+   * leaves nothing behind (FR-013). That is T058.
+   */
+  useEffect(() => {
+    if (isEditMode) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const draft = await CaptureDraftStore.load(slot);
+        if (!cancelled && draft?.pieces?.length) {
+          setPieces(draft.pieces);
+        }
+      } catch (error) {
+        console.warn('[CaptureScreen] could not read the unsaved memory', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditMode, slot]);
+
+  // ============================================================
+  // Capturing
+  // ============================================================
+
+  /**
+   * Stamp a capture with where it happened and record it, in that order (FR-004).
+   *
+   * The piece kept on screen is the one the **store** hands back, pointing at the durable
+   * copy under `documentDirectory/capture-drafts/<slot>/`, not the cache uri the camera or
+   * the recorder handed up.
+   *
+   * It never rejects. `onClip` and `onShot` are called and not awaited, so a rejection here
+   * would reach nobody at all; and the one thing FR-002's "any number of pieces" cannot
+   * survive is a lost capture that looks like nothing having happened. A failure leaves every
+   * earlier piece untouched, because nothing is appended until the store has it.
+   */
+  const addCapturedPiece = useCallback(
+    async (piece) => {
+      try {
+        const stamped = await CaptureLocation.withLocation(piece);
+        const stored = await CaptureDraftStore.addPiece(slot, stamped);
+        if (!mountedRef.current) return null;
+        setPieces((previous) => [...previous, stored]);
+        setCaptureError(null);
+        return stored;
+      } catch (error) {
+        console.warn('[CaptureScreen] a capture could not be kept', error);
+        if (mountedRef.current) setCaptureError(lostCaptureMessage(piece?.kind));
+        return null;
+      }
+    },
+    [slot],
+  );
+
+  /**
+   * Type: a new note, or back to the note already at the end.
+   *
+   * Tapping Type twice must not leave an empty note behind the one being written in, and a
+   * note is *not* hoisted to the top of the memory (FR-005) -- it is added where the person
+   * is, at the end.
+   */
+  const handleType = useCallback(async () => {
+    const last = pieces[pieces.length - 1];
+    if (last?.kind === 'text') {
+      setFocusRequest((previous) => ({
+        localId: last.localId,
+        nonce: (previous?.nonce ?? 0) + 1,
+      }));
+      return;
+    }
+
+    // A ref, written synchronously, because a second tap cannot wait for a render: the check
+    // above reads `pieces`, which does not contain the note the first tap is still adding, so
+    // without this an ordinary double-tap leaves two empty notes -- one of them behind the
+    // keyboard. The same guard the capture components keep on their own shutters.
+    if (typeInFlightRef.current) return;
+    typeInFlightRef.current = true;
+
+    let stored;
+    try {
+      stored = await addCapturedPiece({
+        localId: uuidv4(),
+        kind: 'text',
+        content: '',
+        // An instant, exactly as the phone's clock reads it (research R8, Principle III).
+        capturedAt: new Date().toISOString(),
+      });
+    } finally {
+      typeInFlightRef.current = false;
+    }
+
+    if (stored) {
+      setFocusRequest((previous) => ({
+        localId: stored.localId,
+        nonce: (previous?.nonce ?? 0) + 1,
+      }));
+    }
+  }, [addCapturedPiece, pieces]);
+
+  /** A keystroke. Synchronous all the way down: typing never waits for a copy. */
+  const handleChangeText = useCallback(
+    (piece, content) => {
+      setPieces((previous) =>
+        previous.map((candidate) =>
+          candidate.localId === piece.localId ? { ...candidate, content } : candidate,
+        ),
+      );
+
+      try {
+        CaptureDraftStore.updateText(slot, piece.localId, content);
+      } catch (error) {
+        console.error('[CaptureScreen] the typed text reached no draft', error);
+        setCaptureError(TEXT_NOT_KEPT_MESSAGE);
+      }
+    },
+    [slot],
+  );
+
+  /** One clip per recording. `capturedAt` is when recording **started** (research R8). */
+  const handleClip = useCallback(
+    (clip) => {
+      // Not returned: `onClip` ignores it, and `addCapturedPiece` never rejects anyway. An
+      // `async` function also cannot throw synchronously, so the bar's 'handler-failed'
+      // path -- which exists for a parent that threw -- cannot fire from here.
+      void addCapturedPiece({
+        localId: uuidv4(),
+        kind: 'audio',
+        uri: clip?.uri,
+        capturedAt: clip?.capturedAt,
+        duration: clip?.duration,
+        waveform: clip?.waveform,
+      });
+    },
+    [addCapturedPiece],
+  );
+
+  /** One piece per photo and per video (FR-008). A video carries no width or height. */
+  const handleShot = useCallback(
+    (shot) => {
+      void addCapturedPiece({
+        localId: uuidv4(),
+        kind: shot?.kind,
+        uri: shot?.uri,
+        capturedAt: shot?.capturedAt,
+        ...(shot?.width != null ? { width: shot.width } : {}),
+        ...(shot?.height != null ? { height: shot.height } : {}),
+        ...(shot?.kind === 'video' ? { duration: shot?.duration } : {}),
+      });
+    },
+    [addCapturedPiece],
+  );
+
+  const handleCaptureFailed = useCallback((failure) => {
+    // Reported, never swallowed: the capture is over and no piece was added, whichever
+    // reason it carries. The camera's failure always names its `kind`; a failure that
+    // somehow did not would rather say "piece" than guess at the wrong one.
+    setCaptureError(lostCaptureMessage(failure?.kind));
+  }, []);
+
+  const handleVoiceCaptureFailed = useCallback(() => {
+    // The voice bar's failure carries no `kind` -- it only records voice.
+    setCaptureError(lostCaptureMessage('audio'));
+  }, []);
+
+  const handleRecordingChange = useCallback((recording) => {
+    // `false` also arrives from the bar's unmount cleanup, so this has to be safe to receive
+    // when the bar, or this screen, is already going away.
+    if (mountedRef.current) setIsRecording(!!recording);
+  }, []);
+
+  const handleMicrophoneDenied = useCallback(() => {
+    setPermissionNotice(MICROPHONE_DENIED_MESSAGE);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    Linking.openSettings?.();
+  }, []);
+
+  const openCamera = useCallback(() => {
+    setIsMenuOpen(false);
+    setIsCameraOpen(true);
+  }, []);
+
+  const closeCamera = useCallback(() => {
+    setIsCameraOpen(false);
+  }, []);
+
+  // ============================================================
+  // Leaving, discarding, saving
+  // ============================================================
+
+  /** Close never discards, in either mode (FR-015, UI contract). Leaving is just leaving. */
+  const handleClose = useCallback(() => {
+    setIsMenuOpen(false);
+    navigation?.goBack?.();
+  }, [navigation]);
+
+  const handleDiscardConfirmed = useCallback(async () => {
+    try {
+      await CaptureDraftStore.discard(slot);
+    } catch (error) {
+      console.warn('[CaptureScreen] the unsaved memory could not be discarded', error);
+    }
+    navigation?.goBack?.();
+  }, [navigation, slot]);
+
+  /** FR-015: discarding asks first, and the question says what goes. */
+  const handleDiscardPress = useCallback(() => {
+    setIsMenuOpen(false);
+    Alert.alert(
+      isEditMode ? 'Discard your changes?' : 'Discard this memory?',
+      isEditMode
+        ? 'The changes you have made will be removed from this phone. The memory itself ' +
+            'stays exactly as it was.'
+        : 'Everything you have captured here will be removed from this phone, media and ' +
+            'all. This cannot be undone.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: isEditMode ? 'Discard changes' : 'Discard',
+          style: 'destructive',
+          onPress: () => {
+            void handleDiscardConfirmed();
+          },
+        },
+      ],
+    );
+  }, [handleDiscardConfirmed, isEditMode]);
+
+  const canSave = pieces.length > 0 && !isSaving;
+
+  /**
+   * Save the memory on the phone, then -- and only then -- let the draft go.
+   *
+   * Two orderings in here are load-bearing, and both are ways of losing a memory outright if
+   * they are the other way round:
+   *
+   *   - **`clearAfterSave` comes after `createEntry` has resolved** (FR-016, quickstart M4).
+   *     Until the phone has written the real memory, the draft is the only copy there is.
+   *   - **`buildContentBlocks`' refusal is allowed to surface.** It throws on a piece whose
+   *     kind it cannot build rather than dropping it, because a silent drop is the one
+   *     failure shape that makes a loss invisible -- the entry saves, the draft is cleared,
+   *     nothing logs, and the piece is gone. Catching it here and saving the rest would turn
+   *     that throw back into a drop with extra steps, so it lands in the same place as a
+   *     failed write: nothing saved, nothing cleared, every piece still on the phone
+   *     (data-model's `Save + local write fails → active (unchanged, error shown)`).
+   */
+  const performSave = useCallback(
+    async (visibility) => {
+      setIsSaving(true);
+      try {
+        const contentBlocks = buildContentBlocks(pieces);
+        await createEntry({
+          userId: user?.id || 'local_user',
+          contentBlocks,
+          visibility,
+          // No title, and no other field: FR-010 asks for the audience and nothing else. The
+          // memory's date is left to default, as every memory saved on this phone does.
+        });
+
+        await CaptureDraftStore.clearAfterSave(slot);
+        navigation?.goBack?.();
+      } catch (error) {
+        console.error('[CaptureScreen] the memory could not be saved', error);
+        if (mountedRef.current) setSaveError(SAVE_FAILED_MESSAGE);
+      } finally {
+        if (mountedRef.current) setIsSaving(false);
+      }
+    },
+    [createEntry, navigation, pieces, slot, user?.id],
+  );
+
+  /**
+   * FR-010: a new memory asks who can see it, in one sheet, and nothing else.
+   *
+   * An edit saves straight away with the memory's existing audience and **no sheet** -- that
+   * is T058's, and nothing navigates here with `mode: 'edit'` until T060, so Save on an edit
+   * deliberately does nothing yet rather than opening a sheet FR-010 forbids there.
+   */
+  const handleSavePress = useCallback(() => {
+    if (pieces.length === 0 || isSaving || isEditMode) return;
+    setIsMenuOpen(false);
+
+    // Said rather than ignored: a Save button that does nothing is indistinguishable from a
+    // Save button that is broken.
+    if (isRecording) {
+      setCaptureError(STOP_RECORDING_FIRST_MESSAGE);
+      return;
+    }
+
+    setSaveError(null);
+    setIsAudienceSheetOpen(true);
+  }, [isEditMode, isRecording, isSaving, pieces.length]);
+
+  /** FR-011: a choice saves; a dismissal saves nothing and defaults to nothing. */
+  const handleAudienceChosen = useCallback(
+    (visibility) => {
+      setIsAudienceSheetOpen(false);
+      void performSave(visibility);
+    },
+    [performSave],
+  );
+
+  const handleAudienceDismissed = useCallback(() => {
+    setIsAudienceSheetOpen(false);
+  }, []);
+
+  // ============================================================
+  // Render
+  // ============================================================
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>{title}</Text>
+    // The safe area wraps the *content*, not the screen, so that the camera overlay below
+    // can be genuinely full screen: an overlay inside the inset box would leave a white band
+    // under the notch and over the home indicator.
+    <View style={styles.screen}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+        <View style={styles.header}>
+          <TouchableOpacity
+            testID="capture-close-button"
+            accessibilityRole="button"
+            accessibilityLabel="Close without discarding"
+            style={styles.headerButton}
+            onPress={handleClose}
+          >
+            <Ionicons name="close" size={26} color="#1C1C1E" />
+          </TouchableOpacity>
+
+          <Text testID="capture-title" style={styles.title}>
+            {isEditMode ? 'Edit memory' : 'New memory'}
+          </Text>
+
+          <View style={styles.headerRight}>
+            <TouchableOpacity
+              testID="capture-overflow-button"
+              accessibilityRole="button"
+              accessibilityLabel="More"
+              style={styles.headerButton}
+              onPress={() => setIsMenuOpen((open) => !open)}
+            >
+              <Ionicons name="ellipsis-horizontal" size={22} color="#1C1C1E" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              testID="capture-save-button"
+              accessibilityRole="button"
+              accessibilityLabel="Save this memory"
+              accessibilityState={{ disabled: !canSave }}
+              disabled={!canSave}
+              style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
+              onPress={handleSavePress}
+            >
+              <Text style={[styles.saveLabel, !canSave && styles.saveLabelDisabled]}>Save</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {isMenuOpen && (
+          <View testID="capture-overflow-menu" style={styles.menu}>
+            <TouchableOpacity
+              testID="capture-discard-button"
+              accessibilityRole="button"
+              accessibilityLabel={isEditMode ? 'Discard changes' : 'Discard this memory'}
+              style={styles.menuItem}
+              onPress={handleDiscardPress}
+            >
+              <Ionicons name="trash-outline" size={18} color="#E5484D" />
+              <Text style={styles.menuItemLabel}>
+                {isEditMode ? 'Discard changes' : 'Discard'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {pieces.length > 0 && (
+          <Text testID="capture-status-line" style={styles.status}>
+            {statusLineFor(pieces.length)}
+          </Text>
+        )}
+
+        {saveError && (
+          <View testID="capture-save-error-banner" style={[styles.notice, styles.noticeBad]}>
+            <Ionicons name="alert-circle-outline" size={18} color="#8A2A2D" />
+            <Text testID="capture-save-error" style={styles.noticeText}>
+              {saveError}
+            </Text>
+          </View>
+        )}
+
+        {captureError && (
+          <View testID="capture-capture-error-banner" style={[styles.notice, styles.noticeBad]}>
+            <Ionicons name="alert-circle-outline" size={18} color="#8A2A2D" />
+            <Text testID="capture-capture-error" style={styles.noticeText}>
+              {captureError}
+            </Text>
+          </View>
+        )}
+
+        {permissionNotice && (
+          <View testID="capture-permission-notice-banner" style={styles.notice}>
+            <Ionicons name="mic-off-outline" size={18} color="#8A6D00" />
+            <Text testID="capture-permission-notice" style={styles.noticeText}>
+              {permissionNotice}
+            </Text>
+            <TouchableOpacity
+              testID="capture-open-settings-button"
+              accessibilityRole="button"
+              accessibilityLabel="Open Settings"
+              style={styles.noticeButton}
+              onPress={openSettings}
+            >
+              <Text style={styles.noticeButtonText}>Open Settings</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <ScrollView
+          testID="capture-piece-scroll"
+          style={styles.body}
+          keyboardShouldPersistTaps="handled"
+        >
+          {pieces.length === 0 && (
+            <Text testID="capture-empty-hint" style={styles.emptyHint}>
+              Type, record or photograph whatever is happening. Add as many pieces as you like,
+              in any order — nothing is shared until you save.
+            </Text>
+          )}
+
+          <PieceList
+            pieces={pieces}
+            onChangeText={handleChangeText}
+            focusRequest={focusRequest}
+          />
+        </ScrollView>
+
+        <CaptureDock
+          onType={handleType}
+          onCamera={openCamera}
+          isRecording={isRecording}
+          voice={
+            <VoiceRecorderBar
+              onClip={handleClip}
+              onPermissionDenied={handleMicrophoneDenied}
+              onCaptureFailed={handleVoiceCaptureFailed}
+              onRecordingChange={handleRecordingChange}
+              style={isRecording ? styles.recordingBar : undefined}
+            />
+          }
+        />
+      </SafeAreaView>
+
+      {isCameraOpen && (
+        // Over this screen, not instead of it: a replacement would unmount the voice bar and
+        // end a recording that is still running (FR-007).
+        <View testID="capture-camera-overlay" style={styles.cameraOverlay}>
+          <DualShutterCamera
+            onShot={handleShot}
+            onDone={closeCamera}
+            onClose={closeCamera}
+            onCaptureFailed={handleCaptureFailed}
+          />
+        </View>
+      )}
+
+      <SaveAudienceSheet
+        visible={isAudienceSheetOpen}
+        onChoose={handleAudienceChosen}
+        onDismiss={handleAudienceDismissed}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
-    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  safeArea: {
+    flex: 1,
+  },
+  header: {
+    flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5EA',
+  },
+  headerButton: {
+    padding: 8,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
   title: {
-    fontSize: 20,
+    flex: 1,
+    marginHorizontal: 8,
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1C1C1E',
+  },
+  saveButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: '#2B7DE9',
+  },
+  saveButtonDisabled: {
+    backgroundColor: '#E5E5EA',
+  },
+  saveLabel: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  saveLabelDisabled: {
+    color: '#8E8E93',
+  },
+  menu: {
+    alignSelf: 'flex-end',
+    marginRight: 12,
+    marginTop: 4,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E5E5EA',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  menuItemLabel: {
+    fontSize: 15,
     fontWeight: '600',
+    color: '#E5484D',
+  },
+  status: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    fontSize: 13,
+    color: '#8E8E93',
+  },
+  notice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 16,
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#FFF7E0',
+  },
+  noticeBad: {
+    backgroundColor: '#FDECEC',
+  },
+  noticeText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#1C1C1E',
+  },
+  noticeButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: '#1C1C1E',
+  },
+  noticeButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  body: {
+    flex: 1,
+  },
+  emptyHint: {
+    padding: 24,
+    fontSize: 15,
+    lineHeight: 22,
+    color: '#8E8E93',
+  },
+  recordingBar: {
+    marginHorizontal: 12,
+    marginBottom: 8,
+  },
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 10,
+    elevation: 10,
+    backgroundColor: '#000000',
   },
 });
