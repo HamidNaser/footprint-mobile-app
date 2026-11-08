@@ -7,14 +7,20 @@
  *   - `enableBackgroundRecording` adds iOS's `audio` background mode and, on Android, the
  *     foreground-service permissions and the recording foreground service -- without it
  *     recording stops when the phone is locked (FR-007), and no jest test can tell.
- *   - `recordAudioAndroid` supplies Android's `RECORD_AUDIO` permission, so voice recording
- *     is offered on Android as on iPhone (FR-009).
+ *   - `recordAudioAndroid` pins Android's `RECORD_AUDIO` permission explicitly, so a later
+ *     edit cannot silently drop it and leave Android unable to record (FR-009). It is **not**
+ *     what first supplied the permission: the plugin defaults this option to `true` and adds
+ *     the permission on `recordAudioAndroid !== false`
+ *     (`node_modules/expo-audio/plugin/build/withAudio.js:8,26`), so the previous bare
+ *     `"expo-audio"` string already produced it and FR-009 was never broken.
  *   - `microphonePermission` is the sentence a person reads when the phone asks.
  *
- * The plugin was listed without options (`"expo-audio"`), which takes every default --
- * including `enableBackgroundRecording: false`. That shape still *loads*, which is exactly
- * why it needs asserting rather than eyeballing. Native behaviour itself is a device check
- * on a release build (quickstart Q-D1-Q-D3); this only proves what is asked for.
+ * The plugin was listed without options (`"expo-audio"`), which takes every default -- and
+ * the default that mattered is `enableBackgroundRecording: false` (same file, line 8): a
+ * locked phone stopped recording, and no jest test could tell. That shape still *loads*,
+ * which is exactly why it needs asserting rather than eyeballing. Native behaviour itself is
+ * a device check on a release build (quickstart Q-D1-Q-D3); this only proves what is asked
+ * for.
  *
  * Read from `app.json` directly, not from `expo-constants`: the file is the artefact the
  * build reads, and T067 will extend it from an `app.config.js` that spreads it.

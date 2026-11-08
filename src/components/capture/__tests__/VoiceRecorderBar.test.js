@@ -10,8 +10,22 @@
  *   - the bar shows the elapsed time while recording;
  *   - the 5:00 cap stops the recording by itself and **keeps** the clip (FR-006);
  *   - the audio mode asked for at the start is the one that lets recording survive the lock
- *     screen (FR-007, research R5);
- *   - a denied microphone permission is reported upward and records nothing.
+ *     screen (FR-007, research R5), and is *released* again once the clip is out -- otherwise
+ *     every clip leaves other apps' audio suppressed;
+ *   - a denied microphone permission is reported upward and records nothing;
+ *   - a recording that produced no file is **signalled** (`onCaptureFailed`), never silently
+ *     dropped: going back to the idle Voice button is indistinguishable from "you have not
+ *     recorded yet", and a `console.warn` nobody reads is not a signal (this phone app has
+ *     no crash reporting);
+ *   - unmounting mid-recording finishes the clip, so no native recording is left running
+ *     with the microphone hot and no UI left to stop it;
+ *   - two taps in one tick start one recording, not two -- the permission dialog can sit on
+ *     screen for seconds with the Voice button still live behind it;
+ *   - the parent is told when recording starts and ends (`onRecordingChange`), because the
+ *     idle button and the bar have very different footprints and the UI contract puts the
+ *     bar above the dock, full width;
+ *   - `duration` is the recorder's own length, not the last 250 ms poll;
+ *   - `downsampleWaveform` really averages, and really bounds a five-minute clip to 50 bars.
  *
  * The inline `expo-audio` mock is modelled on the installed version (expo-audio 57.0.4,
  * checked against `node_modules/expo-audio/build/*.d.ts`):
@@ -129,7 +143,7 @@ jest.mock('expo-audio', () => {
 });
 
 import * as audio from 'expo-audio';
-import VoiceRecorderBar from '../VoiceRecorderBar';
+import VoiceRecorderBar, { downsampleWaveform, WAVEFORM_BARS } from '../VoiceRecorderBar';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -137,19 +151,45 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const START_ISO = '2026-11-08T09:15:00.000Z';
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 
+/** The component's status-poll interval, so a test can step exactly one poll. */
+const POLL_MS = 250;
+
+/**
+ * How many waveform levels two separately-stepped polls collect: the status the poll
+ * reports the moment it mounts, plus one per poll that lands in its own `act` block. Used
+ * by the "one polled level, recorded once" case, where the number *is* the assertion.
+ */
+const LEVELS_AFTER_TWO_POLLS = 3;
+
 let trees = [];
 let onClip;
 let onPermissionDenied;
+let onCaptureFailed;
+let onRecordingChange;
 
-const render = (props = {}) => {
+const props = (overrides = {}) => ({
+  onClip,
+  onPermissionDenied,
+  onCaptureFailed,
+  onRecordingChange,
+  ...overrides,
+});
+
+const render = (overrides = {}) => {
   let tree;
   act(() => {
-    tree = renderer.create(
-      <VoiceRecorderBar onClip={onClip} onPermissionDenied={onPermissionDenied} {...props} />,
-    );
+    tree = renderer.create(<VoiceRecorderBar {...props(overrides)} />);
   });
   trees.push(tree);
   return tree;
+};
+
+/** Unmounts now, and takes the tree off the list so `afterEach` does not do it twice. */
+const unmount = async (tree) => {
+  trees = trees.filter((t) => t !== tree);
+  await act(async () => {
+    tree.unmount();
+  });
 };
 
 const pressable = (tree, testID) =>
@@ -185,6 +225,8 @@ beforeEach(() => {
   audio.__reset();
   onClip = jest.fn();
   onPermissionDenied = jest.fn();
+  onCaptureFailed = jest.fn();
+  onRecordingChange = jest.fn();
 });
 
 afterEach(() => {
@@ -273,14 +315,37 @@ describe('VoiceRecorderBar: one tap to start, one tap to stop (FR-006)', () => {
 
     const { waveform } = onClip.mock.calls[0][0];
     expect(waveform.length).toBeGreaterThan(0);
-    // Bounded, so a five-minute clip does not carry thousands of samples into the draft.
-    expect(waveform.length).toBeLessThanOrEqual(50);
+    expect(waveform.length).toBeLessThanOrEqual(WAVEFORM_BARS);
     waveform.forEach((level) => {
       expect(Number.isFinite(level)).toBe(true);
       expect(level).toBeGreaterThanOrEqual(0);
       expect(level).toBeLessThanOrEqual(1);
     });
     expect(Math.max(...waveform)).toBeGreaterThan(Math.min(...waveform));
+  });
+
+  /**
+   * `<= 50` above cannot fail on its own: every other case in this suite collects fewer
+   * than 50 levels, and `downsampleWaveform` returns a short recording unchanged. This is
+   * the case that drives the averaging branch through the component.
+   *
+   * It has to step the poll one interval at a time. Advancing five minutes inside a single
+   * `act` block batches all ~1,200 polled `setState`s into one render, so only two levels
+   * are ever collected -- an artefact of this harness, not of the phone, where each poll is
+   * its own turn of the event loop. Measured: the 5:00 case collects exactly 2.
+   */
+  it('bounds a long recording to 50 levels, however many were polled', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+
+    for (let i = 0; i < 60; i += 1) {
+      await elapse(POLL_MS); // one poll, one level, one render
+    }
+
+    await tap(tree, 'voice-stop-button');
+
+    const { waveform } = onClip.mock.calls[0][0];
+    expect(waveform).toHaveLength(WAVEFORM_BARS);
   });
 });
 
@@ -359,6 +424,287 @@ describe('VoiceRecorderBar: the audio mode (FR-007)', () => {
         interruptionMode: 'doNotMix',
       }),
     );
+  });
+
+  // `interruptionMode: 'doNotMix'` asks for exclusive audio focus. Never giving it back
+  // leaves every other app on the phone silenced after a clip, and nothing in the UI shows
+  // it -- so the release is pinned, not merely counted.
+  it('releases the audio session once the clip is out', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(audio.setAudioModeAsync).toHaveBeenLastCalledWith({ allowsRecording: false });
+  });
+
+  // The order matters on a device: preparing or recording before the session is configured
+  // records under whatever mode happened to be set. Call counts cannot see that.
+  it('configures the session before preparing, and prepares before recording', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+
+    const [modeFirst] = audio.setAudioModeAsync.mock.invocationCallOrder;
+    const [prepare] = audio.__recorder.prepareToRecordAsync.mock.invocationCallOrder;
+    const [record] = audio.__recorder.record.mock.invocationCallOrder;
+
+    expect(modeFirst).toBeLessThan(prepare);
+    expect(prepare).toBeLessThan(record);
+  });
+});
+
+describe('VoiceRecorderBar: a recording that produced no file is signalled, not swallowed', () => {
+  // The bar going back to the idle Voice button is exactly what "you have not recorded yet"
+  // looks like. `CaptureScreen` owns the inline failed-capture message (UI contract), and it
+  // cannot show a message it is never told about -- so there has to be a way to tell it.
+  it('reports a stop that failed, and hands over no clip', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(2000);
+
+    audio.__recorder.stop.mockImplementationOnce(async () => {
+      audio.__recorder.isRecording = false;
+      throw new Error('could not write the recording');
+    });
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+
+    const failure = onCaptureFailed.mock.calls[0][0];
+    expect(failure.reason).toBe('stop-failed');
+    expect(failure.error).toBeInstanceOf(Error);
+    // Enough for the screen to say something true about what was lost.
+    expect(failure.capturedAt).toBe(START_ISO);
+    expect(failure.duration).toBe(2);
+
+    // And the bar is usable again.
+    expect(has(tree, 'voice-record-button')).toBe(true);
+  });
+
+  it('reports a stop that succeeded but named no file', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(2000);
+
+    // stop() resolves, but expo-audio never names a file.
+    audio.__recorder.stop.mockImplementationOnce(async () => {
+      audio.__recorder.isRecording = false;
+    });
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed.mock.calls[0][0].reason).toBe('no-file');
+    expect(onCaptureFailed.mock.calls[0][0].error).toBeNull();
+  });
+
+  it('signals nothing when the clip is fine', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+  });
+});
+
+describe('VoiceRecorderBar: the finish guard survives a throwing parent', () => {
+  // The guard that makes one recording produce one clip is released at the end of the
+  // finish. A parent whose `onClip` throws synchronously -- tasks.md's T029 case is
+  // "`addPiece` rejects (storage full)", and the handler that wraps it throwing is the same
+  // shape -- must not leave it stuck: the bar would show the idle Voice button and refuse
+  // every tap thereafter, recording once per mount and then going quietly dead.
+  it('records again after the parent threw on the previous clip', async () => {
+    const tree = render();
+    onClip.mockImplementationOnce(() => {
+      throw new Error('storage full');
+    });
+
+    await tap(tree, 'voice-record-button');
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    // The throw is a failure the screen may not know about either; it is reported.
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed.mock.calls[0][0].reason).toBe('handler-failed');
+
+    await tap(tree, 'voice-record-button');
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+    await elapse(3000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(2);
+    expect(onClip.mock.calls[1][0].duration).toBe(3);
+  });
+});
+
+describe('VoiceRecorderBar: unmounting while recording', () => {
+  // An unmount is not an interruption (T037/T038): nothing takes the audio session back.
+  // Without a cleanup the status poll's interval goes, so the 5:00 cap can never fire
+  // again, `stop()` is never called and the session is never released -- a recording that
+  // keeps the microphone hot, suppresses other apps' audio and has no UI left to stop it,
+  // with the recorded audio unreachable.
+  it('finishes the clip, stops the recorder and releases the session', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(3000);
+
+    await unmount(tree);
+
+    expect(audio.__recorder.stop).toHaveBeenCalledTimes(1);
+    expect(audio.setAudioModeAsync).toHaveBeenLastCalledWith({ allowsRecording: false });
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].uri).toBe(audio.CLIP_URI);
+    expect(onClip.mock.calls[0][0].capturedAt).toBe(START_ISO);
+    expect(onClip.mock.calls[0][0].duration).toBe(3);
+  });
+
+  it('does nothing on an unmount that was not recording', async () => {
+    const tree = render();
+    await unmount(tree);
+
+    expect(audio.__recorder.stop).not.toHaveBeenCalled();
+    expect(onClip).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+  });
+});
+
+describe('VoiceRecorderBar: two taps in one tick (FR-006 is one tap, not two recordings)', () => {
+  // `requestRecordingPermissionsAsync` shows the OS dialog, which can sit on screen for
+  // seconds, and the Voice button stays mounted and enabled behind it because the UI only
+  // switches once recording has begun. A guard read from render state cannot see a start
+  // that is still in flight.
+  it('starts one recording, not two', async () => {
+    const tree = render();
+    const button = pressable(tree, 'voice-record-button');
+
+    await act(async () => {
+      button.props.onPress();
+      button.props.onPress();
+    });
+
+    expect(audio.requestRecordingPermissionsAsync).toHaveBeenCalledTimes(1);
+    expect(audio.__recorder.prepareToRecordAsync).toHaveBeenCalledTimes(1);
+    expect(audio.__recorder.record).toHaveBeenCalledTimes(1);
+
+    // And the clip keeps the *first* tap's instant, not a second tap's overwrite (R8).
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].capturedAt).toBe(START_ISO);
+  });
+});
+
+describe('VoiceRecorderBar: the parent is told when recording starts and ends', () => {
+  // The idle Voice button is a dock-sized button; the bar is full width above the dock
+  // (UI contract). A parent that cannot see the change cannot lay either of them out.
+  it('calls onRecordingChange(true) on start and (false) on the stop', async () => {
+    const tree = render();
+    expect(onRecordingChange).not.toHaveBeenCalled();
+
+    await tap(tree, 'voice-record-button');
+    expect(onRecordingChange.mock.calls).toEqual([[true]]);
+
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+    expect(onRecordingChange.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it('reports the end even when the 5:00 cap was what ended it', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(FIVE_MINUTES_MS);
+
+    expect(onRecordingChange.mock.calls).toEqual([[true], [false]]);
+  });
+});
+
+describe('VoiceRecorderBar: duration is the recorder’s length, not the last poll', () => {
+  // `elapsedRef` is only as fresh as the last 250 ms poll. A clip stopped inside the first
+  // poll interval has had no poll at all, so it would report `duration: 0` with a perfectly
+  // valid `uri` -- a piece a reader renders as a zero-length clip.
+  it('reports a real length for a clip stopped before the first poll', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(100); // the first poll is at 250 ms, so none has landed
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].uri).toBe(audio.CLIP_URI);
+    expect(onClip.mock.calls[0][0].duration).toBeCloseTo(0.1, 5);
+  });
+
+  it('does not round a clip stopped between two polls down to the poll', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(1000); // polls at 250/500/750/1000
+    await elapse(120); //  no poll lands in here; the next is at 1250
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip.mock.calls[0][0].duration).toBeCloseTo(1.12, 5);
+  });
+});
+
+describe('VoiceRecorderBar: one polled level is recorded once', () => {
+  // The waveform is pushed to from an effect keyed on the polled status. Any *other*
+  // dependency of that effect changing mid-recording -- a `maxDurationMs` prop change is
+  // the live one -- re-runs it on a status that has already been recorded.
+  it('does not record the same level twice when a prop changes mid-recording', async () => {
+    const tree = render({ maxDurationMs: FIVE_MINUTES_MS });
+    await tap(tree, 'voice-record-button');
+    // One level from the status the poll reports on mounting, then one per poll.
+    await elapse(POLL_MS);
+    await elapse(POLL_MS);
+
+    // Nothing about the recorder's status changed -- only a prop.
+    await act(async () => {
+      tree.update(<VoiceRecorderBar {...props({ maxDurationMs: FIVE_MINUTES_MS - 1000 })} />);
+    });
+
+    await tap(tree, 'voice-stop-button');
+
+    const { waveform } = onClip.mock.calls[0][0];
+    expect(waveform).toHaveLength(LEVELS_AFTER_TWO_POLLS);
+  });
+});
+
+describe('downsampleWaveform', () => {
+  it('bounds a five-minute recording to 50 bars', () => {
+    const samples = Array.from({ length: 1200 }, (_, i) => (i % 2 === 0 ? 0 : 1));
+    expect(downsampleWaveform(samples)).toHaveLength(WAVEFORM_BARS);
+  });
+
+  // The point of averaging rather than taking every Nth sample: a bar describes its whole
+  // slice of the clip, so a quiet half reads as quiet instead of as whatever landed on the
+  // sampling stride.
+  it('averages each bucket rather than picking one sample out of it', () => {
+    // 100 samples, 50 bars -> buckets of two. Each pair averages to 0.5, and *no single
+    // sample* in the input is 0.5, so only averaging can produce this.
+    const samples = Array.from({ length: 100 }, (_, i) => (i % 2 === 0 ? 0 : 1));
+    const out = downsampleWaveform(samples);
+
+    expect(out).toHaveLength(WAVEFORM_BARS);
+    out.forEach((level) => expect(level).toBeCloseTo(0.5, 10));
+  });
+
+  it('keeps the shape of the clip: a quiet first half stays quieter than a loud second', () => {
+    const samples = [...Array(600).fill(0.1), ...Array(600).fill(0.9)];
+    const out = downsampleWaveform(samples);
+
+    expect(out).toHaveLength(WAVEFORM_BARS);
+    expect(out.slice(0, 25).every((level) => Math.abs(level - 0.1) < 1e-9)).toBe(true);
+    expect(out.slice(25).every((level) => Math.abs(level - 0.9) < 1e-9)).toBe(true);
+  });
+
+  it('leaves a short recording alone, and copies it rather than aliasing it', () => {
+    const samples = [0.2, 0.4, 0.6];
+    const out = downsampleWaveform(samples);
+
+    expect(out).toEqual(samples);
+    expect(out).not.toBe(samples);
   });
 });
 

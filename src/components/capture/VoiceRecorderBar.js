@@ -33,6 +33,15 @@
  * Interruptions (an incoming call, the system taking the audio session) are T037/T038.
  * `finishClip` below is already reason-agnostic and guarded against finishing twice, so that
  * work is an effect that calls it -- not a rewrite.
+ *
+ * An **unmount is not an interruption** and is handled here, not there: nothing takes the
+ * session back, so without a cleanup `stop()` is never called, the session is never
+ * released, and the status poll's interval goes with the tree -- leaving a native recording
+ * that keeps the microphone hot, suppresses other apps' audio (`interruptionMode:
+ * 'doNotMix'` asks for exclusive focus, and on Android the plugin's recording foreground
+ * service keeps it alive), can no longer hit its own 5:00 cap, and has no UI left to stop
+ * it. The cleanup effect finishes the clip, which is also the only way the recorded audio
+ * reaches anybody.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -59,6 +68,14 @@ export const WAVEFORM_BARS = 50;
 /**
  * Mono voice at a middling bitrate: a spoken clip, not music. `isMeteringEnabled` is what
  * puts `metering` in the status, and so what makes a waveform possible at all.
+ *
+ * This is field-for-field `RecordingQuality.MEDIUM` from `AudioRecorder.js` plus
+ * `isMeteringEnabled`, and **the duplication is deliberate, not an oversight.** `plan.md`
+ * records `AudioRecorder.js` as superseded for capture by this component, so importing its
+ * presets would tie the capture path's audio format to a file that is on its way out and
+ * whose own presets are missing `isMeteringEnabled` (which is why its waveform is always
+ * empty). Capture owns its format here, in one literal a reader can check against the
+ * expo-audio typings without opening another file.
  */
 const VOICE_RECORDING_OPTIONS = {
   isMeteringEnabled: true,
@@ -138,11 +155,22 @@ const RecorderStatePoll = ({ recorder, onStatus }) => {
  *   instant recording started (research R8).
  * @param {() => void} [props.onPermissionDenied] Called when the microphone is refused. The
  *   inline message and Open Settings belong to the capture screen, not here (UI contract).
+ * @param {(failure: {reason: 'stop-failed'|'no-file'|'handler-failed', error: Error|null,
+ *   capturedAt: string|null, duration: number}) => void} [props.onCaptureFailed]
+ *   Called instead of `onClip` when a recording ended without a usable file, and after it
+ *   when the parent's own `onClip` threw. See the note on `finishClip`.
+ * @param {(isRecording: boolean) => void} [props.onRecordingChange] Called with `true` when
+ *   recording starts and `false` when it ends, however it ended. The idle Voice button is a
+ *   dock-sized button and the recording bar is full width above the dock (UI contract), so
+ *   the parent has to be able to see the change to lay either of them out. Not called on
+ *   mount -- only on a change.
  * @param {number} [props.maxDurationMs] The cap; defaults to 5 minutes (FR-006).
  */
 export default function VoiceRecorderBar({
   onClip,
   onPermissionDenied,
+  onCaptureFailed,
+  onRecordingChange,
   maxDurationMs = MAX_CLIP_MS,
   style,
 }) {
@@ -157,52 +185,126 @@ export default function VoiceRecorderBar({
   const capturedAtRef = useRef(null);
   const elapsedRef = useRef(0);
   const levelsRef = useRef([]);
-  // One clip per recording, whatever ended it -- a Stop tap, the cap, or (T038) an
-  // interruption that arrives while the stop is still in flight.
+  // One clip per recording, whatever ended it -- a Stop tap, the cap, an unmount, or (T038)
+  // an interruption that arrives while the stop is still in flight.
   const finishingRef = useRef(false);
+  // The same guard on the *start* side. It cannot be the `isRecording` state: the state is
+  // not set until after three awaits, one of which is the OS permission dialog, and the
+  // Voice button stays live behind it the whole time.
+  const startingRef = useRef(false);
+  // `isRecording` as the unmount cleanup can see it -- a cleanup closes over its mount.
+  // Written synchronously beside every `setIsRecording`, deliberately rather than from an
+  // effect: an unmount committed in the same batch as the state change would still see the
+  // old value if the ref were only synced afterwards.
+  const isRecordingRef = useRef(false);
+  // Which polled status has already contributed a waveform level, so a re-run of the status
+  // effect for some *other* reason cannot record the same level twice.
+  const lastLevelStatusRef = useRef(null);
 
+  /**
+   * Ends the recording and hands the clip over, whatever ended it.
+   *
+   * Everything from here on is inside a `try`/`finally` that releases `finishingRef`. The
+   * guard is "one clip per recording", not "one clip ever" (US1 captures two clips in one
+   * memory), and leaving it set would put the bar back to the idle Voice button while
+   * `startRecording` silently refused every tap -- recorded once per mount, then quietly
+   * dead. A synchronous throw from the parent's `onClip` is enough to reach that, and
+   * tasks.md's T029 case ("`addPiece` rejects (storage full)") is exactly that shape.
+   *
+   * **A recording that produced no file is signalled, never swallowed.** Going back to the
+   * idle Voice button is indistinguishable from "you have not recorded yet", and this app
+   * has no crash reporting, so a `console.warn` is not a signal. Task 20's analogous case
+   * chose to *throw*, and the asymmetry is deliberate: `buildContentBlocks` had no caller
+   * that could render anything and was in the middle of a save, whereas this component has
+   * a parent that owns the inline failed-capture message (UI contract) and the capture is
+   * already over -- so a callback the screen can render is better than an exception it
+   * would have to catch.
+   */
   const finishClip = useCallback(async () => {
     if (finishingRef.current) return;
     finishingRef.current = true;
 
     try {
-      await recorder.stop();
-    } catch (error) {
-      console.warn('[VoiceRecorderBar] stop failed', error);
+      // The recorder's own length, read before stop() invalidates it -- `elapsedRef` is
+      // only as fresh as the last 250 ms poll, so a clip stopped between polls under-
+      // reports, and one stopped before the first poll reports 0 with a valid uri.
+      let durationMs = elapsedRef.current;
+      try {
+        const finalStatus = recorder.getStatus?.();
+        if (Number.isFinite(finalStatus?.durationMillis) && finalStatus.durationMillis > 0) {
+          durationMs = finalStatus.durationMillis;
+        }
+      } catch {
+        // An already-invalidated recorder: the last polled value is the best we have.
+      }
+
+      let stopError = null;
+      try {
+        await recorder.stop();
+      } catch (error) {
+        stopError = error instanceof Error ? error : new Error(String(error));
+      }
+
+      // The uri is only final once stop() has resolved.
+      const uri = recorder.uri ?? null;
+      const clip = {
+        uri,
+        duration: durationMs / 1000, // seconds (data-model.md)
+        waveform: downsampleWaveform(levelsRef.current),
+        capturedAt: capturedAtRef.current,
+      };
+
+      setIsRecording(false);
+      isRecordingRef.current = false;
+      setStatus(null);
+      setElapsedMs(0);
+      elapsedRef.current = 0;
+      levelsRef.current = [];
+      lastLevelStatusRef.current = null;
+      capturedAtRef.current = null;
+      onRecordingChange?.(false);
+
+      try {
+        await setAudioModeAsync({ allowsRecording: false });
+      } catch (error) {
+        console.warn('[VoiceRecorderBar] releasing the audio session failed', error);
+      }
+
+      if (uri) {
+        // A parent that throws here has failed to keep the piece, and may not know it:
+        // `onClip` is called, not awaited, so only a *synchronous* throw reaches us.
+        try {
+          onClip?.(clip);
+        } catch (error) {
+          onCaptureFailed?.({
+            reason: 'handler-failed',
+            error: error instanceof Error ? error : new Error(String(error)),
+            capturedAt: clip.capturedAt,
+            duration: clip.duration,
+          });
+        }
+      } else {
+        // No file means nothing was recorded; a piece pointing at nothing is worse than
+        // none -- but the screen has to be told, or the loss is invisible.
+        onCaptureFailed?.({
+          reason: stopError ? 'stop-failed' : 'no-file',
+          error: stopError,
+          capturedAt: clip.capturedAt,
+          duration: clip.duration,
+        });
+      }
+    } finally {
+      finishingRef.current = false;
     }
-
-    // The uri is only final once stop() has resolved.
-    const uri = recorder.uri ?? null;
-    const clip = {
-      uri,
-      duration: elapsedRef.current / 1000, // seconds (data-model.md)
-      waveform: downsampleWaveform(levelsRef.current),
-      capturedAt: capturedAtRef.current,
-    };
-
-    setIsRecording(false);
-    setStatus(null);
-    setElapsedMs(0);
-    elapsedRef.current = 0;
-    levelsRef.current = [];
-    capturedAtRef.current = null;
-
-    try {
-      await setAudioModeAsync({ allowsRecording: false });
-    } catch (error) {
-      console.warn('[VoiceRecorderBar] releasing the audio session failed', error);
-    }
-
-    // No file means nothing was recorded; a piece pointing at nothing is worse than none.
-    if (uri) onClip?.(clip);
-
-    // Released only now the clip is out: the guard is "one clip per recording", not "one
-    // clip ever". US1 captures two clips in one memory.
-    finishingRef.current = false;
-  }, [onClip, recorder]);
+  }, [onCaptureFailed, onClip, onRecordingChange, recorder]);
 
   const startRecording = useCallback(async () => {
-    if (isRecording || finishingRef.current) return;
+    // `startingRef` is set synchronously, so a second tap during the permission dialog or
+    // either of the two awaits after it cannot start a second recording on the same
+    // recorder -- which would also overwrite `capturedAt` with the later tap's instant,
+    // losing R8's start instant for audio already being captured.
+    if (isRecording || startingRef.current || finishingRef.current) return;
+    startingRef.current = true;
 
     try {
       const { granted } = await requestRecordingPermissionsAsync();
@@ -216,15 +318,20 @@ export default function VoiceRecorderBar({
       await recorder.prepareToRecordAsync();
 
       levelsRef.current = [];
+      lastLevelStatusRef.current = null;
       elapsedRef.current = 0;
       setElapsedMs(0);
       capturedAtRef.current = new Date().toISOString();
       recorder.record();
       setIsRecording(true);
+      isRecordingRef.current = true;
+      onRecordingChange?.(true);
     } catch (error) {
       console.warn('[VoiceRecorderBar] could not start recording', error);
+    } finally {
+      startingRef.current = false;
     }
-  }, [isRecording, onPermissionDenied, recorder]);
+  }, [isRecording, onPermissionDenied, onRecordingChange, recorder]);
 
   /**
    * Held in a ref so the effect below runs when the *status* changes and not every time
@@ -246,13 +353,34 @@ export default function VoiceRecorderBar({
     elapsedRef.current = ms;
     setElapsedMs(ms);
 
-    if (typeof status.metering === 'number') {
-      levelsRef.current.push(normalizeMetering(status.metering));
+    // Keyed on the status object's identity, not on the effect running: `maxDurationMs` is
+    // a dependency too, and a prop change mid-recording would otherwise record the level
+    // from an already-recorded status a second time.
+    if (lastLevelStatusRef.current !== status) {
+      lastLevelStatusRef.current = status;
+      if (typeof status.metering === 'number') {
+        levelsRef.current.push(normalizeMetering(status.metering));
+      }
     }
 
     // The cap stops the recording; it never throws the clip away (FR-006).
     if (ms >= maxDurationMs) finishClipRef.current();
   }, [isRecording, maxDurationMs, status]);
+
+  /**
+   * An unmount mid-recording finishes the clip. **A separate effect on purpose:** the
+   * status effect above early-returns on `!status?.isRecording`, which is precisely the
+   * interruption condition T037/T038 will add, so the two must not share a cleanup.
+   *
+   * It reads refs rather than state because a cleanup closes over the mount it was created
+   * on, and `[]` is what makes it run on unmount only.
+   */
+  useEffect(
+    () => () => {
+      if (isRecordingRef.current) finishClipRef.current();
+    },
+    [],
+  );
 
   if (!isRecording) {
     return (
