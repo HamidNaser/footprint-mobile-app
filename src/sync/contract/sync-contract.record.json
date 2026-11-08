@@ -22,10 +22,10 @@
     "sourceRepository": "footprint-backend",
     "sourcePath": "Footprint.Hub/src/Footprint.Hub.Contracts/Api/Journals/sync-contract.record.json",
     "generatedBy": "Footprint.Hub.UnitTests/SyncContract/SyncContractRecordTests.cs",
-    "takenFromBackendBranch": "test/sync-contract-record",
-    "takenOn": "2026-10-25",
+    "takenFromBackendBranch": "013-mobile-capture-map",
+    "takenOn": "2026-11-08",
     "isCopy": true,
-    "takenFromBackendCommit": "772b3960f39ead8b58e588617ac44b4eb78cc911"
+    "takenFromBackendCommit": "2f78933dc670bbc8a153407e0a26c737f0fdfdc9"
   },
   "serializerOptions": {
     "propertyNamingPolicy": "camelCase",
@@ -43,6 +43,29 @@
     "PATCH  /api/v1/journals/entries/{entryId} (response body)": "JournalEntryResponse"
   },
   "types": {
+    "AudienceRequest": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.AudienceRequest",
+      "properties": [
+        {
+          "name": "groupId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "kind",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "userIds",
+          "shape": "array<string>",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
     "AuthorResponse": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.AuthorResponse",
       "properties": [
@@ -123,6 +146,12 @@
           "omittedWhenNull": false
         },
         {
+          "name": "unresolvedAudience",
+          "shape": "array<object:UnresolvedAudienceItem>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
           "name": "updated",
           "shape": "array<object:SyncResultItem>",
           "required": false,
@@ -133,6 +162,12 @@
     "ContentBlockRequest": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.ContentBlockRequest",
       "properties": [
+        {
+          "name": "capturedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "content",
           "shape": "string",
@@ -168,6 +203,12 @@
     "ContentBlockResponse": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.ContentBlockResponse",
       "properties": [
+        {
+          "name": "capturedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "content",
           "shape": "string",
@@ -215,6 +256,12 @@
     "CreateJournalEntryRequest": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.CreateJournalEntryRequest",
       "properties": [
+        {
+          "name": "audience",
+          "shape": "object:AudienceRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "contentBlocks",
           "shape": "array<object:ContentBlockRequest>",
@@ -268,6 +315,12 @@
     "CreateSyncEntry": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.CreateSyncEntry",
       "properties": [
+        {
+          "name": "audience",
+          "shape": "object:AudienceRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "clientId",
           "shape": "string",
@@ -400,6 +453,12 @@
           "omittedWhenNull": true
         },
         {
+          "name": "resolvedAudience",
+          "shape": "array<object:ResolvedAudienceMember>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
           "name": "sharedWith",
           "shape": "array<string>",
           "required": false,
@@ -487,6 +546,12 @@
       "clrType": "Footprint.Hub.Contracts.Api.Journals.MediaInfoRequest",
       "properties": [
         {
+          "name": "capturedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
           "name": "height",
           "shape": "integer",
           "required": false,
@@ -527,6 +592,12 @@
     "MediaInfoResponse": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.MediaInfoResponse",
       "properties": [
+        {
+          "name": "capturedAt",
+          "shape": "date-time",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "displayUrl",
           "shape": "string",
@@ -594,6 +665,23 @@
         }
       ]
     },
+    "ResolvedAudienceMember": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.ResolvedAudienceMember",
+      "properties": [
+        {
+          "name": "displayName",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "userId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
     "SyncChangesResponse": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.SyncChangesResponse",
       "properties": [
@@ -656,6 +744,12 @@
           "omittedWhenNull": true
         },
         {
+          "name": "resolvedAudience",
+          "shape": "array<object:ResolvedAudienceMember>",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
           "name": "serverId",
           "shape": "string",
           "required": true,
@@ -669,9 +763,32 @@
         }
       ]
     },
+    "UnresolvedAudienceItem": {
+      "clrType": "Footprint.Hub.Contracts.Api.Journals.UnresolvedAudienceItem",
+      "properties": [
+        {
+          "name": "clientId",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        },
+        {
+          "name": "reason",
+          "shape": "string",
+          "required": false,
+          "omittedWhenNull": true
+        }
+      ]
+    },
     "UpdateJournalEntryRequest": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.UpdateJournalEntryRequest",
       "properties": [
+        {
+          "name": "audience",
+          "shape": "object:AudienceRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "contentBlocks",
           "shape": "array<object:ContentBlockRequest>",
@@ -713,6 +830,12 @@
     "UpdateSyncEntry": {
       "clrType": "Footprint.Hub.Contracts.Api.Journals.UpdateSyncEntry",
       "properties": [
+        {
+          "name": "audience",
+          "shape": "object:AudienceRequest",
+          "required": false,
+          "omittedWhenNull": true
+        },
         {
           "name": "clientId",
           "shape": "string",
