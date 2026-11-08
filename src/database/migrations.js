@@ -250,6 +250,34 @@ export const migrations = [
       // Additive column, harmless to an older build; cleared addresses repopulate from the server.
     ],
   },
+  {
+    version: 8,
+    description:
+      'capture_drafts table, and journal_entries.share_state / server_updated_at (013 R7, R15)',
+    up: [
+      // Every phone in the wild is on v7, and a table or column declared only in CREATE_TABLES
+      // reaches fresh installs and nobody else -- the same trap v4 through v7 exist to avoid.
+      `CREATE TABLE IF NOT EXISTS capture_drafts (
+        id TEXT PRIMARY KEY,
+        entry_local_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        pieces_json TEXT NOT NULL
+      );`,
+      // Both nullable with no DEFAULT: each is the only record of a fact the server reported,
+      // and a row written before this column existed has no such fact to backfill. NULL means
+      // "the server has not said", not "nothing".
+      'ALTER TABLE journal_entries ADD COLUMN share_state TEXT;',
+      'ALTER TABLE journal_entries ADD COLUMN server_updated_at TEXT;',
+    ],
+    down: [
+      // capture_drafts holds no data worth preserving (FR-014: never synced), so it can be
+      // dropped outright. The two columns cannot be dropped without a table rebuild, and
+      // rebuilding one to undo an additive change risks the rows it is protecting -- the same
+      // reasoning v5 through v7 leave in place. Harmless to an older build either way.
+      'DROP TABLE IF EXISTS capture_drafts;',
+    ],
+  },
 ];
 
 /**
