@@ -829,6 +829,62 @@ describe('DualShutterCamera: a capture that produced nothing is signalled, not s
     expect(nodeAt(tree, 'camera-thumb-0')).toBeUndefined();
   });
 
+  // A lost photo is exactly as invisible on screen as a lost recording was: the shutters go
+  // back to idle and nothing says otherwise. The callback tells the capture screen, which is
+  // not the same as putting something in front of the person holding the phone -- and this
+  // feature has now made the same ruling three times, each time because a failure nobody can
+  // see is the shape that makes a loss invisible. So the inline notice covers both shutters.
+  it('says on screen that a photo was not kept, not only upward', async () => {
+    const tree = await render();
+
+    camera.__takePictureAsync.mockImplementationOnce(async () => {
+      throw new Error('the shutter failed');
+    });
+
+    await tap(tree, 'camera-photo-button');
+
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+    // Truthful about what happened: a photo was not kept. Not that a memory was lost --
+    // nothing else is touched, and the capture screen still has every earlier piece.
+    expect(textAt(tree, 'camera-capture-failed-message')).toMatch(/photo/i);
+    expect(textAt(tree, 'camera-capture-failed-message')).not.toMatch(/video/i);
+    expect(textAt(tree, 'camera-capture-failed-message')).not.toMatch(/memory|lost/i);
+  });
+
+  it('says it for a photo that resolved with no file, and clears it on the next photo', async () => {
+    const tree = await render();
+
+    camera.__takePictureAsync.mockImplementationOnce(async () => ({
+      width: 4032,
+      height: 3024,
+    }));
+    await tap(tree, 'camera-photo-button');
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+
+    // The next photo clears it, as the next recording clears the recording notice.
+    await tap(tree, 'camera-photo-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+  });
+
+  it('does not blame the photo for a lost recording, or the other way round', async () => {
+    const tree = await render();
+
+    camera.__recordAsync.mockImplementationOnce(async () => {
+      throw new Error('the camera could not start recording');
+    });
+    await tap(tree, 'camera-video-button');
+    expect(textAt(tree, 'camera-capture-failed-message')).toMatch(/video/i);
+    expect(textAt(tree, 'camera-capture-failed-message')).not.toMatch(/photo/i);
+
+    camera.__takePictureAsync.mockImplementationOnce(async () => {
+      throw new Error('the shutter failed');
+    });
+    await tap(tree, 'camera-photo-button');
+    expect(textAt(tree, 'camera-capture-failed-message')).toMatch(/photo/i);
+    expect(textAt(tree, 'camera-capture-failed-message')).not.toMatch(/video/i);
+  });
+
   it('reports a piece the parent itself failed to keep, and shows no thumbnail for it', async () => {
     const tree = await render();
 

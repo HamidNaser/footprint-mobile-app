@@ -47,7 +47,9 @@
  * a rejected `recordAsync` on the first Video tap is the likeliest way the one-render-early
  * `mode` flip fails on a device, and silent, it is indistinguishable from nothing happening.
  * The prop is `VoiceRecorderBar`'s shape plus `kind`, so the capture screen has one handler
- * for a lost capture rather than one per component.
+ * for a lost capture rather than one per component. **It is also said inline, for the photo
+ * as well as the video**: this overlay is full screen, so the capture screen's own message is
+ * behind it and the callback alone puts nothing in front of the person holding the phone.
  *
  * A piece's `capturedAt` is the instant the capture **started** (research R8): the shutter tap
  * for a photo, and the tap that *started* recording for a video -- never the tap that stopped
@@ -132,10 +134,13 @@ export default function DualShutterCamera({
   const [isRecording, setIsRecording] = useState(false);
   const [recordedMs, setRecordedMs] = useState(0);
   const [micRefused, setMicRefused] = useState(false);
-  // A recording that produced nothing, said on screen as the refused microphone is. The
-  // callback tells the capture screen; this tells the person holding the phone, who would
-  // otherwise see the shutters go back to idle and read it as "nothing happened".
-  const [recordingLost, setRecordingLost] = useState(false);
+  // A capture that produced nothing, said on screen as the refused microphone is, and by
+  // which shutter: `null | 'photo' | 'video'`. The callback tells the capture screen; this
+  // tells the person holding the phone, who would otherwise see the shutters go back to idle
+  // and read it as "nothing happened". It covers the photo as well as the recording, because
+  // a lost photo is exactly as invisible -- and the message says which, since "a capture
+  // failed" leaves somebody wondering which of the things they just did is missing.
+  const [lostCapture, setLostCapture] = useState(null);
   // `photoInFlightRef` as render can see it, so the Video shutter can be disabled while a
   // still capture is in flight -- the mirror of Photo being disabled while recording.
   const [photoInFlight, setPhotoInFlight] = useState(false);
@@ -237,6 +242,7 @@ export default function DualShutterCamera({
     if (isRecording || photoInFlightRef.current || !cameraRef.current) return;
     photoInFlightRef.current = true;
     setPhotoInFlight(true);
+    setLostCapture(null); // this photo's own outcome replaces the last one's
 
     // Stamped at the tap, before the shutter is awaited (research R8).
     const capturedAt = new Date().toISOString();
@@ -259,9 +265,11 @@ export default function DualShutterCamera({
         });
       } else {
         // A picture with no file is no picture. Nothing is added, and it is said so.
+        if (mountedRef.current) setLostCapture('photo');
         reportFailureRef.current('photo', 'no-file', null, capturedAt);
       }
     } catch (error) {
+      if (mountedRef.current) setLostCapture('photo');
       reportFailureRef.current('photo', 'capture-failed', error, capturedAt);
     } finally {
       photoInFlightRef.current = false;
@@ -281,7 +289,7 @@ export default function DualShutterCamera({
     // a second tap while the OS dialog is up would otherwise pass this same guard. Only a
     // flag written synchronously can stop it.
     pendingRecordRef.current = true;
-    setRecordingLost(false);
+    setLostCapture(null); // this recording's own outcome replaces the last one's
 
     if (!micPermission?.granted) {
       let result = null;
@@ -384,7 +392,7 @@ export default function DualShutterCamera({
           capturedAt,
         });
       } else {
-        setRecordingLost(true);
+        setLostCapture('video');
         reportFailureRef.current(
           'video',
           recordError ? 'capture-failed' : 'no-file',
@@ -505,7 +513,7 @@ export default function DualShutterCamera({
 
         {/* One wrapper, so the overlay keeps its three rows whether or not there is a
             notice to show -- `space-between` over four children lays out differently. */}
-        {(micRefused || recordingLost) && (
+        {(micRefused || lostCapture) && (
           <View pointerEvents="box-none">
             {/* A refused microphone costs the video, never the photos (UI contract). */}
             {micRefused && (
@@ -527,14 +535,18 @@ export default function DualShutterCamera({
               </View>
             )}
 
-            {/* A recording that produced nothing. Said here as well as handed up, because
+            {/* A capture that produced nothing. Said here as well as handed up, because
                 the shutters going back to idle is what "nothing happened" looks like. It
-                clears itself the moment the next recording is started. */}
-            {recordingLost && (
+                clears itself the moment the next capture of that kind is started. The words
+                are about the one capture that was not kept -- never about the memory, which
+                still has everything else in it. */}
+            {lostCapture && (
               <View testID="camera-capture-failed" style={styles.notice}>
                 <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-capture-failed-message" style={styles.noticeText}>
-                  That video wasn’t saved, so it hasn’t been added. Try recording it again.
+                  {lostCapture === 'photo'
+                    ? 'That photo wasn’t saved, so it hasn’t been added. Try taking it again.'
+                    : 'That video wasn’t saved, so it hasn’t been added. Try recording it again.'}
                 </Text>
               </View>
             )}
