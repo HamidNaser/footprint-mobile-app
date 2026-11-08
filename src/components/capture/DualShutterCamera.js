@@ -119,9 +119,21 @@ export default function DualShutterCamera({
   const photoInFlightRef = useRef(false);
   const mountedRef = useRef(true);
 
+  /**
+   * One cleanup, so there is no ordering to get wrong between "we have gone" and "stop the
+   * camera": a recording left running would outlive the screen, and a piece arriving after
+   * the screen has gone has nowhere to go.
+   */
   useEffect(
     () => () => {
       mountedRef.current = false;
+      if (cameraRef.current) {
+        try {
+          cameraRef.current.stopRecording();
+        } catch (error) {
+          // Nothing was recording; nothing to do.
+        }
+      }
     },
     [],
   );
@@ -139,6 +151,16 @@ export default function DualShutterCamera({
     },
     [onShot],
   );
+
+  /**
+   * Held in a ref, as `VoiceRecorderBar` holds `finishClip`: a recording resolves long after
+   * it started, and by then the parent may have handed down a fresh `onShot`. Reading the
+   * latest one here means the piece cannot be delivered to a closure that has moved on.
+   */
+  const addShotRef = useRef(addShot);
+  useEffect(() => {
+    addShotRef.current = addShot;
+  }, [addShot]);
 
   /** FR-008: each tap of Photo takes one photo. */
   const takePhoto = useCallback(async () => {
@@ -238,7 +260,7 @@ export default function DualShutterCamera({
 
       // No file means nothing was recorded; a piece pointing at nothing is worse than none.
       if (video?.uri) {
-        addShot({
+        addShotRef.current({
           kind: 'video',
           uri: video.uri,
           duration,
@@ -247,7 +269,7 @@ export default function DualShutterCamera({
       }
       capturedAtRef.current = null;
     })();
-  }, [addShot, isRecording, maxVideoSeconds]);
+  }, [isRecording, maxVideoSeconds]);
 
   /** The time on screen while recording. The cap itself is the camera's, not this timer's. */
   useEffect(() => {
@@ -259,38 +281,6 @@ export default function DualShutterCamera({
 
     return () => clearInterval(handle);
   }, [isRecording]);
-
-  /** A recording left running would outlive the screen; end it on the way out. */
-  useEffect(
-    () => () => {
-      if (cameraRef.current) {
-        try {
-          cameraRef.current.stopRecording();
-        } catch (error) {
-          // Nothing was recording; nothing to do.
-        }
-      }
-    },
-    [],
-  );
-
-  const permissionNotice = (testID, message) => (
-    <View testID={testID} style={styles.notice}>
-      <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
-      <Text testID={`${testID.replace('-denied', '')}-message`} style={styles.noticeText}>
-        {message}
-      </Text>
-      <TouchableOpacity
-        testID="camera-open-settings-button"
-        accessibilityRole="button"
-        accessibilityLabel="Open Settings"
-        style={styles.noticeButton}
-        onPress={openSettings}
-      >
-        <Text style={styles.noticeButtonText}>Open Settings</Text>
-      </TouchableOpacity>
-    </View>
-  );
 
   // Still being asked. Nothing is shown that could look like a camera that works.
   if (!permission) {
@@ -388,11 +378,25 @@ export default function DualShutterCamera({
           </TouchableOpacity>
         </View>
 
-        {micRefused &&
-          permissionNotice(
-            'camera-microphone-denied',
-            'Footprint can’t use the microphone, so it can’t record a video. Turn it on in Settings. Photos still work.',
-          )}
+        {/* A refused microphone costs the video, never the photos (UI contract). */}
+        {micRefused && (
+          <View testID="camera-microphone-denied" style={styles.notice}>
+            <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
+            <Text testID="camera-microphone-message" style={styles.noticeText}>
+              Footprint can’t use the microphone, so it can’t record a video. Turn it on in
+              Settings. Photos still work.
+            </Text>
+            <TouchableOpacity
+              testID="camera-open-settings-button"
+              accessibilityRole="button"
+              accessibilityLabel="Open Settings"
+              style={styles.noticeButton}
+              onPress={openSettings}
+            >
+              <Text style={styles.noticeButtonText}>Open Settings</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.bottom}>
           {shots.length > 0 && (
