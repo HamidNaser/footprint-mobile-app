@@ -88,7 +88,7 @@ describe('expanding a memory into pieces', () => {
     const { pieces } = toNumberedPieces(entry, SAVED);
 
     expect(pieces.map((p) => p.kind)).toEqual(['text', 'photo', 'photo', 'video', 'audio']);
-    expect(orderOf({ pieces })).toEqual([0, 1, 2, 3, 4]);
+    expect(pieces.map((p) => p.storedIndex)).toEqual([0, 1, 2, 3, 4]);
   });
 
   it('points each piece back at the block, and each photo at its own tile', () => {
@@ -105,12 +105,16 @@ describe('expanding a memory into pieces', () => {
 
   it("takes a media block's time from its media item, ignoring any block-level time", () => {
     // Contract C3: a block that carries media has no time of its own. A block-level value on
-    // such a block is not a recorded fact about anything, and using it would order the piece
-    // by a number no device agrees on.
-    const entry = entryOf(photos([['2026-11-01T14:57:02.004Z']], { capturedAt: A_YEAR_AFTER }));
+    // such a block is not a recorded fact about anything, so it is not used as the item's time
+    // and not used as a fallback either -- the second photo below has no time at all, and
+    // borrowing the block's would order it by a value no device agrees on.
+    const entry = entryOf(photos(
+      [['2026-11-01T14:57:02.004Z'], [null]],
+      { capturedAt: A_YEAR_AFTER },
+    ));
 
-    expect(toNumberedPieces(entry, SAVED).pieces[0].capturedAt)
-      .toBe('2026-11-01T14:57:02.004Z');
+    expect(toNumberedPieces(entry, SAVED).pieces.map((p) => p.capturedAt))
+      .toEqual(['2026-11-01T14:57:02.004Z', null]);
   });
 
   it('falls back to the block place for a media item that has none of its own', () => {
@@ -122,13 +126,19 @@ describe('expanding a memory into pieces', () => {
     expect(toNumberedPieces(entry, SAVED).pieces[0].location).toEqual(HERE);
   });
 
-  it('reads a memory with no blocks at all without complaint', () => {
-    expect(toNumberedPieces({}, SAVED)).toEqual({
+  it('reads a memory with no blocks at all, or no memory at all, without complaint', () => {
+    // A card is rendered while its entry is still arriving on more than one screen, and an
+    // empty answer is the one that leaves the card looking exactly as it does today.
+    const nothing = {
       pieces: [],
       groups: [],
       distinctPlaceCount: 0,
       withoutPlaceCount: 0,
-    });
+    };
+
+    expect(toNumberedPieces({}, SAVED)).toEqual(nothing);
+    expect(toNumberedPieces({ contentBlocks: [] }, SAVED)).toEqual(nothing);
+    expect(toNumberedPieces(undefined, SAVED)).toEqual(nothing);
   });
 });
 
@@ -286,46 +296,39 @@ describe('the ordering rule', () => {
     expect(orderOf(toNumberedPieces(entry, '2026-11-01T15:10:00Z'))).toEqual([2, 0, 1]);
   });
 
-  describe('a timestamp with no zone', () => {
+  it('reads a timestamp with no zone as UTC, not as this device\'s local time', () => {
     // `Date.parse` reads an ISO date-time with no `Z` and no offset as **local** time. The
-    // server's `updatedAt` is one `DateTime` serialisation away from arriving in that form
-    // (a `Kind.Unspecified` value serialises without a suffix), and if it did, the threshold
-    // would land hours from where the server put it -- a different number of hours on every
-    // phone. The order would then be a fact about the viewer's timezone, which is exactly
-    // what SC-007 and FR-029's "every device identically" forbid. So a zone-less value is
-    // read as UTC.
+    // server's `updatedAt` is one `DateTime` serialisation away from arriving in that form (a
+    // `Kind.Unspecified` value serialises with no suffix), and if it did, an untouched parse
+    // would put the threshold hours from where the server put it -- a different number of
+    // hours on every phone. The order would then be a fact about the viewer's timezone, which
+    // is what SC-007 and FR-029's "every device identically" forbid.
     //
-    // Both directions are checked, because an eastern offset and a western one break the
-    // threshold in opposite directions: in Tokyo an untouched parse makes the threshold too
-    // early and a good time unusable; in Chicago it makes it too late and an impossible time
-    // usable. Each entry below is the one that has teeth in one of those zones.
-    const originalTz = process.env.TZ;
-
-    afterEach(() => {
-      if (originalTz === undefined) delete process.env.TZ;
-      else process.env.TZ = originalTz;
-    });
-
+    // Both directions are asserted, because an eastern offset and a western one move the
+    // threshold opposite ways: east of UTC an untouched parse makes it too early and a good
+    // time unusable (`inside`), west of UTC too late and an impossible time usable (`past`).
+    //
+    // ⚠ The limit of this test: on a device already running in UTC a local reading and a UTC
+    // reading are the same reading, so nothing here can tell them apart and it passes either
+    // way. It has teeth on any other zone -- it was mutation-checked on America/Chicago.
+    // `process.env.TZ` is no help: assigning it inside jest does not change how dates parse
+    // (measured on this suite), so looping over zones would only look like coverage.
     const zonelessSave = '2026-11-01T15:10:00.000';   // 15:20:00.000Z once the tolerance is on
 
-    it.each(['Asia/Tokyo', 'America/Chicago', 'UTC'])('is read as UTC in %s', (tz) => {
-      process.env.TZ = tz;
+    // 15:19Z is a minute inside the tolerance and must order by its time; 18:00Z is hours
+    // past it and must not.
+    const inside = entryOf(
+      text('2026-11-01T15:19:00.000Z'),
+      text('2026-11-01T18:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+    const past = entryOf(
+      text('2026-11-01T18:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+    );
 
-      // 15:19Z is a minute inside the tolerance and must order by its time; 18:00Z is hours
-      // past it and must not.
-      const inside = entryOf(
-        text('2026-11-01T15:19:00.000Z'),
-        text('2026-11-01T18:00:00.000Z'),
-        text('2026-11-01T14:40:00.000Z'),
-      );
-      const past = entryOf(
-        text('2026-11-01T18:00:00.000Z'),
-        text('2026-11-01T14:40:00.000Z'),
-      );
-
-      expect(orderOf(toNumberedPieces(inside, zonelessSave))).toEqual([2, 0, 1]);
-      expect(orderOf(toNumberedPieces(past, zonelessSave))).toEqual([0, 1]);
-    });
+    expect(orderOf(toNumberedPieces(inside, zonelessSave))).toEqual([2, 0, 1]);
+    expect(orderOf(toNumberedPieces(past, zonelessSave))).toEqual([0, 1]);
   });
 
   it('treats an unreadable time as no time, and an unreadable server value as none', () => {
