@@ -6,7 +6,10 @@
  *   - **an interruption keeps what was recorded** (T037, US2-2, research R5): when the
  *     recorder stops without anybody tapping Stop -- an incoming call, or the system taking
  *     the audio session -- the part recorded so far becomes one clip, and the Stop tap the
- *     person makes anyway adds no second one;
+ *     person makes anyway adds no second one; a recorder that has not started yet is not
+ *     mistaken for one, and a session taken before any status ever said `isRecording` is
+ *     still noticed once the start-up grace window is out, so the bar never goes on claiming
+ *     to record with a frozen timer (fix round 1);
  *   - a stop hands over one clip `{ uri, duration, waveform, capturedAt }`, with
  *     `capturedAt` stamped when recording *started*, never when it stopped (research R8 --
  *     that instant is also where the clip is pinned, and it decides the piece's place in
@@ -175,7 +178,11 @@ jest.mock('expo-audio', () => {
 });
 
 import * as audio from 'expo-audio';
-import VoiceRecorderBar, { downsampleWaveform, WAVEFORM_BARS } from '../VoiceRecorderBar';
+import VoiceRecorderBar, {
+  downsampleWaveform,
+  START_GRACE_MS,
+  WAVEFORM_BARS,
+} from '../VoiceRecorderBar';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -717,6 +724,56 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
 
     expect(onClip).toHaveBeenCalledTimes(1);
     expect(onClip.mock.calls[0][0].duration).toBeCloseTo(1.5, 5);
+  });
+
+  /**
+   * The same signal again, in the one window where the guard above cannot see it.
+   *
+   * The guard believes an interruption only once some status has said `isRecording` -- so if
+   * the session is taken *before the native recorder ever reported itself as recording*, no
+   * status ever says it and the guard never opens. The interruption is then never believed:
+   * the bar goes on claiming to record, with the timer frozen at 0:00 (the elapsed effect
+   * early-returns on a stopped recorder) and the 5:00 cap unable to fire for the same reason.
+   * Nothing is lost -- Stop, or an unmount, still finishes the clip -- but until the person
+   * taps Stop the bar is lying about what the microphone is doing, which is the one thing a
+   * recording indicator may never do.
+   *
+   * What separates this from the case above is only the clock, so that is what decides it:
+   * a status that does not say `isRecording` is "not got going yet" for `START_GRACE_MS`
+   * after `record()`, and an interruption after that.
+   */
+  it('stops claiming to record when the session is taken before the first status', async () => {
+    // A native start that has not reported yet -- the same latency as the case above, so this
+    // case differs from it in one thing only: here the session is taken inside that window.
+    audio.__setStartLatency(600);
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+
+    // Taken before the native recorder got going, so nothing has reported `isRecording: true`
+    // and now nothing ever will.
+    await elapse(100);
+    await act(async () => {
+      audio.__interrupt();
+    });
+
+    // A few polls in, the grace window has not run out, so the bar is still giving the
+    // recorder the benefit of the doubt -- which is what keeps a slow native start alive.
+    await elapse(POLL_MS * 2);
+    expect(onClip).not.toHaveBeenCalled();
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+
+    // Once it has, the recorder has plainly been taken: the clip is finished the way every
+    // other ending finishes it, and the bar stops saying it is recording.
+    await elapse(START_GRACE_MS);
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].uri).toBe(audio.CLIP_URI);
+    expect(onClip.mock.calls[0][0].capturedAt).toBe(START_ISO);
+    expect(onClip.mock.calls[0][0].duration).toBeCloseTo(0.1, 5); // the part recorded
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(onRecordingChange.mock.calls).toEqual([[true], [false]]);
+    expect(has(tree, 'voice-recorder-bar')).toBe(false);
+    expect(has(tree, 'voice-record-button')).toBe(true);
   });
 });
 

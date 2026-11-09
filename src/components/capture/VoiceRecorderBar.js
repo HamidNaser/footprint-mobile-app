@@ -41,7 +41,10 @@
  * polled status of a perfectly healthy recording may read `isRecording: false`. Taking that
  * for an interruption would end every recording at birth. So the interruption is only
  * believed once a status has confirmed the recording really was under way
- * (`recorderConfirmedRef`).
+ * (`recorderConfirmedRef`) -- **or** once `START_GRACE_MS` has gone by since `record()`
+ * without any status confirming it, because a session taken inside that window reports the
+ * very same thing and never reports anything else, so the confirmation alone would be a flag
+ * nothing could ever open and the bar would claim to record until somebody tapped Stop.
  *
  * An **unmount is not an interruption** and is handled here, not there: nothing takes the
  * session back, so without a cleanup `stop()` is never called, the session is never
@@ -70,6 +73,28 @@ export const MAX_CLIP_MS = 5 * 60 * 1000;
 
 /** How often the recorder's status is polled while recording. */
 const POLL_INTERVAL_MS = 250;
+
+/**
+ * How long after `record()` a status that does not say `isRecording` is read as a recorder
+ * that has not got going yet, rather than as an interruption (research R5, T037).
+ *
+ * `record()` is synchronous and returns before the native session is necessarily running, so
+ * the first polled statuses of a perfectly healthy recording can read `isRecording: false`;
+ * taking those for a stop would end every recording at birth. But a session taken *inside*
+ * that window reports exactly the same thing and never reports anything else, so a flag
+ * waiting to be opened by a status that says `isRecording` would never open, and the bar
+ * would claim to record -- timer frozen at 0:00, the 5:00 cap unable to fire -- until the
+ * person tapped Stop. The clock is the only thing that separates the two, so it decides.
+ *
+ * Why this long: the suite's pessimistic native start latency is 600 ms, and this is more
+ * than three times it. The two ways of being wrong are not symmetrical, which is what sets
+ * the direction of the margin: too short ends a slow-but-healthy start, where `stop()` on a
+ * recorder that never began is the "no file" failure the person has to be told about; too
+ * long leaves the bar overstating the microphone for a moment longer. Neither loses a clip
+ * that was recorded -- a recording already under way is confirmed by its first status and
+ * never reaches this at all.
+ */
+export const START_GRACE_MS = 2000;
 
 /** How many waveform levels a clip carries at most (`AudioPlayer` draws ~50 bars). */
 export const WAVEFORM_BARS = 50;
@@ -213,6 +238,11 @@ export default function VoiceRecorderBar({
   // makes "the recorder is not recording" mean an interruption rather than "it has not got
   // going yet" -- see the file header, and T037's fourth case.
   const recorderConfirmedRef = useRef(false);
+  // When `record()` was called, so that an interruption arriving *before* the first status
+  // that says `isRecording` is still believed once `START_GRACE_MS` has gone by. Without it
+  // the confirmation above is a flag that can never be opened, and the bar claims to record
+  // for as long as the person leaves it alone (T037 fix round 1).
+  const recordStartedAtRef = useRef(0);
 
   /**
    * Ends the recording and hands the clip over, whatever ended it.
@@ -343,6 +373,9 @@ export default function VoiceRecorderBar({
       elapsedRef.current = 0;
       setElapsedMs(0);
       capturedAtRef.current = new Date().toISOString();
+      // Read beside `record()` rather than from `capturedAt`: this is a stopwatch for the
+      // grace window, and the stamp is a recorded fact about the clip (research R8).
+      recordStartedAtRef.current = Date.now();
       recorder.record();
       setIsRecording(true);
       isRecordingRef.current = true;
@@ -410,8 +443,18 @@ export default function VoiceRecorderBar({
       return;
     }
 
-    // The recording has not got going yet -- not an interruption. See the file header.
-    if (!recorderConfirmedRef.current) return;
+    // No status has said `isRecording` yet, which means one of two opposite things: the
+    // recording has not got going, or it was taken away before it ever reported itself. The
+    // clock is the only thing that can tell them apart, so until the grace window is out the
+    // recorder is given the benefit of the doubt, and after it the recorder has plainly been
+    // taken. Deciding this on the flag alone left the bar claiming to record for good, with
+    // the timer frozen and the 5:00 cap unable to fire. See `START_GRACE_MS`.
+    if (
+      !recorderConfirmedRef.current &&
+      Date.now() - recordStartedAtRef.current < START_GRACE_MS
+    ) {
+      return;
+    }
 
     finishClipRef.current();
   }, [isRecording, status]);
