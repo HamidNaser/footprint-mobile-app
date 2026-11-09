@@ -1,0 +1,515 @@
+/**
+ * memoryPieces (013 T045) -- the order, the numbers and the groups under a saved memory.
+ *
+ * `toNumberedPieces(entry, serverUpdatedAt)` is the one place that decides what every viewer
+ * sees under a memory: which piece comes first, which number each piece carries, and which
+ * pins share a marker. Three rules compose in it, and each has a case that is one character
+ * away from a plausible wrong answer -- so each is tested on its boundary, not near it.
+ *
+ * **Ordering (FR-028, FR-029, contract *Client ordering rule*).** A piece's time is usable iff
+ * it is present and not later than the server's `updatedAt` for the entry plus ten minutes.
+ * With no server value every present time is usable, and the device's own clock is never
+ * consulted -- a threshold of "now" would make the order a fact about when this phone happened
+ * to look, so two phones would order the same memory differently (SC-007). An unusable time is
+ * still kept on the piece: plausibility is a read-time ordering rule and never alters a
+ * recorded fact (Principle III, contract C2).
+ *
+ * **Numbering (FR-023, owner's round-2 answer).** Only pieces with a place are numbered, 1…k
+ * with no gaps, in the sorted order. A piece with no place carries no number, and a memory with
+ * no places carries none at all, so it looks exactly as it does today (SC-008).
+ *
+ * **Merging (round-3 L2, round-4 I2).** One rule decides both which pins merge and how many
+ * distinct places there are: the pieces whose latitude and longitude **round** (`toFixed(5)`,
+ * about a metre) to the same single key share one marker. It is a rounding grid, not a distance:
+ * 51.500014 and 51.500016 are two ten-millionths of a degree apart and fall either side of a key
+ * boundary, and that is accepted -- FR-023's "about a metre" is judged by this grid.
+ *
+ * Nothing here mocks anything, because there is nothing to mock: the function is pure, with no
+ * clock and no I/O. The one spy is on `Date.now`, and it is there to prove it is never called.
+ */
+
+import { toNumberedPieces } from '../memoryPieces';
+
+// The server's record of the memory's last save. Every plausibility test is written against
+// this one instant so the arithmetic is readable: +10 min is 15:20:00.000Z exactly.
+const SAVED = '2026-11-01T15:10:00.000Z';
+const TEN_MINUTES_AFTER = '2026-11-01T15:20:00.000Z';
+const A_MILLISECOND_LATER = '2026-11-01T15:20:00.001Z';
+const A_YEAR_AFTER = '2027-11-01T15:10:00.000Z';
+
+const HERE = { lat: 51.5009, lng: -0.142 };
+
+/** A text block: the one kind of block that carries its own capture time (contract C3). */
+const text = (capturedAt, location = null, content = 'a note') => ({
+  type: 'text',
+  content,
+  capturedAt,
+  location,
+  // `SocialService.adaptBlock` gives every block a `media` array, empty on a text block.
+  media: [],
+});
+
+/** A photos block: one piece per photo, each with its own time and place. */
+const photos = (items, blockExtras = {}) => ({
+  type: 'photos',
+  location: null,
+  ...blockExtras,
+  media: items.map(([capturedAt, location = null], i) => ({
+    id: `m${i}`,
+    capturedAt,
+    location,
+  })),
+});
+
+const mediaBlock = (type) => (capturedAt, location = null, blockExtras = {}) => ({
+  type,
+  location: null,
+  ...blockExtras,
+  media: [{ id: `${type}-1`, capturedAt, location }],
+});
+
+const video = mediaBlock('video');
+const audio = mediaBlock('audio');
+
+const entryOf = (...contentBlocks) => ({ contentBlocks });
+
+/** The stored positions of the pieces, in the order the rule puts them. */
+const orderOf = (result) => result.pieces.map((piece) => piece.storedIndex);
+
+describe('expanding a memory into pieces', () => {
+  it('gives one piece per text, audio and video block, and one per photo', () => {
+    const entry = entryOf(
+      text(SAVED),
+      photos([[SAVED], [SAVED]]),
+      video(SAVED),
+      audio(SAVED),
+    );
+
+    const { pieces } = toNumberedPieces(entry, SAVED);
+
+    expect(pieces.map((p) => p.kind)).toEqual(['text', 'photo', 'photo', 'video', 'audio']);
+    expect(orderOf({ pieces })).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('points each piece back at the block, and each photo at its own tile', () => {
+    // The card badges the piece itself, so a piece has to be findable in the block list it
+    // came from: a photo tile is a block index and a media index (FR-023).
+    const { pieces } = toNumberedPieces(entryOf(text(SAVED), photos([[SAVED], [SAVED]])), SAVED);
+
+    expect(pieces.map((p) => [p.blockIndex, p.mediaIndex])).toEqual([
+      [0, null],
+      [1, 0],
+      [1, 1],
+    ]);
+  });
+
+  it("takes a media block's time from its media item, ignoring any block-level time", () => {
+    // Contract C3: a block that carries media has no time of its own. A block-level value on
+    // such a block is not a recorded fact about anything, and using it would order the piece
+    // by a number no device agrees on.
+    const entry = entryOf(photos([['2026-11-01T14:57:02.004Z']], { capturedAt: A_YEAR_AFTER }));
+
+    expect(toNumberedPieces(entry, SAVED).pieces[0].capturedAt)
+      .toBe('2026-11-01T14:57:02.004Z');
+  });
+
+  it('falls back to the block place for a media item that has none of its own', () => {
+    // An older memory records a place on the block and nothing on the photo. The server has
+    // already coarsened both for this viewer, so the block's place is this photo's place; the
+    // alternative is a memory with places that shows no map at all (SC-008).
+    const entry = entryOf(photos([[null]], { location: HERE }));
+
+    expect(toNumberedPieces(entry, SAVED).pieces[0].location).toEqual(HERE);
+  });
+
+  it('reads a memory with no blocks at all without complaint', () => {
+    expect(toNumberedPieces({}, SAVED)).toEqual({
+      pieces: [],
+      groups: [],
+      distinctPlaceCount: 0,
+      withoutPlaceCount: 0,
+    });
+  });
+});
+
+describe('the ordering rule', () => {
+  it('puts all-timed pieces in capture order, whatever order they are stored in', () => {
+    const entry = entryOf(
+      text('2026-11-01T15:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+      text('2026-11-01T14:50:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([1, 2, 0]);
+  });
+
+  it('leaves a memory with no times at all in its stored order', () => {
+    const entry = entryOf(text(null), text(undefined), text(null));
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([0, 1, 2]);
+  });
+
+  it('keeps an untimed first piece first: its key is minus infinity', () => {
+    // The first piece has no predecessor to inherit from, and minus infinity is what puts it
+    // before every real time rather than after them.
+    const entry = entryOf(
+      text(null),
+      text('2026-11-01T15:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([0, 2, 1]);
+  });
+
+  it('keeps an untimed piece directly after the piece stored before it', () => {
+    // Stored: A@15:00, B untimed, C@14:40. B inherits A's key, so it travels with A rather
+    // than to either end of the memory (FR-028, the partly-timed edge case).
+    const entry = entryOf(
+      text('2026-11-01T15:00:00.000Z'),
+      text(null),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([2, 0, 1]);
+  });
+
+  it('carries an inherited key down a run of untimed pieces', () => {
+    // Stored: A@15:00, B untimed, C untimed, D@14:40. B and C both end up on A's key and in
+    // their stored order behind it.
+    const entry = entryOf(
+      text('2026-11-01T15:00:00.000Z'),
+      text(null),
+      text(null),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([3, 0, 1, 2]);
+  });
+
+  it('keeps two pieces captured in the same millisecond in their stored order', () => {
+    // A burst of taps produces this routinely. The stored index is the explicit tiebreaker,
+    // so the answer does not depend on how one engine's sort happens to behave (SC-007).
+    const sameMoment = '2026-11-01T14:40:00.000Z';
+    const entry = entryOf(
+      text('2026-11-01T15:00:00.000Z'),
+      text(sameMoment, null, 'second'),
+      text(sameMoment, null, 'third'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([1, 2, 0]);
+  });
+
+  it('uses a time exactly ten minutes after the last save', () => {
+    // The tolerance is inclusive: ten minutes is a clock difference, not an impossibility.
+    const entry = entryOf(
+      text(TEN_MINUTES_AFTER),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([1, 0]);
+  });
+
+  it('does not use a time one millisecond past the tolerance', () => {
+    // One millisecond over and the piece is ordered as if it had no time at all: first,
+    // because it is stored first and has no predecessor to inherit from.
+    const entry = entryOf(
+      text(A_MILLISECOND_LATER),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([0, 1]);
+  });
+
+  it('ignores a time a year after the last save, and keeps the value on the piece', () => {
+    // The wrong-clock edge case. Stored: A@14:40, B a year ahead, C@14:50. B keeps A's key,
+    // so it stays between its neighbours -- and its recorded time is returned untouched.
+    const entry = entryOf(
+      text('2026-11-01T14:40:00.000Z'),
+      text(A_YEAR_AFTER),
+      text('2026-11-01T14:50:00.000Z'),
+    );
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(orderOf(result)).toEqual([0, 1, 2]);
+    expect(result.pieces[1].capturedAt).toBe(A_YEAR_AFTER);
+  });
+
+  it('orders a piece added in a later edit normally', () => {
+    // The memory was first saved at 14:45 and saved again at 15:10. The piece added in the
+    // edit was captured at 15:05 -- after that first save, and so unusable if it were judged
+    // against it, but it is judged against the *last* save and is simply late (FR-029).
+    const entry = entryOf(
+      text('2026-11-01T14:40:00.000Z'),
+      text('2026-11-01T15:05:00.000Z'),   // added in the edit
+      text('2026-11-01T14:42:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([0, 2, 1]);
+    expect(orderOf(toNumberedPieces(entry, '2026-11-01T14:45:00.000Z'))).toEqual([0, 1, 2]);
+  });
+
+  it('applies no threshold at all when the server value is missing', () => {
+    // Until a device has the server's record of the save, no moment is treated as impossible
+    // (FR-029). A time a year ahead therefore orders like any other.
+    const entry = entryOf(
+      text(A_YEAR_AFTER),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, undefined))).toEqual([1, 0]);
+    // The own-memory route reads the column as NULL rather than as absent; both mean the same.
+    expect(orderOf(toNumberedPieces(entry, null))).toEqual([1, 0]);
+  });
+
+  it('never consults the device clock, with or without a server value', () => {
+    const now = jest.spyOn(Date, 'now');
+    const entry = entryOf(text(A_YEAR_AFTER), text('2026-11-01T14:40:00.000Z'));
+
+    toNumberedPieces(entry, undefined);
+    toNumberedPieces(entry, SAVED);
+
+    expect(now).not.toHaveBeenCalled();
+    now.mockRestore();
+  });
+
+  it('reads a server value with no milliseconds', () => {
+    // The server need not send them, and assuming them would move the threshold.
+    const entry = entryOf(
+      text(TEN_MINUTES_AFTER),
+      text(A_MILLISECOND_LATER),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    // Stored: A at +10 min exactly (usable), B one millisecond over (inherits A's key), C
+    // earliest. So C, then A with B behind it.
+    expect(orderOf(toNumberedPieces(entry, '2026-11-01T15:10:00Z'))).toEqual([2, 0, 1]);
+  });
+
+  describe('a timestamp with no zone', () => {
+    // `Date.parse` reads an ISO date-time with no `Z` and no offset as **local** time. The
+    // server's `updatedAt` is one `DateTime` serialisation away from arriving in that form
+    // (a `Kind.Unspecified` value serialises without a suffix), and if it did, the threshold
+    // would land hours from where the server put it -- a different number of hours on every
+    // phone. The order would then be a fact about the viewer's timezone, which is exactly
+    // what SC-007 and FR-029's "every device identically" forbid. So a zone-less value is
+    // read as UTC.
+    //
+    // Both directions are checked, because an eastern offset and a western one break the
+    // threshold in opposite directions: in Tokyo an untouched parse makes the threshold too
+    // early and a good time unusable; in Chicago it makes it too late and an impossible time
+    // usable. Each entry below is the one that has teeth in one of those zones.
+    const originalTz = process.env.TZ;
+
+    afterEach(() => {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    });
+
+    const zonelessSave = '2026-11-01T15:10:00.000';   // 15:20:00.000Z once the tolerance is on
+
+    it.each(['Asia/Tokyo', 'America/Chicago', 'UTC'])('is read as UTC in %s', (tz) => {
+      process.env.TZ = tz;
+
+      // 15:19Z is a minute inside the tolerance and must order by its time; 18:00Z is hours
+      // past it and must not.
+      const inside = entryOf(
+        text('2026-11-01T15:19:00.000Z'),
+        text('2026-11-01T18:00:00.000Z'),
+        text('2026-11-01T14:40:00.000Z'),
+      );
+      const past = entryOf(
+        text('2026-11-01T18:00:00.000Z'),
+        text('2026-11-01T14:40:00.000Z'),
+      );
+
+      expect(orderOf(toNumberedPieces(inside, zonelessSave))).toEqual([2, 0, 1]);
+      expect(orderOf(toNumberedPieces(past, zonelessSave))).toEqual([0, 1]);
+    });
+  });
+
+  it('treats an unreadable time as no time, and an unreadable server value as none', () => {
+    const entry = entryOf(text('not a time'), text('2026-11-01T14:40:00.000Z'));
+
+    expect(orderOf(toNumberedPieces(entry, SAVED))).toEqual([0, 1]);
+    // An unreadable server value means no threshold -- never a fall back to this phone's clock.
+    expect(orderOf(toNumberedPieces(entryOf(text(A_YEAR_AFTER), text(SAVED)), 'nonsense')))
+      .toEqual([1, 0]);
+  });
+});
+
+describe('numbering', () => {
+  const A = { lat: 51.5009, lng: -0.142 };
+  const B = { lat: 51.5101, lng: -0.134 };
+  const C = { lat: 51.52, lng: -0.1 };
+
+  it('numbers only the pieces with a place, 1…k with no gaps, in capture order', () => {
+    const entry = entryOf(
+      text('2026-11-01T15:00:00.000Z', A),
+      text('2026-11-01T14:40:00.000Z', B),
+      text('2026-11-01T14:50:00.000Z', C),
+    );
+
+    const { pieces } = toNumberedPieces(entry, SAVED);
+
+    expect(pieces.map((p) => [p.storedIndex, p.number])).toEqual([[1, 1], [2, 2], [0, 3]]);
+  });
+
+  it('gives a piece without a place no number, and leaves no gap behind it', () => {
+    const entry = entryOf(
+      text('2026-11-01T14:40:00.000Z', A),
+      text('2026-11-01T14:45:00.000Z', null),
+      text('2026-11-01T14:50:00.000Z', B),
+    );
+
+    const { pieces, withoutPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(pieces.map((p) => p.number)).toEqual([1, undefined, 2]);
+    expect(withoutPlaceCount).toBe(1);
+  });
+
+  it('yields no numbers at all for a memory with no places', () => {
+    const entry = entryOf(text('2026-11-01T14:40:00.000Z'), photos([['2026-11-01T14:50:00.000Z']]));
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.every((p) => p.number === undefined)).toBe(true);
+    expect(result.groups).toEqual([]);
+    expect(result.distinctPlaceCount).toBe(0);
+    expect(result.withoutPlaceCount).toBe(2);
+  });
+
+  it('counts the equator and the prime meridian as places', () => {
+    // `lat: 0` and `lng: 0` are real coordinates. A falsy test drops a memory made on either
+    // line and looks exactly like a memory with no place -- the bug `NumberedPin` was written
+    // around (`EntryMarker` on release/1.0, `:182`).
+    const entry = entryOf(text('2026-11-01T14:40:00.000Z', { lat: 0, lng: 0 }));
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces[0].number).toBe(1);
+    expect(result.withoutPlaceCount).toBe(0);
+    expect(result.distinctPlaceCount).toBe(1);
+  });
+
+  it('treats a half-written coordinate as no place', () => {
+    const entry = entryOf(
+      text('2026-11-01T14:40:00.000Z', { lat: 51.5009, lng: null }),
+      text('2026-11-01T14:50:00.000Z', A),
+    );
+
+    const { pieces, withoutPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(pieces.map((p) => p.number)).toEqual([undefined, 1]);
+    expect(withoutPlaceCount).toBe(1);
+  });
+});
+
+describe('merging pins at practically the same spot', () => {
+  const pieceAt = (minute, location) => text(`2026-11-01T14:${minute}:00.000Z`, location);
+
+  it('puts the pieces whose coordinates round to the same key in one group', () => {
+    // 51.500012 and 51.500014 both round to 51.50001, so they are one marker holding two
+    // pieces (FR-023, round-4 I2).
+    const entry = entryOf(
+      pieceAt('40', { lat: 51.500012, lng: -0.142 }),
+      pieceAt('50', { lat: 51.500014, lng: -0.142 }),
+    );
+
+    const { groups, distinctPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(groups.map((g) => g.numbers)).toEqual([[1, 2]]);
+    expect(distinctPlaceCount).toBe(1);
+  });
+
+  it('keeps pieces that round to different keys separate', () => {
+    // 51.500014 rounds to 51.50001 and 51.500016 rounds to 51.50002, so these two stay apart
+    // although they are far closer together than the pair above (round-4 I2). It is a
+    // rounding grid, not a distance.
+    const entry = entryOf(
+      pieceAt('40', { lat: 51.500014, lng: -0.142 }),
+      pieceAt('50', { lat: 51.500016, lng: -0.142 }),
+    );
+
+    const { groups, distinctPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(groups.map((g) => g.numbers)).toEqual([[1], [2]]);
+    expect(distinctPlaceCount).toBe(2);
+  });
+
+  it('groups on the longitude as well as the latitude', () => {
+    const entry = entryOf(
+      pieceAt('40', { lat: 51.5009, lng: -0.142 }),
+      pieceAt('50', { lat: 51.5009, lng: -0.143 }),
+    );
+
+    expect(toNumberedPieces(entry, SAVED).distinctPlaceCount).toBe(2);
+  });
+
+  it('gives two places about 100 m apart two groups', () => {
+    // 0.0009° of latitude is roughly 100 m.
+    const entry = entryOf(
+      pieceAt('40', { lat: 51.5009, lng: -0.142 }),
+      pieceAt('50', { lat: 51.5018, lng: -0.142 }),
+    );
+
+    const { groups, distinctPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(groups).toHaveLength(2);
+    expect(distinctPlaceCount).toBe(2);
+  });
+
+  it('returns the groups in number order, each carrying its own numbers', () => {
+    // Stored out of capture order on purpose: the groups follow the numbers, which follow the
+    // capture order, because the route line is drawn through them in that order (FR-024).
+    const far = { lat: 51.52, lng: -0.1 };
+    const entry = entryOf(
+      pieceAt('55', far),
+      pieceAt('40', { lat: 51.500012, lng: -0.142 }),
+      pieceAt('45', { lat: 51.500014, lng: -0.142 }),
+    );
+
+    const { groups } = toNumberedPieces(entry, SAVED);
+
+    expect(groups.map((g) => g.numbers)).toEqual([[1, 2], [3]]);
+    expect(groups.map((g) => g.kind)).toEqual(['text', 'text']);
+  });
+
+  it('hands the map the raw coordinate of the group, never the rounded key', () => {
+    // FR-026: the server has already coarsened this location for this viewer. The rounding is
+    // a grouping key and nothing else; rounding what the map is given would show a place more
+    // precisely or less precisely than the viewer is allowed.
+    const raw = { lat: 51.500012345, lng: -0.142067891 };
+    const entry = entryOf(pieceAt('40', raw), pieceAt('50', { lat: 51.500014, lng: -0.142067 }));
+
+    const { groups, pieces } = toNumberedPieces(entry, SAVED);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].lat).toBe(51.500012345);
+    expect(groups[0].lng).toBe(-0.142067891);
+    expect(pieces[0].location).toEqual(raw);
+  });
+
+  it('groups the pieces of a photo burst at one spot into one marker with a count', () => {
+    // The burst edge case: several photos a moment apart at one place share a marker, and
+    // tapping it highlights all of them (FR-025).
+    const spot = { lat: 51.5101, lng: -0.134 };
+    const entry = entryOf(photos([
+      ['2026-11-01T14:57:02.004Z', spot],
+      ['2026-11-01T14:57:02.511Z', spot],
+      ['2026-11-01T14:57:03.102Z', spot],
+    ]));
+
+    const { groups, distinctPlaceCount, withoutPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(groups).toEqual([{
+      key: '51.51010,-0.13400',
+      lat: 51.5101,
+      lng: -0.134,
+      kind: 'photo',
+      numbers: [1, 2, 3],
+    }]);
+    expect(distinctPlaceCount).toBe(1);
+    expect(withoutPlaceCount).toBe(0);
+  });
+});
