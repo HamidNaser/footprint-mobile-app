@@ -12,6 +12,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
+  Alert,
   View,
   Text,
   StyleSheet,
@@ -25,6 +26,7 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
 } from 'react-native';
+import { v4 as uuidv4 } from 'uuid';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -62,6 +64,8 @@ import { useAuth } from '../context/AuthContext';
 
 // Services
 import { SettingsService } from '../services/SettingsService';
+import CaptureDraftStore, { DraftSlot } from '../services/CaptureDraftStore';
+import CaptureLocation from '../services/CaptureLocation';
 
 // API
 import { ReactionsApi, CommentsApi } from '../api';
@@ -540,28 +544,6 @@ export default function JournalScreen({ navigation }) {
   }, []);
 
   /**
-   * Handle sending a message directly from the input bar (WhatsApp-style)
-   */
-  const handleSendMessage = useCallback(async (text, visibility = 'private') => {
-    if (!text.trim()) return;
-    
-    console.log('[JournalScreen] Sending quick message:', text, 'visibility:', visibility);
-    
-    try {
-      const created = await createEntry({
-        userId: authUser?.id || 'local_user',
-        contentBlocks: [{ type: 'text', content: text }],
-        visibility: visibility,
-        date: new Date(),
-      });
-      revealEntry(created);
-      console.log('[JournalScreen] Quick message saved');
-    } catch (error) {
-      console.error('[JournalScreen] Failed to save quick message:', error);
-    }
-  }, [createEntry, authUser, revealEntry]);
-
-  /**
    * Move the screen to the day a just-created entry belongs to, so a save is
    * always visibly confirmed. No-op when already on that day.
    */
@@ -570,15 +552,59 @@ export default function JournalScreen({ navigation }) {
     if (key) setSelectedDate(parseDateKey(key));
   }, []);
 
-  const handleQuickCamera = useCallback(() => {
-    setComposeMode('camera');
-    setShowComposeModal(true);
-  }, []);
+  /**
+   * The quick bar's camera and microphone: one tap into the capture screen (FR-001).
+   *
+   * The same route and the same parameters `CaptureFab` sends from the "+" over every tab, so
+   * there is one capture screen and not two. Nothing is carried here -- not the bar's own
+   * audience picker above all, because a memory is saved only on an explicit choice in the
+   * capture screen's save sheet (FR-011).
+   */
+  const openCapture = useCallback(() => {
+    navigation.navigate('Capture', { mode: 'new' });
+  }, [navigation]);
 
-  const handleQuickMic = useCallback(() => {
-    setComposeMode('audio');
-    setShowComposeModal(true);
-  }, []);
+  /**
+   * The quick bar's typed note: the same one tap into the capture screen, with the note.
+   *
+   * `QuickCaptureBar` clears its input as it calls this, so by the time this runs the note
+   * exists nowhere else -- which is the defect this feature exists to remove, and it must not
+   * reappear here. The note is recorded in the unsaved memory first and the screen opened
+   * second: it goes into the `new` draft slot through the same stamp-then-record order every
+   * piece on the capture screen goes through (FR-004), so the capture screen's own mount reads
+   * it back, and so it survives the app being closed on the way (FR-012).
+   *
+   * Nothing is saved, and the audience the bar's own picker was left on is deliberately not
+   * carried: a memory is saved only on an explicit choice in the capture screen's save sheet
+   * (FR-011). A note that cannot be recorded is said back to the person, with the words in it,
+   * rather than logged to a console nobody is reading (FR-017).
+   */
+  const handleSendMessage = useCallback(async (text) => {
+    const note = text?.trim();
+    if (!note) return;
+
+    try {
+      const stamped = await CaptureLocation.withLocation({
+        localId: uuidv4(),
+        kind: 'text',
+        content: note,
+        // An instant, exactly as the phone's clock reads it (research R8, Principle III) --
+        // never a civil date.
+        capturedAt: new Date().toISOString(),
+      });
+      await CaptureDraftStore.addPiece(DraftSlot.NEW, stamped);
+    } catch (error) {
+      console.warn('[JournalScreen] the typed note reached no draft', error);
+      Alert.alert(
+        'Could not keep that note',
+        'This note has not been kept, so nothing has been added to your memory. Here it is, ' +
+          `to write again:\n\n${note}`,
+      );
+      return;
+    }
+
+    openCapture();
+  }, [openCapture]);
 
   /**
    * Handle entry press
@@ -589,11 +615,11 @@ export default function JournalScreen({ navigation }) {
   }, []);
 
   /**
-   * Handle save entry from compose modal
+   * Handle save entry from the compose modal, which is now reached only by the detail view's
+   * Edit (T060 re-points that at the capture screen, T068 retires the modal). A new memory
+   * does not come through here any more: it is captured and saved on `CaptureScreen`.
    */
   const handleSaveEntry = useCallback(async (entryData) => {
-    console.log('[JournalScreen] Saving entry:', entryData);
-    
     try {
       const created = await createEntry({
         userId: authUser?.id || 'local_user',
@@ -614,10 +640,16 @@ export default function JournalScreen({ navigation }) {
       // date would otherwise drop the user back onto a screen that does not
       // contain what they just captured.
       revealEntry(created);
-      console.log('[JournalScreen] Entry saved successfully');
     } catch (error) {
-      console.error('[JournalScreen] Failed to save entry:', error);
-      // Error will be shown via the useJournal hook's error state
+      // This caught the rejection, logged it, and left the person looking at a screen that
+      // showed no memory and said nothing -- the comment here claimed the hook's error state
+      // would show it, and that state never reaches this screen. A failure is said, and the
+      // modal is left open with everything that was written still in it (FR-017).
+      console.warn('[JournalScreen] the memory could not be saved', error);
+      Alert.alert(
+        'Could not save',
+        'Your memory could not be saved and is still here. Try again.',
+      );
     }
   }, [createEntry, authUser, revealEntry]);
 
@@ -901,8 +933,8 @@ export default function JournalScreen({ navigation }) {
       >
         <QuickCaptureBar
           onSend={handleSendMessage}
-          onCameraPress={handleQuickCamera}
-          onMicPress={handleQuickMic}
+          onCameraPress={openCapture}
+          onMicPress={openCapture}
           placeholder="Message..."
           primaryColor={PRIMARY_COLOR}
         />
