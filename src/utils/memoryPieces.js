@@ -74,20 +74,31 @@ const PLACE_KEY_DECIMALS = 5;
  * carries no media and so carries its own capture time (contract C3's other half) -- `text`
  * today, and anything added later, which is numbered like any other piece rather than silently
  * dropped from the card's numbering.
+ *
+ * A `Map` rather than an object literal, because a plain `MEDIA_BLOCK_KINDS[block.type]` is a
+ * prototype-chain lookup: a block whose type is `'constructor'` or `'toString'` would resolve to
+ * a truthy *function*, be read as a media block, and travel on as the piece's `kind` and into
+ * the group handed to the map. `journalBlocks.js` closes the same hole in `builderFor`.
  */
-const MEDIA_BLOCK_KINDS = {
-  photos: 'photo',
-  video: 'video',
-  audio: 'audio',
-};
+const MEDIA_BLOCK_KINDS = new Map([
+  ['photos', 'photo'],
+  ['video', 'video'],
+  ['audio', 'audio'],
+]);
 
 /**
  * An ISO-8601 instant as a number of milliseconds, read the same way on every device.
  *
- * A value with a `Z` or an offset is unambiguous. One without either is read as UTC rather than
- * as local time, which is what `Date.parse` would do: the server stores and sends UTC, and a
- * local reading would put a value hours from where the server put it, by a different number of
- * hours in every timezone. Anything unreadable is `null`, never a guess.
+ * A value with a `Z` or an offset is unambiguous. A date-*time* without either is read as UTC
+ * rather than as local time, which is what `Date.parse` would do: the server stores and sends
+ * UTC, and a local reading would put a value hours from where the server put it, by a different
+ * number of hours in every timezone. Anything unreadable is `null`, never a guess.
+ *
+ * A value with **no time of day** is left exactly as it is. A date-only form is already UTC by
+ * the ES Date Time String Format, and appending a `Z` to it would build `'2026-11-01Z'`, which
+ * is outside that format: V8 happens to answer the same instant, but parsing outside the format
+ * is implementation-defined, so another engine may answer `NaN` -- which would drop the
+ * threshold on a phone and on no CI run.
  *
  * @param {string|null|undefined} iso
  * @returns {number|null} milliseconds since the epoch, or null
@@ -96,10 +107,11 @@ function asInstant(iso) {
   if (typeof iso !== 'string' || iso.trim() === '') return null;
 
   const trimmed = iso.trim();
-  // A zone is a trailing `Z`, or a `+hh:mm` / `-hh:mm` offset after the time. The search starts
-  // past the date so a date's own hyphens are not mistaken for an offset's sign.
+  // A zone is a trailing `Z`, or a `+hh:mm` / `-hh:mm` offset after the time. The test is
+  // anchored at the end so a date's own hyphens are not mistaken for an offset's sign.
   const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
-  const parsed = Date.parse(hasZone ? trimmed : `${trimmed}Z`);
+  const needsUtc = !hasZone && trimmed.includes('T');
+  const parsed = Date.parse(needsUtc ? `${trimmed}Z` : trimmed);
 
   return Number.isNaN(parsed) ? null : parsed;
 }
@@ -112,10 +124,15 @@ function asInstant(iso) {
  * (FR-023). `storedIndex` is its position in this expansion, which is both the ordering rule's
  * tiebreaker and the stored order a memory with no times keeps.
  *
- * A media item with no place of its own takes its block's. The server has already coarsened
- * both for this viewer, so this reveals nothing the block did not; and an older memory that
- * recorded one place for a whole block would otherwise be a memory with places that shows no
- * map at all (SC-008).
+ * **A media item with no place of its own takes its block's, and SC-008 requires it.** On
+ * `origin/release/1.0`, `journalBlocks.js:66` and `:83` put `location: blockLocation` on a photos
+ * block and on a video block while their media items take `mediaLocation(p)`, which is often
+ * null -- so in a memory saved before this feature the place is frequently recorded on the block
+ * alone. SC-008 is that every such memory "still opens and displays exactly as before, plus the
+ * map when it has places": without this fallback those are memories that have a place and show
+ * **no map at all**. Inheriting gives one pin per piece at the block's spot, which FR-023 then
+ * merges into a single marker with its count. The server has already coarsened both values for
+ * this viewer, so nothing is revealed that the block did not already reveal (FR-026).
  */
 function expand(entry) {
   const pieces = [];
@@ -123,7 +140,7 @@ function expand(entry) {
   (entry?.contentBlocks || []).forEach((block, blockIndex) => {
     if (!block) return;
 
-    const mediaKind = MEDIA_BLOCK_KINDS[block.type];
+    const mediaKind = MEDIA_BLOCK_KINDS.get(block.type);
 
     if (mediaKind) {
       (block.media || []).forEach((item, mediaIndex) => {
@@ -169,9 +186,21 @@ function hasPlace(location) {
   return Number.isFinite(location?.lat) && Number.isFinite(location?.lng);
 }
 
-/** The single 5-decimal key both the merging and the distinct-place count are decided by. */
+/**
+ * The single 5-decimal key both the merging and the distinct-place count are decided by.
+ *
+ * The unary `+` is not decoration: `(-0.000001).toFixed(5)` is `'-0.00000'` and
+ * `(0.000001).toFixed(5)` is `'0.00000'`, so without it two pieces 20 cm apart either side of
+ * the prime meridian -- or the equator -- would be two markers, split by a string artifact
+ * rather than by the grid boundary the documents accept. Numbering them back through `+` folds
+ * `-0` onto `0`; every other value is unchanged, because the string came from `toFixed` in the
+ * first place.
+ */
 function placeKey(location) {
-  return `${location.lat.toFixed(PLACE_KEY_DECIMALS)},${location.lng.toFixed(PLACE_KEY_DECIMALS)}`;
+  const lat = +location.lat.toFixed(PLACE_KEY_DECIMALS);
+  const lng = +location.lng.toFixed(PLACE_KEY_DECIMALS);
+
+  return `${lat},${lng}`;
 }
 
 /**
@@ -228,15 +257,21 @@ export function toNumberedPieces(entry, serverUpdatedAt) {
     return a.storedIndex - b.storedIndex;
   });
 
+  const numbered = [];
   const groups = [];
   const groupByKey = new Map();
   let number = 0;
   let withoutPlaceCount = 0;
 
-  const numbered = ordered.map((piece) => {
+  // A `forEach` building both lists, rather than a `map` whose callback also fills `groups` and
+  // advances two counters -- the numbering and the grouping are one walk over the sorted pieces,
+  // and this says so. Every piece is copied on the way out, placed or not, so a caller never
+  // holds one of this walk's own objects.
+  ordered.forEach((piece) => {
     if (!hasPlace(piece.location)) {
       withoutPlaceCount += 1;
-      return piece;
+      numbered.push({ ...piece });
+      return;
     }
 
     number += 1;
@@ -260,7 +295,7 @@ export function toNumberedPieces(entry, serverUpdatedAt) {
       groups.push(group);
     }
 
-    return { ...piece, number };
+    numbered.push({ ...piece, number });
   });
 
   return {

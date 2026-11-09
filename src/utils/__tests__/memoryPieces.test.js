@@ -599,7 +599,9 @@ describe('merging pins at practically the same spot', () => {
     const { groups, distinctPlaceCount, withoutPlaceCount } = toNumberedPieces(entry, SAVED);
 
     expect(groups).toEqual([{
-      key: '51.51010,-0.13400',
+      // The key is the two rounded coordinates as numbers, so a value that rounds to zero
+      // carries no sign into it (see `placeKey`) and trailing zeros are not padded back on.
+      key: '51.5101,-0.134',
       lat: 51.5101,
       lng: -0.134,
       kind: 'photo',
