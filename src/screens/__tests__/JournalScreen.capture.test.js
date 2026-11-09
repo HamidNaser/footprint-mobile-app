@@ -309,6 +309,26 @@ async function render() {
   return { tree, navigate };
 }
 
+/**
+ * The screen logs a line of its own on each failure path it alerts about. Deliberate, and kept
+ * — but it belongs in a production console, not in this suite's output, where a real warning
+ * is what a reader should notice. Silenced per test, and the spy is handed back so a test can
+ * still assert the failure was recorded rather than swallowed.
+ */
+/** Every string the screen renders, flattened — children may be an array of fragments. */
+const textsAnywhere = (node) =>
+  node
+    .findAllByType(Text)
+    .map((t) => (Array.isArray(t.props.children) ? t.props.children.join('') : t.props.children))
+    .filter((value) => typeof value === 'string');
+
+const silencedWarnings = [];
+const silenceWarnings = () => {
+  const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  silencedWarnings.push(spy);
+  return spy;
+};
+
 afterEach(() => {
   while (mounted.length) {
     const tree = mounted.pop();
@@ -319,6 +339,9 @@ afterEach(() => {
     } catch {
       /* already gone */
     }
+  }
+  while (silencedWarnings.length) {
+    silencedWarnings.pop().mockRestore();
   }
   // Back to an empty feed, so a test that puts a memory on screen cannot leak it into the
   // next one (`jest.clearAllMocks` does not touch the box it is held in).
@@ -560,6 +583,7 @@ describe('a new memory is no longer saved by the Journal screen (FR-017)', () =>
     // the note is said back to the person and the screen does not move on as though it had
     // been kept.
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
     CaptureDraftStore.addPiece.mockRejectedValueOnce(new Error('no space left on device'));
 
     const { tree, navigate } = await render();
@@ -571,6 +595,7 @@ describe('a new memory is no longer saved by the Journal screen (FR-017)', () =>
     expect(said).toContain(NOTE);
     expect(navigate).not.toHaveBeenCalled();
     expect(createEntry).not.toHaveBeenCalled();
+    expect(warned).toHaveBeenCalled();
 
     alert.mockRestore();
   });
@@ -619,6 +644,7 @@ describe('the compose modal’s remaining save path', () => {
     // saved, and the comment said the hook's error state would show it — it does not reach
     // this screen. Whatever is left of this path, a failure has to be said.
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
     createEntry.mockRejectedValueOnce(new Error('disk full'));
 
     const { tree } = await render();
@@ -628,6 +654,7 @@ describe('the compose modal’s remaining save path', () => {
     });
 
     expect(alert).toHaveBeenCalledTimes(1);
+    expect(warned).toHaveBeenCalled();
 
     alert.mockRestore();
   });
@@ -752,6 +779,7 @@ describe('a refused memory is shared again from the Journal screen (US1-8)', () 
     // The refusal is still on the card — `reshareEntry` clears it only once the memory is
     // queued — so silence here would leave the person tapping a line that does nothing.
     const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
     JournalService.reshareEntry.mockRejectedValueOnce(new Error('queue is unavailable'));
 
     const { tree } = await render();
@@ -760,6 +788,132 @@ describe('a refused memory is shared again from the Journal screen (US1-8)', () 
 
     expect(alert).toHaveBeenCalledTimes(1);
     expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+    expect(warned).toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+
+  it('says so when a choice arrives with no audience in it, rather than doing nothing', async () => {
+    // Unreachable from the Journal list today — `SaveAudienceSheet` reports a value or nothing
+    // at all — so this is the handler's own guard, which until now was a bare `return`: a
+    // silent no-op immediately after the person made an explicit choice, which is the one
+    // thing FR-011 says a refusal must never be. Nothing is shared either way.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+    const { tree } = await render();
+
+    for (const [entry, visibility] of [
+      [refused, undefined],
+      [{ ...refused, localId: null }, 'friends'],
+    ]) {
+      await act(async () => {
+        await card(tree).props.onReshare(entry, visibility);
+      });
+    }
+
+    expect(alert).toHaveBeenCalledTimes(2);
+    expect(JournalService.reshareEntry).not.toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The seconds between sending a typed note and the capture screen (round-1 finding 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A regression this feature introduces, and the only one on this path. Before it,
+ * `handleSendMessage` awaited `createEntry` — a local database write, tens of milliseconds —
+ * and the feedback was the memory appearing in the list. Now the bar clears the input and
+ * dismisses the keyboard the moment Send is tapped (`QuickCaptureBar.handleSend` calls
+ * `onSend` and then `setText('')` synchronously), and this screen then awaits
+ * `CaptureLocation.withLocation` before anything moves. On a cold fix that is up to about four
+ * seconds in which the words are gone from the input, the keyboard is gone, and nothing has
+ * happened — which reads as "my note vanished".
+ *
+ * It is not every send: `stampLocation` caches a fix for two minutes, so this is the first
+ * send after the app has been idle. And nothing is lost in any case — the note reaches the
+ * draft, and a note that cannot be kept is said back with its words in it. What was missing is
+ * any sign that the phone is still working on it.
+ *
+ * The indication lives on **this** screen, not in the bar: the Send button exists only while
+ * there is text (`{hasText ? <send> : <mic>}`), so by the time this screen is awaiting
+ * anything the control to disable is already gone and the input is already empty. This screen
+ * owns the await and renders the bar, so it is the one that can say so — and `QuickCaptureBar`
+ * keeps its contract exactly as it is.
+ */
+describe('a typed note that takes a moment to keep says so', () => {
+  const KEEPING_NOTE = 'Keeping that note…';
+
+  /** A stamping that has not finished yet, and the handle that finishes it. */
+  const deferStamping = () => {
+    let release;
+    CaptureLocation.withLocation.mockImplementationOnce(
+      (capture) =>
+        new Promise((resolve, reject) => {
+          release = { resolve: () => resolve({ ...capture, location: null }), reject };
+        }),
+    );
+    return {
+      finish: async () => {
+        await act(async () => {
+          release.resolve();
+        });
+      },
+      fail: async () => {
+        await act(async () => {
+          release.reject(new Error('no fix, and no draft'));
+        });
+      },
+    };
+  };
+
+  const allTexts = (tree) => textsAnywhere(tree.root);
+
+  it('says nothing until something is sent', async () => {
+    const { tree } = await render();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+  });
+
+  it('says it is keeping the note while the note is still being kept', async () => {
+    const stamping = deferStamping();
+
+    const { tree, navigate } = await render();
+    await tapSend(tree, NOTE);
+
+    expect(allTexts(tree)).toContain(KEEPING_NOTE);
+    // The honesty of the line: the capture screen has not opened yet, which is exactly the
+    // stretch the person was looking at nothing.
+    expect(navigate).not.toHaveBeenCalled();
+
+    await stamping.finish();
+  });
+
+  it('stops saying it once the note is kept', async () => {
+    const stamping = deferStamping();
+
+    const { tree } = await render();
+    await tapSend(tree, NOTE);
+    await stamping.finish();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+  });
+
+  it('stops saying it when the note could not be kept either', async () => {
+    // The line must not outlive the attempt. The alert says what happened; a spinner left
+    // spinning under it would say the opposite.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    silenceWarnings();
+    const stamping = deferStamping();
+
+    const { tree } = await render();
+    await tapSend(tree, NOTE);
+    await stamping.fail();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+    expect(alert).toHaveBeenCalledTimes(1);
 
     alert.mockRestore();
   });

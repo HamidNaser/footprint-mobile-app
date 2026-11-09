@@ -22,16 +22,26 @@ jest.mock('../SettingsService', () => ({
   StorageMode: { LOCAL_ONLY: 'local_only' },
 }));
 /**
- * A fake repository over an in-memory row map. Two things about it are deliberate:
+ * A fake repository over an in-memory row map. Three things about it are deliberate:
  *
- *   - `update` enqueues an `UPDATE_ENTRY` **unconditionally**, which is exactly what the real
- *     `JournalRepository.update` does today (`:349-355`), server id or not. That is what makes
- *     "exactly one operation" load-bearing below: a `reshareEntry` that reached for `update`
- *     on a memory with no server id would show up here as two queued operations, which is how
- *     a memory gets written to the server twice. T056 removes the real method's no-server-id
- *     half and T055 pins the whole thing over the real repository and the real queue;
- *   - the row map is the single store, so `visibility` and `share_state` are asserted as
- *     *stored values*, not as arguments that happened to be passed.
+ *   - the row map is the single store, so `visibility`, `sync_status` and `share_state` are
+ *     asserted as *stored values*, not as arguments that happened to be passed;
+ *   - `isSyncEnabled` is a mock, because it is the Local Only storage mode — a mode in which
+ *     nothing drains the sync queue, so nothing can reach the server at all;
+ *   - ⚠ **`update` is faithful to `_enqueueSync`, swallow and all.** The real method queues
+ *     through that private helper (`JournalRepository.js:552-563`), which **returns early when
+ *     sync is disabled and catches every enqueue error** — so the real `update` resolves
+ *     normally whether or not an operation was really written, and it moves a synced memory
+ *     back to pending only when sync is enabled (`:346-349`). An earlier version of this fake
+ *     enqueued unconditionally and let errors propagate, which is what hid round-1 Critical 1:
+ *     a `reshareEntry` that cleared the refusal "once the memory is queued" cleared it over a
+ *     memory that was never queued, leaving a card reading "Friends" over a memory nobody can
+ *     see. The fake must be able to lie in the same way the real one does, or the test cannot
+ *     see the defect.
+ *
+ * Since that fix `reshareEntry` does not use `update` on either arm — it queues the one
+ * operation itself, so a failure to queue reaches it — and the tests below assert that. The
+ * fake stays faithful so that routing back through `update` would once again go red.
  */
 jest.mock('../../repositories/JournalRepository', () => {
   const rows = new Map();
@@ -42,6 +52,38 @@ jest.mock('../../repositories/JournalRepository', () => {
     const next = { ...row, ...updates };
     rows.set(localId, next);
     return next;
+  };
+
+  const isSyncEnabled = jest.fn(async () => true);
+
+  const JournalRepository = {
+    isSyncEnabled,
+    getByLocalId: jest.fn(async (localId) => rows.get(localId) ?? null),
+    update: jest.fn(async (localId, updates) => {
+      const before = rows.get(localId);
+      const syncEnabled = await isSyncEnabled();
+      const next = write(localId, {
+        ...updates,
+        ...(syncEnabled && before?.syncStatus === 'synced' ? { syncStatus: 'pending' } : {}),
+      });
+      // `_enqueueSync`, modelled: a no-op in Local Only mode, and every failure swallowed.
+      try {
+        if (!syncEnabled) return next;
+        const { SyncQueue, SyncOperationType } = require('../../sync/SyncQueue');
+        await SyncQueue.enqueue({
+          type: SyncOperationType.UPDATE_ENTRY,
+          entityId: localId,
+          serverId: next.serverId || null,
+          data: { ...next, local_id: localId },
+        });
+      } catch {
+        /* swallowed, exactly as `_enqueueSync` does */
+      }
+      return next;
+    }),
+    setShareState: jest.fn(async (localId, state) => {
+      write(localId, { shareState: state ?? null });
+    }),
   };
 
   return {
@@ -56,23 +98,7 @@ jest.mock('../../repositories/JournalRepository', () => {
     SortOrder: { DESC: 'desc' },
     __rows: rows,
     __write: write,
-    JournalRepository: {
-      getByLocalId: jest.fn(async (localId) => rows.get(localId) ?? null),
-      update: jest.fn(async (localId, updates) => {
-        const next = write(localId, updates);
-        const { SyncQueue, SyncOperationType } = require('../../sync/SyncQueue');
-        await SyncQueue.enqueue({
-          type: SyncOperationType.UPDATE_ENTRY,
-          entityId: localId,
-          serverId: next.serverId || null,
-          data: { ...next, local_id: localId },
-        });
-        return next;
-      }),
-      setShareState: jest.fn(async (localId, state) => {
-        write(localId, { shareState: state ?? null });
-      }),
-    },
+    JournalRepository,
   };
 });
 jest.mock('../FileService', () => ({
@@ -110,6 +136,10 @@ import { SyncEngine } from '../../sync/SyncEngine';
 beforeEach(() => {
   jest.clearAllMocks();
   __rows.clear();
+  // Cloud sync on, unless a test says otherwise. Re-set rather than cleared: `clearAllMocks`
+  // forgets calls, not implementations, so a test that switches storage to Local Only would
+  // otherwise leak that into every test after it.
+  JournalRepository.isSyncEnabled.mockResolvedValue(true);
   // Default: pretend every source path is a cache path that gets copied.
   FileService.persist.mockImplementation(async (uri) =>
     uri.startsWith('file:///docs/') ? uri : `file:///docs/media/${uri.split('/').pop()}`
@@ -295,12 +325,28 @@ describe('reshareEntry', () => {
     expect(queued()[0].serverId ?? null).toBeNull();
   });
 
-  it('does not reach for the repository update that would queue a second operation', async () => {
-    seedEntry({ serverId: null });
+  it('queues the operation itself on both arms, never through the repository update', async () => {
+    // Not a style preference. `JournalRepository.update` queues through `_enqueueSync`, which
+    // returns early in Local Only mode and swallows every enqueue error — so it resolves the
+    // same way whether or not an operation was written, and a caller cannot tell. The refusal
+    // may be cleared only when the operation is **known** to exist, so this queues it here,
+    // where a failure is a rejection (round-1 Critical 1). It is also what keeps "exactly one
+    // operation" true: `update` would queue an `UPDATE_ENTRY` even with no server id, which
+    // the engine drops as completed, so the memory would stay unshared with nothing on its
+    // card to say so.
+    for (const serverId of [null, 'server-1']) {
+      jest.clearAllMocks();
+      __rows.clear();
+      seedEntry({ serverId });
 
-    await JournalService.reshareEntry('local-1', 'friends');
+      await JournalService.reshareEntry('local-1', 'friends');
 
-    expect(JournalRepository.update).not.toHaveBeenCalled();
+      expect({ serverId, update: JournalRepository.update.mock.calls.length }).toEqual({
+        serverId,
+        update: 0,
+      });
+      expect(queued()).toHaveLength(1);
+    }
   });
 
   it('sends the latest content, so an edit made while it was refused is not lost (R15)', async () => {
@@ -320,16 +366,28 @@ describe('reshareEntry', () => {
     expect(queued()[0].data.local_id).toBe('local-1');
   });
 
-  it('queues one UPDATE for a memory the server holds', async () => {
+  it('queues one UPDATE, carrying the server id and the chosen audience', async () => {
     seedEntry({ serverId: 'server-1', syncStatus: 'synced' });
 
     await JournalService.reshareEntry('local-1', 'friends');
 
     expect(queued()).toHaveLength(1);
     expect(queued()[0].type).toBe(SyncOperationType.UPDATE_ENTRY);
+    expect(queued()[0].entityId).toBe('local-1');
     expect(queued()[0].serverId).toBe('server-1');
-    expect(JournalRepository.update).toHaveBeenCalledTimes(1);
-    expect(JournalRepository.update).toHaveBeenCalledWith('local-1', { visibility: 'friends' });
+    expect(queued()[0].data.visibility).toBe('friends');
+    expect(queued()[0].data.local_id).toBe('local-1');
+  });
+
+  it('moves a memory the server already holds back to pending, so the push collects it', async () => {
+    // What `JournalRepository.update` did for this arm before it stopped being used, and it
+    // still has to happen: the push walks pending entries, and a row left `synced` over a
+    // visibility the server has not been told about is a memory that never goes.
+    seedEntry({ serverId: 'server-1', syncStatus: 'synced' });
+
+    await JournalService.reshareEntry('local-1', 'friends');
+
+    expect(stored().syncStatus).toBe('pending');
   });
 
   it('stores the chosen audience and clears the refusal, either way', async () => {
@@ -362,19 +420,62 @@ describe('reshareEntry', () => {
     }
   });
 
-  it('keeps the refusal when the operation cannot be queued at all', async () => {
+  it('keeps the refusal when the operation cannot be queued at all, on either arm', async () => {
     // Fails closed: the card goes on saying "Not shared", which is true, and the person can
     // try again. Clearing the refusal here would leave the memory looking shared and queued
     // nowhere — SC-010's "appears as shared", caused by the very code meant to fix it.
-    seedEntry({ serverId: null });
-    SyncQueue.enqueue.mockRejectedValueOnce(new Error('queue is unavailable'));
+    //
+    // **Both arms**, because they were once asymmetric: the create arm queued here, so a
+    // failed insert threw and the refusal survived, while the server-id arm queued through
+    // `JournalRepository.update` → `_enqueueSync`, which swallows the same failure and
+    // resolves — and the refusal was then cleared over a memory with nothing queued for it
+    // (round-1 Critical 1).
+    for (const serverId of [null, 'server-1']) {
+      jest.clearAllMocks();
+      __rows.clear();
+      seedEntry({ serverId });
+      SyncQueue.enqueue.mockRejectedValueOnce(new Error('queue is unavailable'));
 
-    await expect(JournalService.reshareEntry('local-1', 'friends')).rejects.toThrow(
-      'queue is unavailable',
-    );
+      await expect(JournalService.reshareEntry('local-1', 'friends')).rejects.toThrow(
+        'queue is unavailable',
+      );
 
-    expect(stored().shareState).toBe(ShareState.REFUSED);
-    expect(JournalRepository.setShareState).not.toHaveBeenCalled();
+      expect({ serverId, shareState: stored().shareState }).toEqual({
+        serverId,
+        shareState: ShareState.REFUSED,
+      });
+      expect(JournalRepository.setShareState).not.toHaveBeenCalled();
+    }
+  });
+
+  it('shares nothing, and keeps the refusal, while storage is Local Only', async () => {
+    // Local Only is the other way an operation can fail to exist, and the one that needs no
+    // failure at all: `_enqueueSync` returns early, nothing drains the queue, and a memory
+    // cannot reach the server however long it waits. Clearing the refusal there would leave a
+    // card reading "Friends" over a memory nobody can see, with no queued operation that will
+    // ever change that — SC-010's exact prohibition, on a phone where nothing went wrong.
+    //
+    // So this refuses, before anything is written: the audience is not stored either, because
+    // a stored audience the server will never be told about is the same lie one layer down.
+    // The person is told (`JournalScreen`'s Alert), and the card goes on saying "Not shared".
+    for (const serverId of [null, 'server-1']) {
+      jest.clearAllMocks();
+      __rows.clear();
+      JournalRepository.isSyncEnabled.mockResolvedValue(false);
+      seedEntry({ serverId });
+
+      await expect(JournalService.reshareEntry('local-1', 'friends')).rejects.toThrow(
+        /local only/i,
+      );
+
+      expect(SyncQueue.enqueue).not.toHaveBeenCalled();
+      expect(JournalRepository.setShareState).not.toHaveBeenCalled();
+      expect({
+        serverId,
+        shareState: stored().shareState,
+        visibility: stored().visibility,
+      }).toEqual({ serverId, shareState: ShareState.REFUSED, visibility: 'family' });
+    }
   });
 
   it('refuses to re-share without an audience, and shares nothing', async () => {

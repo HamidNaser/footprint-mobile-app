@@ -343,3 +343,51 @@ describe('tapping the refused line offers the audience again (US1-8)', () => {
     expect(onReshare).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Whose memory it is (round-1 finding 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The tap is an offer to choose who may see a memory, so it belongs to the person whose memory
+ * it is and to nobody else. Today no card can reach this: `SocialService.adaptEntry` sets
+ * `visibility` and no `shareState`, so another person's memory carries none, and the two
+ * screens that render those cards pass no `onReshare` either. T042 changes `adaptEntry`, and a
+ * `shareState` that arrived on somebody else's memory would otherwise put an audience sheet
+ * over it.
+ *
+ * The *label* is the deliberate asymmetry and stays: "Not shared yet" replaces the audience
+ * for any truthy share state, whosever memory it is, because saying less than the truth is
+ * safe here and saying more is not (SC-010, *sharing fails closed*).
+ */
+describe('the audience is never offered over somebody else\'s memory', () => {
+  const someoneElses = (overrides = {}) =>
+    entryWith({ userId: 'someone-else', authorId: 'someone-else', ...overrides });
+
+  it('offers no tappable line on a memory that is not the reader\'s', async () => {
+    const onReshare = jest.fn();
+    const tree = await render(someoneElses({ shareState: ShareState.REFUSED }), { onReshare });
+
+    expect(lineControl(tree, REFUSED_LINE)).toBeUndefined();
+    expect(shows(tree, REFUSED_LINE)).toBe(false);
+    expect(sheets(tree)).toHaveLength(0);
+    expect(onReshare).not.toHaveBeenCalled();
+  });
+
+  it('still withholds the audience label on that memory, so it never looks shared', async () => {
+    const tree = await render(someoneElses({ shareState: ShareState.REFUSED }));
+
+    expect(shows(tree, NOT_SHARED_YET)).toBe(true);
+    expect(shows(tree, AUDIENCE_LABELS.family)).toBe(false);
+  });
+
+  it('keeps the tappable line on the reader\'s own memory', async () => {
+    // The other half of the gate: it must not have taken the re-share away from the one
+    // person entitled to it.
+    const tree = await render(entryWith({ shareState: ShareState.REFUSED }), {
+      onReshare: jest.fn(),
+    });
+
+    expect(lineControl(tree, REFUSED_LINE)).toBeDefined();
+  });
+});
