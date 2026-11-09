@@ -25,6 +25,9 @@ import DerivativeImage from '../media/DerivativeImage';
 import { FailedSlot } from '../media/FailedTile';
 import SaveAudienceSheet from '../capture/SaveAudienceSheet';
 import { ShareState } from '../../database/schema';
+// One copy of the words, shared with `JournalEntryDetail` -- the screen a tap on this card
+// opens, which must not say "Family" over a memory this card has just called not shared.
+import { SHARE_LINES, NOT_SHARED_YET } from './shareLabels';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
@@ -310,28 +313,6 @@ const VISIBILITY_DISPLAY = {
 };
 
 /**
- * What the card says when the server could not apply the audience the person chose
- * (FR-011, research R15). `entry.shareState` -- the `share_state` column -- is the only
- * record of that, and it holds nothing else: `waiting` while the phone is still going to
- * send the memory, `refused` once it never will.
- */
-const SHARE_LINES = {
-  [ShareState.WAITING]: 'Waiting to share…',
-  [ShareState.REFUSED]: 'Not shared — tap to choose who can see it',
-};
-
-/**
- * What stands where the audience label would be, in both states (SC-010).
- *
- * ⚠ The label is what makes a card *look* shared, so it is replaced whenever the server has
- * said **anything** about the audience -- not only for the two states above. A card reading
- * "Family" over a memory that is on nobody else's screen is the "appears as shared" half of
- * SC-010, and sharing fails closed: saying less than the truth is safe here, saying more is
- * not.
- */
-const NOT_SHARED_YET = 'Not shared yet';
-
-/**
  * Main JournalEntryCard component - Threaded/Sequential Layout
  */
 export const JournalEntryCard = memo(({
@@ -488,8 +469,22 @@ export const JournalEntryCard = memo(({
 
       {/* The share line, under the header: the refusal is never silent, and it is shown here
           and nowhere else -- not on the sync badge (FR-011, research R15). The
-          "Unfinished edit - continue" line (FR-013) belongs beside this one, in T060. */}
-      {shareState === ShareState.REFUSED && (
+          "Unfinished edit - continue" line (FR-013) belongs beside this one, in T060.
+
+          ⚠ `isOwnEntry`, because this line is an offer to choose who may see a memory, and
+          that belongs to the person whose memory it is. No card can reach it today --
+          `SocialService.adaptEntry` sets `visibility` and no `shareState`, so another person's
+          memory carries none, and the two screens that render those cards pass no `onReshare`
+          -- but T042 changes `adaptEntry`, and a share state arriving on somebody else's
+          memory would otherwise put an audience sheet over it. The *label* above is the
+          deliberate asymmetry and stays unguarded: whosever memory it is, it must not look
+          shared (SC-010).
+
+          The cost of the gate, named: a refused memory whose card is rendered without
+          `currentUserId` shows no re-share line. It still shows "Not shared yet", so it never
+          looks shared -- and a refusal cannot exist without an account that uploaded the
+          memory, which is the same account the Journal renders with. */}
+      {isOwnEntry && shareState === ShareState.REFUSED && (
         <TouchableOpacity
           style={styles.shareLine}
           onPress={() => setShowAudienceSheet(true)}

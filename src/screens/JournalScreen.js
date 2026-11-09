@@ -83,6 +83,21 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PRIMARY_COLOR = '#4361ee';
 
 /**
+ * What the screen says while a typed note is still being kept.
+ *
+ * `QuickCaptureBar` clears its input and dismisses the keyboard the moment Send is tapped, and
+ * this screen then awaits a location fix before anything moves -- up to a few seconds on a cold
+ * GPS, in which the words are gone and nothing has happened. That reads as "my note vanished",
+ * so the screen says what it is doing instead.
+ *
+ * It is said here, and not in the bar: the Send button exists only while there is text
+ * (`{hasText ? <send> : <mic>}`), so by the time this screen is awaiting anything the control
+ * to disable is already gone. This screen owns the await, so this screen says so -- and the
+ * bar's contract is untouched.
+ */
+const KEEPING_NOTE = 'Keeping that note…';
+
+/**
  * Date selector component
  */
 const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
@@ -201,6 +216,9 @@ export default function JournalScreen({ navigation }) {
   
   // Calendar picker state
   const [showCalendarPicker, setShowCalendarPicker] = useState(false);
+
+  // Whether a typed note is still being kept. See `handleSendMessage` and `KEEPING_NOTE`.
+  const [keepingNote, setKeepingNote] = useState(false);
 
   // Real-time context
   const { isConnected, unreadNotificationCount } = useRealtime();
@@ -579,11 +597,19 @@ export default function JournalScreen({ navigation }) {
    * carried: a memory is saved only on an explicit choice in the capture screen's save sheet
    * (FR-011). A note that cannot be recorded is said back to the person, with the words in it,
    * rather than logged to a console nobody is reading (FR-017).
+   *
+   * While that is happening the screen says so (`KEEPING_NOTE`). The stamping is the slow part
+   * -- a cold GPS fix, up to a few seconds, though `stampLocation` caches one for two minutes
+   * so this is the first send after the app has been idle -- and the bar has already taken the
+   * words off the screen. The flag is cleared in a `finally`, so the line does not outlive the
+   * attempt either way: a failure says what happened, and a spinner left under it would say
+   * the opposite.
    */
   const handleSendMessage = useCallback(async (text) => {
     const note = text?.trim();
     if (!note) return;
 
+    setKeepingNote(true);
     try {
       const stamped = await CaptureLocation.withLocation({
         localId: uuidv4(),
@@ -602,6 +628,8 @@ export default function JournalScreen({ navigation }) {
           `to write again:\n\n${note}`,
       );
       return;
+    } finally {
+      setKeepingNote(false);
     }
 
     openCapture();
@@ -755,10 +783,26 @@ export default function JournalScreen({ navigation }) {
    * A failure is said, not logged: the refusal is still on the card, so silence would leave
    * the person tapping a line that appears to do nothing (FR-017). Nothing is shared in that
    * case -- `reshareEntry` leaves the refusal exactly as it was.
+   *
+   * One failure gets its own words. In the Local Only storage mode nothing is ever sent, so
+   * `reshareEntry` refuses rather than clear a refusal over a memory that can never go -- and
+   * "please try again" would be advice that cannot work. The person is told what would have to
+   * change instead.
    */
   const handleReshare = useCallback(async (entry, visibility) => {
     const localId = entry?.localId;
-    if (!localId || !visibility) return;
+    // Unreachable from the Journal list -- `SaveAudienceSheet` reports an audience or nothing
+    // at all -- but it was a bare `return`, which is a silent no-op immediately after the
+    // person made an explicit choice. FR-011: a refusal is never silent, and that cuts both
+    // ways. Nothing is shared either way, and the card goes on saying so.
+    if (!localId || !visibility) {
+      Alert.alert(
+        'Could not share that memory',
+        'No audience came through with that choice, so nothing has changed: it is still on ' +
+          'this phone and still not shared with anyone. Please try again.',
+      );
+      return;
+    }
 
     try {
       await JournalService.reshareEntry(localId, visibility);
@@ -767,7 +811,11 @@ export default function JournalScreen({ navigation }) {
       console.warn('[JournalScreen] the memory could not be shared again', error);
       Alert.alert(
         'Could not share that memory',
-        'It is still on this phone and still not shared with anyone. Please try again.',
+        error?.code === 'local_only_storage'
+          ? 'Your storage is set to Local Only, so nothing is sent from this phone. This ' +
+              'memory is still here, and still not shared with anyone. Turn syncing back on ' +
+              'in Settings to share it.'
+          : 'It is still on this phone and still not shared with anyone. Please try again.',
       );
     }
   }, [refresh]);
@@ -961,6 +1009,14 @@ export default function JournalScreen({ navigation }) {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
+        {/* The one sign that a sent note is still being dealt with. Above the bar rather than
+            inside it, because the bar has already cleared itself (see `KEEPING_NOTE`). */}
+        {keepingNote && (
+          <View style={styles.keepingNoteRow}>
+            <ActivityIndicator size="small" color={PRIMARY_COLOR} />
+            <Text style={styles.keepingNoteText}>{KEEPING_NOTE}</Text>
+          </View>
+        )}
         <QuickCaptureBar
           onSend={handleSendMessage}
           onCameraPress={openCapture}
@@ -1044,6 +1100,20 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F0F4FF',
+  },
+
+  // The transient row above the quick bar while a typed note is being kept.
+  keepingNoteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    backgroundColor: '#FFF',
+  },
+  keepingNoteText: {
+    fontSize: 13,
+    color: '#8E8E93',
   },
 
   // New entries banner

@@ -793,6 +793,32 @@ describe('a refused memory is shared again from the Journal screen (US1-8)', () 
     alert.mockRestore();
   });
 
+  it('says what Local Only means for this memory, rather than "try again"', async () => {
+    // `reshareEntry` refuses outright while storage is Local Only: nothing drains the queue
+    // there, so clearing the refusal would leave the card looking shared over a memory that
+    // can never be sent. The person tapped an explicit choice, so they are told — and told
+    // something they can act on, because trying again changes nothing until cloud sync is
+    // back on.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    silenceWarnings();
+    JournalService.reshareEntry.mockRejectedValueOnce(
+      Object.assign(new Error('Storage is Local Only'), { code: 'local_only_storage' }),
+    );
+
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    const said = alert.mock.calls[0].slice(0, 2).join(' ');
+    expect(said).toContain('Local Only');
+    expect(said).not.toMatch(/try again/i);
+    // And the memory still says what is true of it.
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+
+    alert.mockRestore();
+  });
+
   it('says so when a choice arrives with no audience in it, rather than doing nothing', async () => {
     // Unreachable from the Journal list today — `SaveAudienceSheet` reports a value or nothing
     // at all — so this is the handler's own guard, which until now was a bare `return`: a

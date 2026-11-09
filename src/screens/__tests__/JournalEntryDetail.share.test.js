@@ -49,6 +49,9 @@ import { Text } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 
 import { JournalEntryDetail } from '../JournalEntryDetail';
+// By explicit path: metro picks this one for the web build, jest would never resolve it, and a
+// twin left behind is the same lie on another platform. Both are run through everything below.
+import { JournalEntryDetail as JournalEntryDetailWeb } from '../JournalEntryDetail.web';
 import { ShareState } from '../../database/schema';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -78,11 +81,14 @@ const entryWith = (overrides = {}) => ({
 
 const trees = [];
 
+/** Set per variant by the `describe.each` below, so every case runs against both screens. */
+let Screen = JournalEntryDetail;
+
 const render = async (entry) => {
   let tree;
   await act(async () => {
     tree = renderer.create(
-      <JournalEntryDetail entry={entry} user={{ id: 'u1', name: 'Sam' }} onBack={() => {}} />,
+      <Screen entry={entry} user={{ id: 'u1', name: 'Sam' }} onBack={() => {}} />,
     );
   });
   trees.push(tree);
@@ -109,7 +115,14 @@ const texts = (node) =>
 
 const shows = (tree, line) => texts(tree.root).includes(line);
 
-describe('a refused memory never reads as shared on its detail screen (SC-010)', () => {
+describe.each([
+  ['JournalEntryDetail', JournalEntryDetail],
+  ['JournalEntryDetail.web', JournalEntryDetailWeb],
+])('a refused memory never reads as shared on %s (SC-010)', (_name, Component) => {
+  beforeEach(() => {
+    Screen = Component;
+  });
+
   it('shows "Not shared yet" in place of the audience when the refusal is final', async () => {
     const tree = await render(entryWith({ shareState: ShareState.REFUSED }));
 

@@ -24,6 +24,8 @@ import { FailedSlot } from '../components/media/FailedTile';
 import { parseDateKey } from '../utils/journalDate';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
+// The card's own words for a memory the server would not share (SC-010).
+import { NOT_SHARED_YET } from '../components/journal/shareLabels';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -347,17 +349,27 @@ export const JournalEntryDetail = ({
 
         {/* Metadata */}
         <View style={styles.metadataSection}>
-          {entry.visibility && (
+          {/* The audience, or "Not shared yet" in its place -- the same rule, and the same
+              words, as the native screen beside this one (FR-011, SC-010). A twin left behind
+              is the same lie on another platform. */}
+          {entry.shareState ? (
             <View style={styles.metadataRow}>
-              <Ionicons 
-                name={entry.visibility === 'private' ? 'lock-closed-outline' : 'people-outline'} 
-                size={18} 
-                color="#8E8E93" 
-              />
-              <Text style={styles.metadataText}>
-                {entry.visibility.charAt(0).toUpperCase() + entry.visibility.slice(1)}
-              </Text>
+              <Ionicons name="eye-off-outline" size={18} color="#8E8E93" />
+              <Text style={styles.metadataText}>{NOT_SHARED_YET}</Text>
             </View>
+          ) : (
+            entry.visibility && (
+              <View style={styles.metadataRow}>
+                <Ionicons
+                  name={entry.visibility === 'private' ? 'lock-closed-outline' : 'people-outline'}
+                  size={18}
+                  color="#8E8E93"
+                />
+                <Text style={styles.metadataText}>
+                  {entry.visibility.charAt(0).toUpperCase() + entry.visibility.slice(1)}
+                </Text>
+              </View>
+            )
           )}
 
           <View style={styles.metadataRow}>

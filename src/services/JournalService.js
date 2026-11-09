@@ -14,7 +14,7 @@ import { SettingsService, StorageMode } from './SettingsService';
 // A static import is safe: SyncQueue reaches only the database, so it closes no cycle the way
 // SyncEngine would -- that one is still required lazily in `_syncNow`.
 import { SyncQueue, SyncOperationType } from '../sync/SyncQueue';
-import { ContentBlockType, UploadStatus } from '../database/schema';
+import { ContentBlockType, UploadStatus, SyncStatus } from '../database/schema';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -665,26 +665,43 @@ class JournalServiceClass {
    * Three things happen, in this order: the chosen audience is stored, the memory is queued
    * for the server **once**, and only then is the refusal cleared.
    *
-   * ⚠ **Exactly one operation**, and the order is not interchangeable:
+   * ⚠ **Exactly one operation**, queued here on both arms, and the order is not
+   * interchangeable:
    *
-   *   - **With a server id** this is an ordinary edit of the audience, and
-   *     `JournalRepository.update` already does it exactly right: it stores the field, moves a
-   *     synced memory back to pending, and queues one `UPDATE_ENTRY` carrying the server id.
+   *   - **With a server id** this is an ordinary edit of the audience, so one `UPDATE_ENTRY`
+   *     carrying that server id, and the memory goes back to pending so the push collects it.
    *   - **Without one** the server has never held this memory. Its create was removed from the
    *     queue when the refusal was final (`SyncQueue.removeOperation`), so something has to
    *     put a create back -- and it must carry the content **as it stands now**, because a
    *     memory refused before it ever uploaded keeps its later edits on the phone until it is
-   *     re-shared (R15, round-3 L4). `repository.update` cannot be used here: it queues an
-   *     `UPDATE_ENTRY` whether or not there is a server id, which would make two operations
-   *     out of one re-share, and an update with no server id is dropped as completed by
-   *     `SyncEngine._processSingleOperation` -- so the memory would stay unshared with nothing
-   *     on its card to say so. The audience is therefore written directly and the create
-   *     queued here.
-   *   - **The refusal is cleared last.** Clearing it first and then failing to queue would
-   *     leave a card reading "Family" over a memory on nobody else's screen -- SC-010's
-   *     "appears as shared", and the one failure mode with no safe side. The other way round
-   *     is harmless: the card says "Not shared" for a moment longer over a memory already on
-   *     its way, and a successful push clears it anyway (`JournalRepository.markSynced`).
+   *     re-shared (R15, round-3 L4).
+   *   - **The refusal is cleared last, and only when the operation is known to exist.**
+   *     Clearing it over a memory that was not queued leaves a card reading "Friends" over a
+   *     memory on nobody else's screen -- SC-010's "appears as shared", and the one failure
+   *     mode with no safe side. The other way round is harmless: the card says "Not shared"
+   *     for a moment longer over a memory already on its way, and a successful push clears it
+   *     anyway (`JournalRepository.markSynced`).
+   *
+   * ⚠ **`JournalRepository.update` is deliberately not used, on either arm** (round-1
+   * Critical 1). It queues through the private `_enqueueSync`, which **returns early when
+   * sync is disabled and catches every enqueue error** -- so it resolves identically whether
+   * or not an operation was really written, and its caller cannot tell. That is fine for an
+   * ordinary edit, whose worst case is a memory the background sweep picks up later; it is not
+   * fine here, where the thing being cleared on the strength of it is the *only* record that
+   * the memory is unshared. Queued here, a failure is a rejection, the refusal survives
+   * untouched, and the person is told. (`update` would also queue an `UPDATE_ENTRY` with no
+   * server id on the other arm, which `SyncEngine._processSingleOperation` drops as completed
+   * -- so the memory would stay unshared with nothing on its card to say so.)
+   *
+   * `SyncQueue.hasPendingOperations` was the alternative: clear the refusal only if a row for
+   * this memory exists. Not taken, because it cannot tell *this* operation from one that was
+   * already queued for the same memory -- so it would pass on the Local Only path whenever
+   * some other row happened to be pending, which is the case it most needs to catch.
+   *
+   * **Local Only storage refuses outright, before anything is written.** Nothing drains the
+   * queue in that mode, so the memory cannot reach the server however long it waits; a stored
+   * audience the server will never be told about is the same lie one layer down, so not even
+   * that is written (*sharing fails closed*).
    *
    * No audience is ever guessed or substituted: without an explicit choice this refuses and
    * changes nothing (FR-011, *sharing fails closed*).
@@ -702,20 +719,37 @@ class JournalServiceClass {
     const entry = await this.repository.getByLocalId(localId);
     if (!entry) throw new Error(`Entry not found: ${localId}`);
 
-    if (entry.serverId) {
-      await this.repository.update(localId, { visibility });
-    } else {
-      await this.dbService.updateEntry(localId, { visibility });
-      // The create carries the memory as it stands, audience included: anything the person
-      // added while it was refused exists nowhere else yet. (The push also re-reads the row,
-      // so a media upload that lands in the meantime is still picked up.)
-      await SyncQueue.enqueue({
-        type: SyncOperationType.CREATE_ENTRY,
-        entityId: localId,
-        serverId: null,
-        data: { ...entry, visibility, local_id: localId },
-      });
+    if (!(await this.repository.isSyncEnabled())) {
+      // Coded, because the screen has something useful to say about this one and nothing
+      // useful to say about the others: trying again changes nothing until cloud sync is back
+      // on, so "please try again" would be the wrong advice.
+      throw Object.assign(
+        new Error(
+          'Storage is Local Only, so this memory cannot be shared: nothing queued for it would ever be sent',
+        ),
+        { code: 'local_only_storage' },
+      );
     }
+
+    // The audience, and -- for a memory the server already holds -- a return to pending, which
+    // is what makes the push collect it. Only from `synced`: a row sitting in `conflict` or
+    // `failed` has something else to settle first, and `JournalRepository.update` is careful
+    // about the same thing (`:346-349`).
+    const updates = { visibility };
+    if (entry.syncStatus === SyncStatus.SYNCED) {
+      updates.syncStatus = SyncStatus.PENDING;
+    }
+    await this.dbService.updateEntry(localId, updates);
+
+    // The operation carries the memory as it stands, audience included: anything the person
+    // added while it was refused exists nowhere else yet. (The push also re-reads the row, so
+    // a media upload that lands in the meantime is still picked up.)
+    await SyncQueue.enqueue({
+      type: entry.serverId ? SyncOperationType.UPDATE_ENTRY : SyncOperationType.CREATE_ENTRY,
+      entityId: localId,
+      serverId: entry.serverId || null,
+      data: { ...entry, ...updates, local_id: localId },
+    });
 
     await this.repository.setShareState(localId, null);
 

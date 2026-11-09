@@ -289,6 +289,12 @@ describe('_persistMediaBlocks', () => {
  * and the one failure with no safe side. The other way round is harmless — the card keeps
  * saying "Not shared" for a moment over a memory that is already on its way, and a successful
  * push clears it anyway (`markSynced`).
+ *
+ * ⚠ **"After" is not enough on its own, which is what round 1 missed**: the refusal may be
+ * cleared only when the operation is **known to exist**. Two ways it can fail to — a rejected
+ * insert, and the Local Only storage mode, where nothing is queued and nothing would be sent
+ * if it were — are pinned below on **both** arms, because the arms were once asymmetric and
+ * the quiet one cleared the refusal over a memory that was never queued at all.
  */
 describe('reshareEntry', () => {
   const BLOCKS = [{ type: 'text', content: 'the arcade on the corner' }];
