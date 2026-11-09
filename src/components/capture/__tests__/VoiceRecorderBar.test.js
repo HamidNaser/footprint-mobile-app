@@ -647,8 +647,11 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
   it('adds no second clip when the Stop tap lands after the interruption', async () => {
     const tree = render();
     await tap(tree, 'voice-record-button');
-    const stop = pressable(tree, 'voice-stop-button');
-    expect(stop).toBeDefined();
+    // The handler the thumb is already bound to, taken while Stop is on screen. The handler
+    // rather than the node because `react-test-renderer` will not read props off a node its
+    // tree has since replaced -- and the tap is the point here, not the node.
+    const stopTap = pressable(tree, 'voice-stop-button').props.onPress;
+    expect(typeof stopTap).toBe('function');
     await elapse(3000);
 
     await act(async () => {
@@ -658,7 +661,7 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
     expect(onClip).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      stop.props.onPress();
+      stopTap();
     });
 
     expect(onClip).toHaveBeenCalledTimes(1);

@@ -30,9 +30,18 @@
  * that allows it (research R5) -- the plugin options that make it possible on a real build
  * are T024's.
  *
- * Interruptions (an incoming call, the system taking the audio session) are T037/T038.
- * `finishClip` below is already reason-agnostic and guarded against finishing twice, so that
- * work is an effect that calls it -- not a rewrite.
+ * Interruptions -- an incoming call, or the system taking the audio session -- are T038, and
+ * they are one effect calling `finishClip`, which was already reason-agnostic and guarded
+ * against finishing twice. The signal is research R5's: the polled `useAudioRecorderState`
+ * stops saying `isRecording` and nobody tapped Stop, so the part recorded before the call is
+ * finalized and handed over as its own clip (US2-2).
+ *
+ * The one thing that signal cannot be read naively for is its own first moment. `record()` is
+ * synchronous and returns before the native session is necessarily running, so the first
+ * polled status of a perfectly healthy recording may read `isRecording: false`. Taking that
+ * for an interruption would end every recording at birth. So the interruption is only
+ * believed once a status has confirmed the recording really was under way
+ * (`recorderConfirmedRef`).
  *
  * An **unmount is not an interruption** and is handled here, not there: nothing takes the
  * session back, so without a cleanup `stop()` is never called, the session is never
@@ -200,6 +209,10 @@ export default function VoiceRecorderBar({
   // Which polled status has already contributed a waveform level, so a re-run of the status
   // effect for some *other* reason cannot record the same level twice.
   const lastLevelStatusRef = useRef(null);
+  // Whether a polled status has confirmed that this recording really is under way. It is what
+  // makes "the recorder is not recording" mean an interruption rather than "it has not got
+  // going yet" -- see the file header, and T037's fourth case.
+  const recorderConfirmedRef = useRef(false);
 
   /**
    * Ends the recording and hands the clip over, whatever ended it.
@@ -221,6 +234,12 @@ export default function VoiceRecorderBar({
    * would have to catch.
    */
   const finishClip = useCallback(async () => {
+    // There is no recording to finish. Two callers can arrive here with none: the Stop
+    // button, whose node Sam's thumb may already be on when an interruption ends the
+    // recording underneath it (T037), and the unmount cleanup. Without this a second
+    // finish would stop an already-stopped recorder, read its still-valid `uri` and hand
+    // over the same recording as a **second clip** -- the memory said twice.
+    if (!isRecordingRef.current) return;
     if (finishingRef.current) return;
     finishingRef.current = true;
 
@@ -261,6 +280,7 @@ export default function VoiceRecorderBar({
       elapsedRef.current = 0;
       levelsRef.current = [];
       lastLevelStatusRef.current = null;
+      recorderConfirmedRef.current = false;
       capturedAtRef.current = null;
       onRecordingChange?.(false);
 
@@ -319,6 +339,7 @@ export default function VoiceRecorderBar({
 
       levelsRef.current = [];
       lastLevelStatusRef.current = null;
+      recorderConfirmedRef.current = false;
       elapsedRef.current = 0;
       setElapsedMs(0);
       capturedAtRef.current = new Date().toISOString();
@@ -368,9 +389,37 @@ export default function VoiceRecorderBar({
   }, [isRecording, maxDurationMs, status]);
 
   /**
+   * An interruption: the recorder stopped and nobody tapped Stop (research R5, US2-2).
+   *
+   * **A separate effect from the one above on purpose.** That one early-returns on
+   * `!status?.isRecording` -- which is exactly the condition this one is looking *for*, so
+   * reading the interruption there would mean removing the guard that keeps the elapsed time
+   * and the waveform from being fed by a stopped recorder.
+   *
+   * The clip is finished rather than dropped: Sam spoke for a minute before the call, and
+   * going back to the idle Voice button with nothing handed over reads as "you have not
+   * recorded yet". `finishClip` is the same ending the Stop tap and the 5:00 cap use, so an
+   * interrupted clip is an ordinary clip -- which is also why the Stop tap that lands
+   * afterwards adds no second one.
+   */
+  useEffect(() => {
+    if (!isRecording || !status) return;
+
+    if (status.isRecording) {
+      recorderConfirmedRef.current = true;
+      return;
+    }
+
+    // The recording has not got going yet -- not an interruption. See the file header.
+    if (!recorderConfirmedRef.current) return;
+
+    finishClipRef.current();
+  }, [isRecording, status]);
+
+  /**
    * An unmount mid-recording finishes the clip. **A separate effect on purpose:** the
    * status effect above early-returns on `!status?.isRecording`, which is precisely the
-   * interruption condition T037/T038 will add, so the two must not share a cleanup.
+   * interruption condition, so the two must not share a cleanup.
    *
    * It reads refs rather than state because a cleanup closes over the mount it was created
    * on, and `[]` is what makes it run on unmount only.
