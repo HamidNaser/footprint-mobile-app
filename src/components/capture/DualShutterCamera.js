@@ -375,6 +375,11 @@ export default function DualShutterCamera({
       const capturedAt = capturedAtRef.current;
       capturedAtRef.current = null;
 
+      // The only await above is `recordAsync`, so this one check covers every `setState`
+      // below it, `setLostCapture('video')` included -- there is nothing awaited between
+      // here and the end of this function. The photo paths guard each `setState` inline
+      // instead because their `finally` has to run whether this component is still mounted
+      // or not, so they cannot return early here.
       if (!mountedRef.current) return;
 
       setIsRecording(false);

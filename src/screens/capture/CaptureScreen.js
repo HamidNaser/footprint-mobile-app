@@ -116,6 +116,32 @@ const STOP_RECORDING_FIRST_MESSAGE =
   'You’re still recording. Tap Stop to keep that clip, then save — nothing is lost by ' +
   'waiting.';
 
+/**
+ * The same hazard one step earlier, and the one with no visible cue at all.
+ *
+ * A capture is not a piece until the store has it, and `CaptureLocation.withLocation` waits
+ * on a fix first -- up to its four-second timeout on a cold GPS. Photo, Done, Save, Family
+ * is three taps, comfortably inside that: `performSave` would build its blocks from a
+ * `pieces` the photo is not in yet, save the memory without it, clear the draft the photo was
+ * about to be written into, and `goBack()`. The photo is then either deleted with the slot or
+ * resurfaces later as a ghost one-piece draft, and nothing says a piece was dropped. SC-002
+ * is zero pieces lost, so Save waits a moment and says so.
+ */
+const CAPTURE_IN_FLIGHT_MESSAGE =
+  'Still keeping what you just captured — give it a moment, then save. Nothing is lost by ' +
+  'waiting.';
+
+/**
+ * Said only when the memory saved and the tidying up after it did not, which is the one way
+ * this screen can still be on screen with Save correctly down for good. Without it a person
+ * is looking at a screen where Save no longer responds and nothing has been said -- which is
+ * indistinguishable from a save that did nothing, and would invite the second tap that
+ * `performSave` has just worked to prevent.
+ */
+const SAVED_MESSAGE =
+  'Saved — your memory is on this phone. You can close this screen; there’s no need to ' +
+  'save again.';
+
 /** "Draft kept · n pieces" (UI contract), in English for one. */
 const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
 
@@ -136,6 +162,8 @@ export default function CaptureScreen({ route, navigation }) {
   const [isSaving, setIsSaving] = useState(false);
   const [captureError, setCaptureError] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  /** SAVED_MESSAGE, once the memory is saved and something after it did not finish. */
+  const [savedNotice, setSavedNotice] = useState(null);
   const [permissionNotice, setPermissionNotice] = useState(null);
   /** Which note should take the keyboard, and a nonce so the same one can be asked twice. */
   const [focusRequest, setFocusRequest] = useState(null);
@@ -143,6 +171,13 @@ export default function CaptureScreen({ route, navigation }) {
   const mountedRef = useRef(true);
   /** A note being added, as a second tap can see it before any render has happened. */
   const typeInFlightRef = useRef(false);
+  /**
+   * How many captures are between the shutter and the draft store. Above zero means a piece
+   * has been captured that `pieces` does not have yet, so there is nothing safe to build a
+   * memory from. A ref rather than state because Save has to see the increment in the same
+   * tick as the capture that made it, before any render.
+   */
+  const capturesInFlightRef = useRef(0);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -215,17 +250,29 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const addCapturedPiece = useCallback(
     async (piece) => {
+      // Counted before the first await, released however this ends, so that Save can tell
+      // "nothing captured" from "captured, not recorded yet" (CAPTURE_IN_FLIGHT_MESSAGE).
+      capturesInFlightRef.current += 1;
       try {
         const stamped = await CaptureLocation.withLocation(piece);
         const stored = await CaptureDraftStore.addPiece(slot, stamped);
         if (!mountedRef.current) return null;
         setPieces((previous) => [...previous, stored]);
-        setCaptureError(null);
+        // This one line carries three unrelated things, and a success is honest evidence
+        // about only two of them. A clip that recorded says nothing about a note whose
+        // keystrokes reached no draft, so TEXT_NOT_KEPT_MESSAGE -- the one of the three that
+        // means something a person wrote is not being kept -- outlives it. The transient
+        // instructions clear, which is what they are for.
+        setCaptureError((previous) =>
+          previous === TEXT_NOT_KEPT_MESSAGE ? previous : null,
+        );
         return stored;
       } catch (error) {
         console.warn('[CaptureScreen] a capture could not be kept', error);
         if (mountedRef.current) setCaptureError(lostCaptureMessage(piece?.kind));
         return null;
+      } finally {
+        capturesInFlightRef.current -= 1;
       }
     },
     [slot],
@@ -423,10 +470,21 @@ export default function CaptureScreen({ route, navigation }) {
    *     that throw back into a drop with extra steps, so it lands in the same place as a
    *     failed write: nothing saved, nothing cleared, every piece still on the phone
    *     (data-model's `Save + local write fails → active (unchanged, error shown)`).
+   *   - **`createEntry` resolving ends the part that may report a failure.** What follows is
+   *     tidying up after a memory that is already on the phone: letting the draft go, and
+   *     leaving. Either can fail on its own account -- `clearAfterSave` opens the database
+   *     and runs a `DELETE`, and `goBack` depends on there being somewhere to go back to --
+   *     and neither failure says anything about the save. Reported as "Couldn't save" it
+   *     would be false, it would hand Save back for a memory that is already saved, and the
+   *     next tap (or T040's Try again) would write a **second copy** of it. So it is logged
+   *     where a developer can see it, Save stays down, and the person leaves, because their
+   *     memory really was saved. The draft store already swallows its own file-deletion
+   *     failure for exactly this reason.
    */
   const performSave = useCallback(
     async (visibility) => {
       setIsSaving(true);
+
       try {
         const contentBlocks = buildContentBlocks(pieces);
         await createEntry({
@@ -436,14 +494,33 @@ export default function CaptureScreen({ route, navigation }) {
           // No title, and no other field: FR-010 asks for the audience and nothing else. The
           // memory's date is left to default, as every memory saved on this phone does.
         });
-
-        await CaptureDraftStore.clearAfterSave(slot);
-        navigation?.goBack?.();
       } catch (error) {
         console.error('[CaptureScreen] the memory could not be saved', error);
-        if (mountedRef.current) setSaveError(SAVE_FAILED_MESSAGE);
-      } finally {
-        if (mountedRef.current) setIsSaving(false);
+        if (mountedRef.current) {
+          setSaveError(SAVE_FAILED_MESSAGE);
+          // Save is handed back here and only here: nothing was written, so a second tap is
+          // a retry rather than a duplicate.
+          setIsSaving(false);
+        }
+        return;
+      }
+
+      // The memory is on the phone. Nothing below may claim otherwise or re-arm Save.
+      try {
+        await CaptureDraftStore.clearAfterSave(slot);
+      } catch (error) {
+        console.warn(
+          '[CaptureScreen] the memory saved, but the unsaved copy could not be let go',
+          error,
+        );
+        if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
+      }
+
+      try {
+        navigation?.goBack?.();
+      } catch (error) {
+        console.warn('[CaptureScreen] the memory saved, but the screen could not close', error);
+        if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
       }
     },
     [createEntry, navigation, pieces, slot, user?.id],
@@ -464,6 +541,13 @@ export default function CaptureScreen({ route, navigation }) {
     // Save button that is broken.
     if (isRecording) {
       setCaptureError(STOP_RECORDING_FIRST_MESSAGE);
+      return;
+    }
+
+    // Neither `isRecording` nor `pieces.length` can see a capture already taken and still on
+    // its way into the draft, and that is the one this screen could lose silently.
+    if (capturesInFlightRef.current > 0) {
+      setCaptureError(CAPTURE_IN_FLIGHT_MESSAGE);
       return;
     }
 
@@ -555,6 +639,15 @@ export default function CaptureScreen({ route, navigation }) {
           <Text testID="capture-status-line" style={styles.status}>
             {statusLineFor(pieces.length)}
           </Text>
+        )}
+
+        {savedNotice && (
+          <View testID="capture-saved-notice-banner" style={[styles.notice, styles.noticeGood]}>
+            <Ionicons name="checkmark-circle-outline" size={18} color="#1F7A45" />
+            <Text testID="capture-saved-notice" style={styles.noticeText}>
+              {savedNotice}
+            </Text>
+          </View>
         )}
 
         {saveError && (
@@ -744,6 +837,9 @@ const styles = StyleSheet.create({
   },
   noticeBad: {
     backgroundColor: '#FDECEC',
+  },
+  noticeGood: {
+    backgroundColor: '#E8F6EE',
   },
   noticeText: {
     flex: 1,

@@ -20,7 +20,12 @@
  *   - Save is disabled with zero pieces, and asks only who can see it -- no title, no other
  *     field (FR-010);
  *   - **`clearAfterSave('new')` happens only once `createEntry` has resolved** (FR-016,
- *     quickstart M4); a save that fails leaves the draft alone;
+ *     quickstart M4); a save that fails leaves the draft alone, and a save that *succeeded*
+ *     is never reported as a failure just because the tidying up after it did not finish --
+ *     that story ends with the memory written twice;
+ *   - **Save waits for a capture still on its way into the draft** (SC-002): stamping a photo
+ *     with where it was taken can wait seconds on a cold GPS, and a save inside that window
+ *     would commit the memory without it;
  *   - a capture that cannot be kept is reported on screen and leaves earlier pieces intact;
  *   - a permission refusal leaves the other controls working;
  *   - the header is Close (which never discards) · "New memory" · Save, with Discard behind
@@ -852,6 +857,33 @@ describe('CaptureScreen: rows read kind, local time and place (FR-004, FR-005)',
     expect(textAt(tree, 'piece-place-0')).not.toBe('No place');
   });
 
+  it('shows --:-- rather than a wrong time when a piece carries no usable instant', async () => {
+    // A draft written by an older build, or by some other producer, can reach this list with
+    // no `capturedAt` at all or with something a `Date` cannot read. Both are shown as "no
+    // time known" rather than as the epoch, which would read as 1 January 1970 at 00:00 --
+    // a time the row would present as fact.
+    CaptureDraftStore.load.mockImplementation(async () => ({
+      id: 'new',
+      entryLocalId: null,
+      createdAt: '2026-11-08T08:00:00.000Z',
+      updatedAt: '2026-11-08T08:00:00.000Z',
+      pieces: [
+        { localId: 'p1', kind: 'photo', uri: 'file:///documents/capture-drafts/new/p1.jpg' },
+        {
+          localId: 'p2',
+          kind: 'photo',
+          uri: 'file:///documents/capture-drafts/new/p2.jpg',
+          capturedAt: 'the afternoon',
+        },
+      ],
+    }));
+
+    const tree = await render();
+
+    expect(textAt(tree, 'piece-time-0')).toBe('--:--');
+    expect(textAt(tree, 'piece-time-1')).toBe('--:--');
+  });
+
   it('lists pieces in capture order, with no kind grouping (FR-005)', async () => {
     const tree = await render();
 
@@ -1054,6 +1086,57 @@ describe('CaptureScreen: Save asks only who can see it (FR-010)', () => {
     expect(has(tree, 'audience-sheet')).toBe(true);
   });
 
+  it('will not start a save while a capture is still on its way into the draft', async () => {
+    const tree = await render();
+
+    // One note, so Save is live at all.
+    await tap(tree, 'capture-type-button');
+
+    // A cold GPS: `CaptureLocation.withLocation` waits up to its four-second fix timeout
+    // before the piece is even offered to the store, so there is a window of seconds between
+    // the shutter and the photo existing as a piece.
+    const fix = deferred();
+    CaptureLocation.withLocation.mockImplementationOnce(async (capture) => {
+      await fix.promise;
+      return capture;
+    });
+
+    await tap(tree, 'capture-camera-button');
+    await tap(tree, 'camera-photo-button');
+    await tap(tree, 'camera-done-button');
+
+    // The photo has been taken and is in `pieces` nowhere.
+    expect(rows(tree)).toHaveLength(1);
+
+    // Photo -> Done -> Save -> Family is three taps, comfortably inside that window. A save
+    // that went ahead here would build its blocks from a `pieces` without the photo, save the
+    // memory without it, clear the draft the photo was about to be written into, and close
+    // the screen -- and nothing would say a piece had been dropped. SC-002 is zero pieces
+    // lost, so Save waits and says so, the same shape as the recording guard above.
+    await tap(tree, 'capture-save-button');
+
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/moment|still keeping/i);
+
+    // And it costs no tap in the Sam walk: the moment the stamp lands the photo is a piece,
+    // Save works as it always does, and the memory carries the photo.
+    await act(async () => {
+      fix.settle(null);
+    });
+    expect(rows(tree)).toHaveLength(2);
+
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(createEntry.mock.calls[0][0].contentBlocks.map((block) => block.type)).toEqual([
+      'photos',
+    ]);
+  });
+
   it('saves nothing when the sheet is dismissed (FR-011, sharing fails closed)', async () => {
     const tree = await render();
 
@@ -1121,6 +1204,77 @@ describe('CaptureScreen: the draft is let go only after the memory is saved (FR-
       expect.stringContaining('[CaptureScreen]'),
       expect.any(Error),
     );
+  });
+
+  it('does not claim the save failed when only letting the draft go failed', async () => {
+    // `clearAfterSave` runs after the memory is on the phone, and it can still fail on its
+    // own account -- opening the database, the `DELETE`. Reporting that as "Couldn't save"
+    // would be false, and it would hand Save back for a memory that is already saved: the
+    // next tap writes a second copy of it.
+    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
+
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    // Nothing on screen says the save failed, because it did not.
+    expect(has(tree, 'capture-save-error')).toBe(false);
+    // Save is not re-armed: a second tap would be a second memory.
+    expect(pressable(tree, 'capture-save-button').props.disabled).toBe(true);
+    await tap(tree, 'capture-save-button');
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    // They are told the memory is saved, rather than left looking at a Save that no longer
+    // responds and nothing said -- which is indistinguishable from a save that did nothing.
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/saved/i);
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/no.{0,6} need to save again/i);
+    // The person still leaves, because their memory really was saved.
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    // And a developer can see what was left behind.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[CaptureScreen]'),
+      expect.any(Error),
+    );
+  });
+
+  it('does not claim the save failed when only closing the screen failed', async () => {
+    navigation.goBack.mockImplementation(() => {
+      throw new Error('no route to go back to');
+    });
+
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'capture-save-error')).toBe(false);
+    expect(pressable(tree, 'capture-save-button').props.disabled).toBe(true);
+    await tap(tree, 'capture-save-button');
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    // This is the one path that leaves the person on this screen with Save correctly down
+    // for good, so it is the one that most needs to say what happened.
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/saved/i);
+  });
+
+  it('says nothing about saving at all until a save has actually happened', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+
+    expect(has(tree, 'capture-saved-notice')).toBe(false);
+    expect(has(tree, 'capture-save-error')).toBe(false);
+
+    // And the ordinary save, where everything works, leaves without a banner at all.
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'capture-saved-notice')).toBe(false);
+    expect(has(tree, 'capture-save-error')).toBe(false);
   });
 
   it('refuses the save rather than dropping a piece it cannot build, draft intact', async () => {
@@ -1204,6 +1358,48 @@ describe('CaptureScreen: a capture that could not be kept is reported, earlier p
 
     expect(rows(tree)).toHaveLength(1);
     expect(textAt(tree, 'capture-capture-error')).toMatch(/photo/i);
+  });
+
+  it('says so when typing reached no draft, rather than swallowing it', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+
+    // `updateText` throws on a cold cache by design, and this screen's mount `load` is what
+    // makes that impossible -- but the branch is *said* rather than swallowed, because
+    // swallowing it is precisely how typing that is not being kept would stay invisible.
+    CaptureDraftStore.updateText.mockImplementationOnce(() => {
+      throw new Error('no draft in hand for slot new');
+    });
+
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/isn.t being kept/i);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[CaptureScreen]'),
+      expect.any(Error),
+    );
+    // What was typed is still on screen -- it is the draft it has not reached, not the field.
+    expect(valueAt(tree, 'piece-note-input-0')).toBe('On the 34 bus');
+  });
+
+  it('does not let a successful capture wipe "your typing is not being kept"', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+
+    CaptureDraftStore.updateText.mockImplementationOnce(() => {
+      throw new Error('no draft in hand for slot new');
+    });
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/isn.t being kept/i);
+
+    // Of the three things this one line carries, typing that reached no draft is the
+    // serious one: it is the only one that means something a person wrote is not being
+    // kept. A clip recorded afterwards says nothing about the note, so it must not clear it.
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+
+    expect(rows(tree)).toHaveLength(2);
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/isn.t being kept/i);
   });
 
   it('reports a capture the component itself lost, by kind', async () => {
@@ -1332,8 +1528,11 @@ describe('CaptureScreen: the Sam scenario costs the taps SC-001 budgets', () => 
     await tap(tree, 'capture-save-button'); // 12 Save
     await tap(tree, 'audience-option-family'); // 13 Family
 
+    // SC-001's budget is 14 taps with the "+" that opened this screen included, and the "+"
+    // is `CaptureFab`, so 13 of them fall here. An exact count rather than a ceiling: a walk
+    // that got *cheaper* would mean one of these controls had gone missing, which is worth
+    // failing on too.
     expect(taps).toBe(13);
-    expect(taps + 1).toBeLessThanOrEqual(14); // SC-001's budget, the "+" included
 
     // And the taps bought what they were meant to: one memory, six pieces, in order.
     expect(createEntry).toHaveBeenCalledTimes(1);
