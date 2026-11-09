@@ -159,8 +159,8 @@ class DatabaseServiceClass {
         local_id, server_id, journal_id, user_id, date, date_precision, content_blocks,
         location_lat, location_lng, location_name, visibility, location_sharing,
         reactions_likes, reactions_liked_by, comments_count,
-        sync_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sync_status, share_state, server_updated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.localId,
         entry.serverId || null,
@@ -183,6 +183,16 @@ class DatabaseServiceClass {
         JSON.stringify(entry.reactions?.likedByUserIds || []),
         entry.commentsCount || 0,
         entry.syncStatus || SyncStatus.PENDING,
+        // What the server last said about the chosen audience, and the only record of it
+        // (research R15). Null for a memory nothing has been said about yet, which is every
+        // memory at the moment it is written.
+        entry.shareState || null,
+        // The server's own `updatedAt` from the copy this row came from, kept as the exact
+        // string it sent. A different fact from `updated_at` below, which is when this phone
+        // last wrote the row: this one is the reference the read-time piece-ordering rule
+        // compares a capture moment against (FR-029, research R2), and null means it has no
+        // threshold to apply.
+        entry.serverUpdatedAt || null,
         entry.createdAt || now,
         now,
       ]
@@ -228,6 +238,18 @@ class DatabaseServiceClass {
     if (updates.syncStatus !== undefined) {
       fields.push('sync_status = ?');
       values.push(updates.syncStatus);
+    }
+    // `!== undefined`, not a truthiness test: null is the value that clears a refusal once
+    // the server has accepted the memory, or once the person has chosen an audience again.
+    // Written here rather than by whoever holds the state in memory, because the card reads
+    // the stored row -- the same gap that left date_precision stored and never read back.
+    if (updates.shareState !== undefined) {
+      fields.push('share_state = ?');
+      values.push(updates.shareState);
+    }
+    if (updates.serverUpdatedAt !== undefined) {
+      fields.push('server_updated_at = ?');
+      values.push(updates.serverUpdatedAt);
     }
     if (updates.syncedAt !== undefined) {
       fields.push('synced_at = ?');
@@ -419,6 +441,17 @@ class DatabaseServiceClass {
       },
       commentsCount: row.comments_count,
       syncStatus: row.sync_status,
+      // The two columns schema v8 added, under the camelCase names the app uses for every
+      // other column (`serverId`, `syncStatus`). Mapped as well as written: a column that is
+      // stored and never read back is this file's most repeated failure -- date_precision
+      // was, so every "sometime in 1998" came back out as 1 January, and the push path reads
+      // rows back through here, so an unmapped column never reaches the wire either.
+      //
+      // `shareState` is what the memory's card shows instead of an audience label while the
+      // server cannot apply the one that was chosen; `serverUpdatedAt` is the ordering
+      // reference. Both are null when the row has nothing to say, never undefined.
+      shareState: row.share_state ?? null,
+      serverUpdatedAt: row.server_updated_at ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       syncedAt: row.synced_at,

@@ -446,6 +446,80 @@ class SyncQueueClass {
   }
 
   /**
+   * Delete an operation whatever status it is in.
+   *
+   * `cancelOperation` above cannot do this: its `WHERE id = ? AND status = ?` deletes only a
+   * `pending` row, and the operations this exists for are rarely pending. An audience the
+   * server could not apply is reported while the operation is `in_progress` on the
+   * single-operation route (`SyncEngine._processSingleOperation` marks it so before it calls
+   * out), or `failed` if an earlier attempt met a flaky network. On both, `cancelOperation`
+   * deletes nothing and reports that it did nothing -- and the operation goes on re-sending a
+   * memory the server has refused for good.
+   *
+   * Deleted rather than settled as `conflict` or `failed`, which is the opposite of what a
+   * refused batch change gets (see `getConflictedOperations`), and deliberately:
+   * `journal_entries.share_state` is the ONLY record of what the server said about an
+   * audience (research R15, round-2 D1). A queue row beside it would be a second record of
+   * one fact, and `getStats()` would fold it into the sync badge's "N not sent" -- which is
+   * not what happened, and not where the owner decided this is shown. The refusal appears on
+   * the memory's own card and nowhere else.
+   *
+   * @param {string} operationId - Operation ID
+   * @returns {Promise<boolean>} True when a row was deleted
+   */
+  async removeOperation(operationId) {
+    const db = await getDatabase();
+
+    const result = await db.runAsync('DELETE FROM sync_queue WHERE id = ?', [operationId]);
+
+    if (result.changes > 0) {
+      console.log('[SyncQueue] Removed operation:', operationId);
+      this._notifyListeners();
+    }
+
+    return result.changes > 0;
+  }
+
+  /**
+   * Put an operation back to `pending` without spending a retry.
+   *
+   * For the other half of an audience the server could not apply: the half it expects to be
+   * able to apply later (`source_unavailable`, or a 503 on the single-operation route). The
+   * memory keeps its chosen audience, nothing about it is shared, and the phone sends it
+   * again by itself -- which is what FR-011 asks for.
+   *
+   * `markFailed` cannot be used for this, for two separate reasons:
+   *   - it increments `retry_count`, and `getPendingOperations()` stops offering a `failed`
+   *     row once that reaches 3. A share waiting on the server would then be abandoned after
+   *     three attempts, silently, with the memory never shared;
+   *   - it sets `failed`, which `SyncContext` folds into the badge's "N not sent". A share
+   *     that is merely waiting has not failed, and must not be counted as one (round-3 H1).
+   *
+   * `retry_count` is left exactly as it is rather than reset, so a genuine string of network
+   * failures still exhausts its budget as before -- this moves the operation, it does not
+   * forgive its history.
+   *
+   * @param {string} operationId - Operation ID
+   * @returns {Promise<boolean>} True when a row was moved
+   */
+  async returnToPending(operationId) {
+    const db = await getDatabase();
+    const now = new Date().toISOString();
+
+    const result = await db.runAsync(
+      'UPDATE sync_queue SET status = ?, updated_at = ? WHERE id = ?',
+      [OperationStatus.PENDING, now, operationId]
+    );
+
+    if (result.changes > 0) {
+      console.log('[SyncQueue] Returned operation to pending:', operationId);
+      this._notifyListeners();
+    }
+
+    return result.changes > 0;
+  }
+
+  /**
    * Clear all operations (use with caution!)
    */
   async clearAll() {

@@ -20,6 +20,34 @@ import { SyncStatus } from '../database/schema';
 import { API_CONFIG } from '../config/api.config';
 
 /**
+ * What `journal_entries.share_state` may hold: the only record of what the server last said
+ * about a memory's chosen audience (research R15). `null` means it has said nothing, which is
+ * every memory until it has not.
+ */
+const ShareState = {
+  WAITING: 'waiting',
+  REFUSED: 'refused',
+};
+
+/**
+ * The closed vocabulary `unresolvedAudience[].reason` uses
+ * (`Footprint.Hub.Contracts/Api/Journals/JournalDtos.cs`, `UnresolvedAudienceReasons`). Only
+ * the one this code branches on is named: see `_settleUnresolvedAudience` for why everything
+ * else, including `source_unavailable` itself, is handled by the same retryable default the
+ * server uses.
+ */
+const UnresolvedAudienceReason = {
+  DO_NOT_RESEND: 'do_not_resend',
+};
+
+/**
+ * How the single-operation routes say the same thing: the title of the problem response
+ * `AudienceRefusalExtensions.AudienceCouldNotBeDetermined` builds, whose two forms -- 503
+ * "could not be determined" and 422 "can never be determined" -- share this opening.
+ */
+const AUDIENCE_PROBLEM_TITLE = 'The audience for this entry';
+
+/**
  * Sync states
  */
 export const SyncState = {
@@ -410,6 +438,15 @@ class SyncEngineClass {
       //     `syncBadgeStatus` renders as a failure.
       // No new column and no new status: `conflict` and `conflict_data` both already
       // exist and are already what the single-operation path uses.
+      //
+      // Handled BEFORE `unresolvedAudience` below, and the set of operations settled here is
+      // carried into it. For an update to an entry that is no longer on the server the Hub
+      // deliberately sends both signals for one item -- a conflict "Entry not found" and an
+      // `unresolvedAudience` `do_not_resend` -- and the owner ruled that the conflict wins
+      // (round-3 H2): "deleted on another device" is the true account of what happened, and a
+      // memory that no longer exists is not a memory waiting for an audience.
+      const settledAsConflict = new Set();
+
       if (batchResult.conflicts && batchResult.conflicts.length > 0) {
         const refusals = await ConflictResolver.processServerConflicts(
           batchResult.conflicts
@@ -419,6 +456,7 @@ class SyncEngineClass {
           const op = this._findRefusedOperation(refusal, { creates, updates, deletes });
 
           if (op) {
+            settledAsConflict.add(op.id);
             await SyncQueue.markConflict(op.id, {
               result: refusal.result,
               reason: refusal.reason,
@@ -459,6 +497,15 @@ class SyncEngineClass {
           });
         }
       }
+
+      // Then the memories whose content the server saved but whose audience it could not
+      // apply. Not conflicts, not failures, and not on the sync badge: shown on the memory's
+      // own card and nowhere else.
+      await this._settleUnresolvedAudience(
+        batchResult.unresolvedAudience,
+        { creates, updates },
+        settledAsConflict
+      );
 
     } catch (error) {
       // The batch itself was accepted; only the local bookkeeping after it failed. There
@@ -548,6 +595,11 @@ class SyncEngineClass {
         await this._processSingleOperation(op);
         result.succeeded++;
       } catch (opError) {
+        // Before anything generic, and before this is logged as an error at all: an audience
+        // the server could not apply is not an operation that failed. It is settled on the
+        // memory itself, counted nowhere, and does not spend a retry (FR-011, round-3 H1).
+        if (await this._settledAsAudienceRefusal(op, opError)) continue;
+
         // The response body, not just the status. A 400 here says the server rejected
         // the payload and nothing else; without the body there is no way to tell which
         // field it objected to, and the operation retries against the same objection
@@ -705,6 +757,172 @@ class SyncEngineClass {
     }
 
     return null;
+  }
+
+  /**
+   * Record what the server said about the audiences it could not apply, and settle their
+   * operations (FR-011, SC-010, research R15).
+   *
+   * The Hub saves such a memory's content and reports, per item,
+   * `{ clientId, reason }` with `reason` one of two tokens. Until this existed the phone read
+   * none of it, so the operation stayed pending and was re-sent on every sync forever with
+   * nothing shown anywhere -- a sharing failure that was both silent and permanent.
+   *
+   *   - `source_unavailable`: the same write will succeed unchanged once the audience can be
+   *     determined. `share_state = 'waiting'`, and the operation goes back to `pending`
+   *     without spending a retry, so the phone sends it again by itself.
+   *   - `do_not_resend`: it never will. `share_state = 'refused'`, and the operation is
+   *     removed, which is what stops the re-sending.
+   *
+   * ⚠ **Neither arm touches the memory's audience.** The server never stored it with one, so
+   * it is shown to nobody else in the meantime, and it is never quietly stored with a
+   * different one -- a partial or substituted audience is the one failure mode with no safe
+   * side (CLAUDE.md *Sharing fails closed*).
+   *
+   * ⚠ **`share_state` is written BEFORE the queue is touched**, and the order is not
+   * incidental. Settle the operation first and a crash in between leaves a memory with no
+   * record of the refusal and no operation to produce one again: never shared, with nothing
+   * on its card to say so. This way round, the same crash leaves the operation pending, the
+   * next batch asks again, and the server -- idempotent on `clientId` -- answers the same.
+   *
+   * ⚠ **One pass per memory, not per item.** The Hub answers per update, so two queued edits
+   * to one entry come back as two items carrying the same `clientId`. Settling only the first
+   * would leave the second re-sending a memory already refused for good (round-4 U2).
+   *
+   * @param {array} items - `unresolvedAudience` from the batch reply
+   * @param {object} pushed - the operations just pushed, as `{ creates, updates }`
+   * @param {Set<string>} settledAsConflict - operation ids already settled as conflicts,
+   *   which this must leave alone: the conflict is the one record of those (round-3 H2)
+   */
+  async _settleUnresolvedAudience(items, { creates, updates }, settledAsConflict) {
+    if (!items || items.length === 0) return;
+
+    const reasonByClientId = new Map();
+    for (const item of items) {
+      // An item with no correlation id identifies no memory, so there is nothing to mark and
+      // nothing to settle. Reported rather than swallowed: guessing would mark the wrong
+      // memory as unshared, and silence is the defect this whole path exists to end. The
+      // operation stays pending, and the next batch -- which is idempotent on `clientId` --
+      // can correlate the answer.
+      if (!item?.clientId) {
+        console.warn(
+          '[SyncEngine] unresolvedAudience item has no clientId; cannot correlate it:',
+          { reason: item?.reason ?? null }
+        );
+        continue;
+      }
+      // Two items for one memory are the normal case (one per queued update). Where they
+      // disagree, `do_not_resend` wins: it is the server stating plainly that this will never
+      // work, and taking the other token instead would leave the memory in the retry loop
+      // this whole path exists to end -- for as long as the app is installed.
+      const known = reasonByClientId.get(item.clientId);
+      if (known === UnresolvedAudienceReason.DO_NOT_RESEND) continue;
+      reasonByClientId.set(item.clientId, item.reason);
+    }
+
+    for (const [clientId, reason] of reasonByClientId) {
+      // Both spellings, as `_findRefusedOperation` takes them: the queued payload is a SQLite
+      // row (`local_id`) on some paths and an in-memory entry (`localId`) on others.
+      const operations = [...creates, ...updates].filter(
+        (op) =>
+          (op.data?.local_id || op.data?.localId) === clientId && !settledAsConflict.has(op.id)
+      );
+
+      if (operations.length === 0) {
+        console.warn(
+          '[SyncEngine] The server could not apply an audience for a change that matches no queued operation:',
+          { clientId, reason }
+        );
+        continue;
+      }
+
+      // `do_not_resend` and nothing else means give up. Anything unrecognised falls to
+      // `waiting`, which mirrors the server's own rule -- both default arms of
+      // `AudienceRefusalExtensions` are the retryable one -- and fails closed the way that
+      // matters: the memory keeps trying and keeps saying "Waiting to share..." on its card,
+      // where abandoning it would lose a share that would have gone through.
+      const refusedForGood = reason === UnresolvedAudienceReason.DO_NOT_RESEND;
+      const shareState = refusedForGood ? ShareState.REFUSED : ShareState.WAITING;
+
+      // The entity each matched operation is about. `clientId` IS the local id -- it is sent
+      // as the entry's `local_id` -- so this is one memory in every realistic case; derived
+      // from the operations rather than assumed, so a queue row that disagreed would still be
+      // recorded against the memory it names instead of silently against another one's.
+      for (const localId of new Set(operations.map((op) => op.entityId || clientId))) {
+        await JournalRepository.setShareState(localId, shareState);
+      }
+
+      for (const op of operations) {
+        if (refusedForGood) {
+          await SyncQueue.removeOperation(op.id);
+        } else {
+          await SyncQueue.returnToPending(op.id);
+        }
+      }
+
+      console.log(
+        '[SyncEngine] The server could not apply this memory\'s audience:',
+        { clientId, reason, shareState, operations: operations.length }
+      );
+    }
+  }
+
+  /**
+   * Is this single-operation failure the server saying it could not apply the audience, and
+   * has it been settled as one? (research R15, round-2 M6, round-3 H1)
+   *
+   * Checked BEFORE the generic handling in `_fallbackToSingleOperations`, which marks the
+   * operation failed. An audience refusal is not a failure to upload: the memory's content is
+   * saved, nothing about it is shared, and FR-011 says it is reported on the memory's own card
+   * and is not counted among the memories that failed to send. Marking it failed would put it
+   * on the sync badge, spend a retry it needs, and -- after three -- abandon the share in
+   * silence.
+   *
+   * Recognised by the problem's title, which is the one thing both statuses share
+   * (`AudienceRefusalExtensions.AudienceCouldNotBeDetermined`); `ApiError.data` is the parsed
+   * problem body. The status then says which refusal it is: 503 could succeed later, 422 never
+   * can. Any other 503 or 422 -- the service being down, a payload the server would not take --
+   * keeps today's handling exactly, because it is a failure like any other.
+   *
+   * @param {object} operation - the queued operation that was being sent
+   * @param {Error} error - what the API threw
+   * @returns {Promise<boolean>} True when this was an audience refusal and has been settled
+   */
+  async _settledAsAudienceRefusal(operation, error) {
+    const title = error?.data?.title;
+    if (typeof title !== 'string' || !title.startsWith(AUDIENCE_PROBLEM_TITLE)) return false;
+
+    const status = error?.status;
+    if (status !== 422 && status !== 503) return false;
+
+    // No entity means no memory to record this against, so there is nothing to show and the
+    // refusal would be silent. Left to today's handling, which at least counts it.
+    if (!operation?.entityId) return false;
+
+    const refusedForGood = status === 422;
+
+    // Before the queue is touched, for the reason given on `_settleUnresolvedAudience`.
+    await JournalRepository.setShareState(
+      operation.entityId,
+      refusedForGood ? ShareState.REFUSED : ShareState.WAITING
+    );
+
+    // The operation is `in_progress` by now -- `_processSingleOperation` marks it so before it
+    // calls out -- which is exactly why `cancelOperation`, which deletes only `pending` rows,
+    // cannot settle one of these.
+    if (refusedForGood) {
+      await SyncQueue.removeOperation(operation.id);
+    } else {
+      await SyncQueue.returnToPending(operation.id);
+    }
+
+    console.log(
+      '[SyncEngine] The server could not apply this memory\'s audience:',
+      { localId: operation.entityId, status,
+        shareState: refusedForGood ? ShareState.REFUSED : ShareState.WAITING }
+    );
+
+    return true;
   }
 
   /**
@@ -937,6 +1155,12 @@ class SyncEngineClass {
         contentBlocks: mapped.contentBlocks,
         location: mapped.location,
         visibility: mapped.visibility,
+        // The server's own last-save time, which `createFromServer` records for a memory
+        // arriving for the first time and this records for every later copy of one. It is the
+        // reference the read-time piece-ordering rule compares a capture moment against
+        // (FR-029, research R2), so a copy that updated everything except this would leave
+        // the ordering judged against whatever the memory arrived with.
+        updatedAt: mapped.updatedAt,
       });
     }
   }

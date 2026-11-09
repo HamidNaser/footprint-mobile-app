@@ -158,6 +158,14 @@ class JournalRepositoryClass extends BaseRepository {
       datePrecision: serverEntry.datePrecision || null,
       reactions: serverEntry.reactions || { likes: 0, likedByUserIds: [] },
       commentsCount: serverEntry.commentsCount || 0,
+      // The server's own `updatedAt`, kept exactly as it sent it. This is the last save the
+      // server knows about, and the reference a capture moment is judged against at read time
+      // (FR-029, research R2) -- a moment later than this, beyond a small tolerance for clock
+      // differences, cannot be true and must not order anything. `updatedAt` below is a
+      // different fact: when this phone last wrote the row, which says nothing about the
+      // server. Absent, this stays null, which means no threshold rather than a threshold of
+      // now.
+      serverUpdatedAt: serverEntry.updatedAt || null,
       syncStatus: SyncStatus.SYNCED,
       createdAt: serverEntry.createdAt ? new Date(serverEntry.createdAt).getTime() : now,
       updatedAt: now,
@@ -388,6 +396,13 @@ class JournalRepositoryClass extends BaseRepository {
     const updates = {
       syncStatus: SyncStatus.SYNCED,
       syncedAt: this.now(),
+      // The server has accepted the memory, audience and all, so whatever it last said about
+      // that audience is no longer true. Cleared here rather than at each call site because
+      // this is the one place both a successful create and a successful update pass through,
+      // on the batch route and on the single-operation one alike -- and a card still saying
+      // "Not shared" over a memory that is shared is the same silent lie as the original
+      // defect, pointing the other way (research R15).
+      shareState: null,
     };
 
     if (serverId) {
@@ -404,7 +419,7 @@ class JournalRepositoryClass extends BaseRepository {
    * fields directly and marks the entry SYNCED WITHOUT re-enqueuing a push,
    * so reconciliation never triggers a sync feedback loop.
    * @param {string} localId - Local ID
-   * @param {object} updates - Server fields { contentBlocks, location, visibility }
+   * @param {object} updates - Server fields { contentBlocks, location, visibility, updatedAt }
    */
   async applyServerUpdate(localId, updates = {}) {
     if (!localId) {
@@ -415,12 +430,48 @@ class JournalRepositoryClass extends BaseRepository {
     if (updates.contentBlocks !== undefined) updateData.contentBlocks = updates.contentBlocks;
     if (updates.location !== undefined) updateData.location = updates.location;
     if (updates.visibility !== undefined) updateData.visibility = updates.visibility;
+    // The server copy's own `updatedAt`, the same ordering reference `createFromServer`
+    // records (FR-029, research R2). Set only when the copy carried one, so a caller that
+    // applies a partial update cannot erase a threshold that is still valid -- and in
+    // particular cannot replace it with this phone's clock.
+    if (updates.updatedAt !== undefined) updateData.serverUpdatedAt = updates.updatedAt;
     updateData.syncStatus = SyncStatus.SYNCED;
     updateData.syncedAt = this.now();
 
     await this.dbService.updateEntry(localId, updateData);
 
     this.log('applyServerUpdate', { localId, fields: Object.keys(updateData) });
+  }
+
+  /**
+   * Record what the server last said about this memory's chosen audience.
+   *
+   * `'waiting'` when it could not work the audience out yet and the phone should send the
+   * memory again by itself; `'refused'` when it never will and the phone must stop;
+   * `null` when there is nothing to say -- the server has accepted the memory, or the person
+   * has chosen an audience again.
+   *
+   * ⚠ **This never touches `visibility` or `locationSharing`, and nothing here ever may.**
+   * It records a fact about a push that already happened; the audience itself is the person's
+   * choice and stays exactly as they made it. A partial or substituted audience is the one
+   * failure mode with no safe side -- narrower silently withholds the memory, wider shows it
+   * to somebody it was never meant for -- so a refusal is shown, never worked around
+   * (CLAUDE.md *Sharing fails closed*, FR-011, SC-010).
+   *
+   * No push is enqueued either, for the same reason: there is nothing new to tell the server,
+   * and re-sending a memory it has just refused for good is the loop research R15 closes.
+   *
+   * @param {string} localId - Local ID
+   * @param {string|null} state - 'waiting', 'refused', or null to clear
+   */
+  async setShareState(localId, state) {
+    if (!localId) {
+      throw new Error('JournalRepository.setShareState requires a localId');
+    }
+
+    await this.dbService.updateEntry(localId, { shareState: state ?? null });
+
+    this.log('setShareState', { localId, state: state ?? null });
   }
 
   /**

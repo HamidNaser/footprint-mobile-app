@@ -225,6 +225,7 @@ let markConflict;
 let markFailed;
 let markInProgress;
 let warn;
+let errorLog;
 
 beforeEach(async () => {
   __freshDatabase();
@@ -246,6 +247,11 @@ beforeEach(async () => {
   markFailed = jest.spyOn(SyncQueue, 'markFailed');
   markInProgress = jest.spyOn(SyncQueue, 'markInProgress');
   warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  // Watched, not merely silenced. `_pushLocalChanges` wraps its result handling in a try
+  // whose catch logs here and swallows the error, so a throw anywhere in the audience
+  // handling would otherwise leave a test reporting "nothing happened" rather than "it
+  // blew up". Every test below says whether it expects this to have been reached.
+  errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -272,6 +278,7 @@ describe('a batch reply saying the audience could not be determined yet (source_
 
     await SyncEngine._pushLocalChanges();
 
+    expect(errorLog).not.toHaveBeenCalled();
     expect((await DatabaseService.getEntryByLocalId('local-1')).shareState).toBe('waiting');
 
     // Back in the queue, and offered for pushing again -- which is what "the phone retries by
@@ -346,6 +353,7 @@ describe('a batch reply saying the audience can never be determined (do_not_rese
 
     await SyncEngine._pushLocalChanges();
 
+    expect(errorLog).not.toHaveBeenCalled();
     expect((await DatabaseService.getEntryByLocalId('local-2')).shareState).toBe('refused');
     expect(await SyncQueue.getOperation(operationId)).toBeNull();
   });
@@ -468,6 +476,68 @@ describe('an unresolvedAudience item that cannot be matched to anything', () => 
       expect.anything()
     );
     expect((await DatabaseService.getEntryByLocalId('local-3')).shareState).toBeNull();
+  });
+});
+
+describe('two items for one memory that disagree', () => {
+  it('takes do_not_resend, whichever order it arrives in, so the retry loop ends', async () => {
+    // Two queued edits are answered per update, so two items for one memory are ordinary.
+    // Where they disagree, the one saying it will never work is the one to act on: keeping
+    // the memory waiting would leave it going round the retry loop for as long as the app is
+    // installed, which is the loop this whole path exists to end.
+    await seedEntry('local-14', { serverId: 'srv-14' });
+    const first = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-14',
+      serverId: 'srv-14',
+      data: { local_id: 'local-14' },
+    });
+    const second = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-14',
+      serverId: 'srv-14',
+      data: { local_id: 'local-14' },
+    });
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      unresolvedAudience: [
+        { clientId: 'local-14', reason: 'source_unavailable' },
+        { clientId: 'local-14', reason: 'do_not_resend' },
+      ],
+    }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect((await DatabaseService.getEntryByLocalId('local-14')).shareState).toBe('refused');
+    expect(await SyncQueue.getOperation(first)).toBeNull();
+    expect(await SyncQueue.getOperation(second)).toBeNull();
+  });
+});
+
+describe('a reason token this phone does not recognise', () => {
+  it('is treated as waiting, so a share is never abandoned on a token we misread', async () => {
+    // `do_not_resend` and nothing else means give up. Both default arms of the Hub's own
+    // `AudienceRefusalExtensions` are the retryable one, for the same reason: telling the
+    // phone to abandon a memory that would have sent perfectly well loses the share in
+    // silence, and one more attempt costs a sync interval.
+    await seedEntry('local-13');
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.CREATE_ENTRY,
+      entityId: 'local-13',
+      data: { local_id: 'local-13' },
+    });
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      unresolvedAudience: [{ clientId: 'local-13', reason: 'some_token_added_later' }],
+    }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect((await DatabaseService.getEntryByLocalId('local-13')).shareState).toBe('waiting');
+    expect((await SyncQueue.getOperation(operationId)).status).toBe(OperationStatus.PENDING);
+    expect(audienceColumnsOf('local-13').visibility).toBe('family');
   });
 });
 
@@ -688,6 +758,7 @@ describe('the single-operation route, when the batch could not be reached (round
     const result = await SyncEngine._pushLocalChanges();
 
     expect(markFailed).toHaveBeenCalledWith(operationId, expect.any(String));
+    expect(errorLog.mock.calls[0][0]).toContain('Operation failed');
     const operation = await SyncQueue.getOperation(operationId);
     expect(operation.status).toBe(OperationStatus.FAILED);
     expect(operation.retryCount).toBe(1);
