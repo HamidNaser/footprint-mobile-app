@@ -126,6 +126,22 @@ describe('expanding a memory into pieces', () => {
     expect(toNumberedPieces(entry, SAVED).pieces[0].location).toEqual(HERE);
   });
 
+  it('does not mistake an inherited object property for a block type', () => {
+    // `MEDIA_BLOCK_KINDS[block.type]` is a prototype-chain lookup, so a block whose type is
+    // `'constructor'` or `'toString'` resolves to a *function* -- truthy, so the block is read
+    // as a media block, and the function would travel on as the piece's `kind` and into the
+    // group handed to the map. `journalBlocks.js` closes the same hole in `builderFor`, for the
+    // same reason: a kind this file does not know is still a piece that must not be lost.
+    const entry = entryOf(
+      { type: 'constructor', content: 'a note', capturedAt: '2026-11-01T14:40:00.000Z', media: [] },
+      { type: 'toString', content: 'another', capturedAt: '2026-11-01T14:50:00.000Z', media: [] },
+    );
+
+    const { pieces } = toNumberedPieces(entry, SAVED);
+
+    expect(pieces.map((p) => p.kind)).toEqual(['constructor', 'toString']);
+  });
+
   it('reads a memory with no blocks at all, or no memory at all, without complaint', () => {
     // A card is rendered while its entry is still arriving on more than one screen, and an
     // empty answer is the one that leaves the card looking exactly as it does today.
@@ -331,6 +347,38 @@ describe('the ordering rule', () => {
     expect(orderOf(toNumberedPieces(past, zonelessSave))).toEqual([0, 1]);
   });
 
+  it('reads a server value with seven fractional digits', () => {
+    // `System.Text.Json` writes a `DateTime` that has not round-tripped through Mongo with
+    // 100-nanosecond precision. If this shape were rejected the threshold would be `null` and
+    // the whole plausibility rule would quietly vanish -- with every other test still green,
+    // because no other test would notice a missing threshold.
+    const entry = entryOf(
+      text(A_YEAR_AFTER),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, '2026-11-01T15:10:00.1234567Z'))).toEqual([0, 1]);
+  });
+
+  it('reads a date with no time of day as UTC midnight', () => {
+    // An ISO value with no `T` is already UTC by the ES Date Time String Format, so it must be
+    // parsed as it stands. Appending a `Z` builds `'2026-11-01Z'`, which is *outside* that
+    // format: V8 happens to answer the same instant, Hermes need not, and a `NaN` there would
+    // drop the threshold on the phone and on no CI run. So the production code appends only to
+    // a value that has a time of day in it.
+    //
+    // Both assertions have teeth on any engine -- the second one fails if the value is read as
+    // no value, because then nothing would be out of reach and the order would flip. What is
+    // engine-dependent is only whether the *un*fixed code would also pass here.
+    const entry = entryOf(
+      text('2026-11-02T00:10:00.000Z'),            // past midnight + 10 min
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(entry, '2026-11-02'))).toEqual([1, 0]);
+    expect(orderOf(toNumberedPieces(entry, '2026-11-01'))).toEqual([0, 1]);
+  });
+
   it('treats an unreadable time as no time, and an unreadable server value as none', () => {
     const entry = entryOf(text('not a time'), text('2026-11-01T14:40:00.000Z'));
 
@@ -463,19 +511,64 @@ describe('merging pins at practically the same spot', () => {
   });
 
   it('returns the groups in number order, each carrying its own numbers', () => {
-    // Stored out of capture order on purpose: the groups follow the numbers, which follow the
-    // capture order, because the route line is drawn through them in that order (FR-024).
-    const far = { lat: 51.52, lng: -0.1 };
+    // The route line is drawn through `groups` in array order (FR-024), so this is the order a
+    // viewer sees. The fixture is built so that **three** wrong answers each give a different
+    // result from the right one:
+    //
+    // - stored order would be [[3], [1, 2]] -- the far pin is stored first;
+    // - key order would be [[3], [1, 2]] too -- `far`'s key is '51.40000,-0.10000', which sorts
+    //   before the near pair's '51.50001,-0.14200'. An earlier version of this fixture used
+    //   51.52, whose key sorts *after* the pair, so key order and number order coincided and
+    //   the test could not tell them apart;
+    // - numbers pushed in stored order inside a group would give [[2, 1], [3]], because the
+    //   near pair is stored in the reverse of its capture order.
+    const far = { lat: 51.4, lng: -0.1 };
     const entry = entryOf(
-      pieceAt('55', far),
-      pieceAt('40', { lat: 51.500012, lng: -0.142 }),
-      pieceAt('45', { lat: 51.500014, lng: -0.142 }),
+      pieceAt('45', { lat: 51.500014, lng: -0.142 }),   // captured second  -> 2
+      pieceAt('55', far),                               // captured last    -> 3
+      pieceAt('40', { lat: 51.500012, lng: -0.142 }),   // captured first   -> 1
     );
 
     const { groups } = toNumberedPieces(entry, SAVED);
 
     expect(groups.map((g) => g.numbers)).toEqual([[1, 2], [3]]);
-    expect(groups.map((g) => g.kind)).toEqual(['text', 'text']);
+    // Each group's coordinate is its first-numbered piece's, which here is the one stored last.
+    expect(groups.map((g) => [g.lat, g.lng])).toEqual([[51.500012, -0.142], [51.4, -0.1]]);
+  });
+
+  it('takes a merged group\'s kind from its first-numbered piece', () => {
+    // A marker holding a note and a photo is coloured by one of them, and `NumberedPin` does not
+    // derive which (its `kind` is the caller's choice). The rule is the first-numbered piece's
+    // kind -- deterministic, so SC-007 holds either way, and T047 is where what a mixed marker
+    // should look like is decided. The photo is stored first and the note captured first, so
+    // neither "the stored-first piece" nor "whichever is media" would give this answer.
+    const spot = { lat: 51.5101, lng: -0.134 };
+    const entry = entryOf(
+      photos([['2026-11-01T14:50:00.000Z', spot]]),
+      text('2026-11-01T14:40:00.000Z', spot),
+    );
+
+    const { groups } = toNumberedPieces(entry, SAVED);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].numbers).toEqual([1, 2]);
+    expect(groups[0].kind).toBe('text');
+  });
+
+  it('puts two pieces either side of the prime meridian in one group', () => {
+    // A coordinate that rounds to zero keeps its sign through `toFixed`: '-0.00000' and
+    // '0.00000' are different strings for two places 20 cm apart. That would split a ~2 m strip
+    // through Greenwich -- and the equator -- into two markers on a string artifact rather than
+    // on the grid boundary the documents accept (FR-023, round-4 I2).
+    const entry = entryOf(
+      pieceAt('40', { lat: 51.5009, lng: -0.000001 }),
+      pieceAt('50', { lat: 51.5009, lng: 0.000001 }),
+    );
+
+    const { groups, distinctPlaceCount } = toNumberedPieces(entry, SAVED);
+
+    expect(groups.map((g) => g.numbers)).toEqual([[1, 2]]);
+    expect(distinctPlaceCount).toBe(1);
   });
 
   it('hands the map the raw coordinate of the group, never the rounded key', () => {
