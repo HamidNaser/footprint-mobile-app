@@ -1,8 +1,12 @@
 /**
- * 013 T021 -- `VoiceRecorderBar`.
+ * 013 T021 / T037 -- `VoiceRecorderBar`.
  *
  * What is pinned down here:
  *   - one tap starts, one tap stops, and there is nothing to hold down (FR-006);
+ *   - **an interruption keeps what was recorded** (T037, US2-2, research R5): when the
+ *     recorder stops without anybody tapping Stop -- an incoming call, or the system taking
+ *     the audio session -- the part recorded so far becomes one clip, and the Stop tap the
+ *     person makes anyway adds no second one;
  *   - a stop hands over one clip `{ uri, duration, waveform, capturedAt }`, with
  *     `capturedAt` stamped when recording *started*, never when it stopped (research R8 --
  *     that instant is also where the clip is pinned, and it decides the piece's place in
@@ -61,6 +65,15 @@ jest.mock('expo-audio', () => {
   let startedAtMs = 0;
   let recordedMs = 0;
   let metering = -30;
+  /**
+   * How long after `record()` the native recorder starts reporting itself as recording, and
+   * the instant it does. `record()` is synchronous and returns before the native session is
+   * necessarily running, so the first polled status can legitimately read
+   * `isRecording: false` on a recording that is perfectly fine. Zero by default, so every
+   * other case in this suite is unaffected.
+   */
+  let startLatencyMs = 0;
+  let nativeStartsAtMs = 0;
 
   const recorder = {
     id: 'fake-recorder-1',
@@ -71,6 +84,7 @@ jest.mock('expo-audio', () => {
     }),
     record: jest.fn(() => {
       startedAtMs = Date.now();
+      nativeStartsAtMs = startedAtMs + startLatencyMs;
       recordedMs = 0;
       recorder.uri = null;
       recorder.isRecording = true;
@@ -84,7 +98,9 @@ jest.mock('expo-audio', () => {
     pause: jest.fn(),
     getStatus: () => ({
       canRecord: prepared,
-      isRecording: recorder.isRecording,
+      // What the *native* recorder reports, which is what an interruption changes and what
+      // a just-started recording has not caught up with yet.
+      isRecording: recorder.isRecording && Date.now() >= nativeStartsAtMs,
       durationMillis: recorder.isRecording ? Date.now() - startedAtMs : recordedMs,
       mediaServicesDidReset: false,
       metering,
@@ -119,6 +135,20 @@ jest.mock('expo-audio', () => {
     __setMetering: (db) => {
       metering = db;
     },
+    /**
+     * An interruption: a call arrives, or the system takes the audio session. The native
+     * recorder stops on its own, the partial file is there, and **nobody tapped Stop** --
+     * which is the whole of what distinguishes this from a stop (research R5).
+     */
+    __interrupt: () => {
+      recordedMs = recorder.isRecording ? Date.now() - startedAtMs : recordedMs;
+      recorder.isRecording = false;
+      recorder.uri = CLIP_URI;
+    },
+    /** How long the native recorder takes to start reporting itself as recording. */
+    __setStartLatency: (ms) => {
+      startLatencyMs = ms;
+    },
     __denyPermission: () => {
       api.requestRecordingPermissionsAsync.mockImplementation(async () => denied);
     },
@@ -127,6 +157,8 @@ jest.mock('expo-audio', () => {
       startedAtMs = 0;
       recordedMs = 0;
       metering = -30;
+      startLatencyMs = 0;
+      nativeStartsAtMs = 0;
       recorder.uri = null;
       recorder.isRecording = false;
       recorder.prepareToRecordAsync.mockClear();
@@ -569,6 +601,119 @@ describe('VoiceRecorderBar: unmounting while recording', () => {
     expect(audio.__recorder.stop).not.toHaveBeenCalled();
     expect(onClip).not.toHaveBeenCalled();
     expect(onCaptureFailed).not.toHaveBeenCalled();
+  });
+});
+
+describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2)', () => {
+  /**
+   * US2-2: "Given Sam is recording, When a phone call interrupts, Then the part recorded
+   * before the call is kept as its own clip." Research R5 says where to see it: the polled
+   * `useAudioRecorderState` stops saying `isRecording` and nobody tapped Stop.
+   *
+   * The failure to avoid is not losing the clip -- it is the bar going quietly back to the
+   * idle Voice button with the recording ended, which reads as "you have not recorded yet"
+   * and loses the minute Sam just spoke without a word about it.
+   */
+  it('finishes the clip itself when the recorder stops and nobody tapped Stop', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(3000);
+
+    await act(async () => {
+      audio.__interrupt();
+    });
+    // The poll is the only thing that can notice; before it, nothing has happened.
+    await elapse(POLL_MS);
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    const clip = onClip.mock.calls[0][0];
+    expect(clip.uri).toBe(audio.CLIP_URI); // kept, not discarded
+    expect(clip.duration).toBe(3); //          the part recorded before the call
+    expect(clip.capturedAt).toBe(START_ISO);
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+
+    // The parent is told the recording ended, so the bar is not left on screen (UI contract),
+    // and the audio session goes back the way it does after any other ending.
+    expect(onRecordingChange.mock.calls).toEqual([[true], [false]]);
+    expect(audio.setAudioModeAsync).toHaveBeenLastCalledWith({ allowsRecording: false });
+    expect(has(tree, 'voice-recorder-bar')).toBe(false);
+    expect(has(tree, 'voice-record-button')).toBe(true);
+  });
+
+  // The other half of the pair, and the one that costs a piece if it is wrong. Sam's thumb
+  // is already on Stop when the call arrives: the tap lands on the control they were looking
+  // at, after the interruption has already made the clip. Two clips of one recording is the
+  // same memory said twice, with the second one a duplicate nobody asked for.
+  it('adds no second clip when the Stop tap lands after the interruption', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    const stop = pressable(tree, 'voice-stop-button');
+    expect(stop).toBeDefined();
+    await elapse(3000);
+
+    await act(async () => {
+      audio.__interrupt();
+    });
+    await elapse(POLL_MS);
+    expect(onClip).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      stop.props.onPress();
+    });
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(audio.__recorder.stop).toHaveBeenCalledTimes(1);
+  });
+
+  // The call ends and Sam carries on. The finish guard is released however a recording
+  // ended, so an interruption must not be the one ending that leaves the bar recording once
+  // per mount and then quietly dead.
+  it('leaves the bar able to record another clip afterwards', async () => {
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+    await elapse(3000);
+    await act(async () => {
+      audio.__interrupt();
+    });
+    await elapse(POLL_MS);
+    expect(onClip).toHaveBeenCalledTimes(1);
+
+    await elapse(20000); // the call
+    const secondStart = new Date().toISOString();
+
+    await tap(tree, 'voice-record-button');
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+    await elapse(2000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(2);
+    expect(onClip.mock.calls[1][0].capturedAt).toBe(secondStart);
+    expect(onClip.mock.calls[1][0].duration).toBe(2);
+  });
+
+  // The same signal, one moment earlier, meaning the opposite thing. `record()` is
+  // synchronous and returns before the native session is necessarily running, so the first
+  // polled status of a perfectly healthy recording can read `isRecording: false`. Taking
+  // that for an interruption would end every recording at birth -- Sam taps Voice, the bar
+  // appears and vanishes, and the "clip" is of nothing.
+  it('does not mistake a recorder that has not started yet for an interruption', async () => {
+    audio.__setStartLatency(600);
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+
+    await elapse(POLL_MS); // two polls that both report isRecording: false
+    await elapse(POLL_MS);
+
+    expect(onClip).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+
+    await elapse(POLL_MS * 4); // the native recorder is going now
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].duration).toBeCloseTo(1.5, 5);
   });
 });
 
