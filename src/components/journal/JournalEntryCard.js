@@ -23,6 +23,8 @@ import { AudioPlayer } from '../media/AudioPlayer';
 import { EngagementSection } from './EngagementSection';
 import DerivativeImage from '../media/DerivativeImage';
 import { FailedSlot } from '../media/FailedTile';
+import SaveAudienceSheet from '../capture/SaveAudienceSheet';
+import { ShareState } from '../../database/schema';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
@@ -308,6 +310,28 @@ const VISIBILITY_DISPLAY = {
 };
 
 /**
+ * What the card says when the server could not apply the audience the person chose
+ * (FR-011, research R15). `entry.shareState` -- the `share_state` column -- is the only
+ * record of that, and it holds nothing else: `waiting` while the phone is still going to
+ * send the memory, `refused` once it never will.
+ */
+const SHARE_LINES = {
+  [ShareState.WAITING]: 'Waiting to share…',
+  [ShareState.REFUSED]: 'Not shared — tap to choose who can see it',
+};
+
+/**
+ * What stands where the audience label would be, in both states (SC-010).
+ *
+ * ⚠ The label is what makes a card *look* shared, so it is replaced whenever the server has
+ * said **anything** about the audience -- not only for the two states above. A card reading
+ * "Family" over a memory that is on nobody else's screen is the "appears as shared" half of
+ * SC-010, and sharing fails closed: saying less than the truth is safe here, saying more is
+ * not.
+ */
+const NOT_SHARED_YET = 'Not shared yet';
+
+/**
  * Main JournalEntryCard component - Threaded/Sequential Layout
  */
 export const JournalEntryCard = memo(({
@@ -321,6 +345,7 @@ export const JournalEntryCard = memo(({
   onReact,           // Callback when user reacts: (entryId, reactionKey) => void
   onAddResponse,     // Callback when user adds response: (entryId, text) => void
   onViewResponses,   // Callback to view all responses
+  onReshare,         // The audience chosen again for a refused share: (entry, visibility) => void
   primaryColor = '#007AFF',
   showSyncStatus = true,
   showEngagement = true,  // Show reactions/comments section
@@ -352,6 +377,21 @@ export const JournalEntryCard = memo(({
   const handleViewResponses = useCallback(() => {
     onViewResponses?.(entry.id);
   }, [entry.id, onViewResponses]);
+
+  // What the server last said about this memory's audience, and nothing else: the card
+  // neither asks the sync engine nor keeps its own copy (research R15).
+  const shareState = entry.shareState || null;
+
+  // The audience choice, offered again. Closed means the sheet is not in the tree at all,
+  // so nothing of it can be reached while it is off screen.
+  const [showAudienceSheet, setShowAudienceSheet] = useState(false);
+
+  const handleReshareChoice = useCallback((visibility) => {
+    setShowAudienceSheet(false);
+    // The card shares nothing itself: it reports the explicit choice upward and the screen
+    // re-shares the memory (FR-011).
+    onReshare?.(entry, visibility);
+  }, [entry, onReshare]);
 
   /**
    * Render a single content block based on its type
@@ -415,19 +455,29 @@ export const JournalEntryCard = memo(({
           </View>
           <View style={styles.timestampRow}>
             <Text style={styles.timestamp}>{formatRelativeTime(entry.createdAt)}</Text>
-            {/* Visibility indicator - only show on own entries */}
-            {isOwnEntry && entry.visibility && VISIBILITY_DISPLAY[entry.visibility] && (
+            {/* The audience, or -- when the server could not apply it -- "Not shared yet" in
+                its place, so the card never looks shared (FR-011, SC-010). */}
+            {shareState ? (
               <View style={styles.headerVisibility}>
                 <Text style={styles.headerVisibilityDot}>·</Text>
-                <Ionicons 
-                  name={VISIBILITY_DISPLAY[entry.visibility].icon} 
-                  size={12} 
-                  color="#8E8E93" 
-                />
-                <Text style={styles.headerVisibilityText}>
-                  {VISIBILITY_DISPLAY[entry.visibility].label}
-                </Text>
+                <Ionicons name="eye-off-outline" size={12} color="#8E8E93" />
+                <Text style={styles.headerVisibilityText}>{NOT_SHARED_YET}</Text>
               </View>
+            ) : (
+              // Visibility indicator - only show on own entries
+              isOwnEntry && entry.visibility && VISIBILITY_DISPLAY[entry.visibility] && (
+                <View style={styles.headerVisibility}>
+                  <Text style={styles.headerVisibilityDot}>·</Text>
+                  <Ionicons
+                    name={VISIBILITY_DISPLAY[entry.visibility].icon}
+                    size={12}
+                    color="#8E8E93"
+                  />
+                  <Text style={styles.headerVisibilityText}>
+                    {VISIBILITY_DISPLAY[entry.visibility].label}
+                  </Text>
+                </View>
+              )
             )}
           </View>
         </View>
@@ -435,6 +485,43 @@ export const JournalEntryCard = memo(({
           <Ionicons name="ellipsis-horizontal" size={20} color="#8E8E93" />
         </TouchableOpacity>
       </View>
+
+      {/* The share line, under the header: the refusal is never silent, and it is shown here
+          and nowhere else -- not on the sync badge (FR-011, research R15). The
+          "Unfinished edit - continue" line (FR-013) belongs beside this one, in T060. */}
+      {shareState === ShareState.REFUSED && (
+        <TouchableOpacity
+          style={styles.shareLine}
+          onPress={() => setShowAudienceSheet(true)}
+          accessibilityRole="button"
+          accessibilityLabel={SHARE_LINES[ShareState.REFUSED]}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="eye-off-outline" size={14} color="#C7682A" />
+          <Text style={[styles.shareLineText, styles.shareLineRefused]}>
+            {SHARE_LINES[ShareState.REFUSED]}
+          </Text>
+        </TouchableOpacity>
+      )}
+      {/* Not a control: FR-011 gives the tap to the final refusal only. The phone is still
+          going to send this one by itself, and offering the sheet here would invite a second
+          audience for a memory whose first one has not been answered. */}
+      {shareState === ShareState.WAITING && (
+        <View style={styles.shareLine}>
+          <Ionicons name="time-outline" size={14} color="#8E8E93" />
+          <Text style={styles.shareLineText}>{SHARE_LINES[ShareState.WAITING]}</Text>
+        </View>
+      )}
+
+      {/* The same sheet that saved the memory (T027/T028), not a second audience picker. */}
+      {showAudienceSheet && (
+        <SaveAudienceSheet
+          visible
+          onChoose={handleReshareChoice}
+          // Left without choosing: nothing is shared, and the card goes on saying so.
+          onDismiss={() => setShowAudienceSheet(false)}
+        />
+      )}
 
       {/* Content Blocks - Rendered in sequence (threaded) */}
       <View style={styles.contentContainer}>
@@ -544,6 +631,23 @@ const styles = StyleSheet.create({
   // Sync badge
   syncBadge: {
     marginLeft: 6,
+  },
+
+  // Share lines (FR-011)
+  shareLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: CARD_PADDING,
+    paddingBottom: 10,
+  },
+  shareLineText: {
+    fontSize: 13,
+    color: '#8E8E93',
+  },
+  shareLineRefused: {
+    color: '#C7682A',
+    fontWeight: '500',
   },
 
   // Content container

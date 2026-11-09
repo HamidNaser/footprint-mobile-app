@@ -10,6 +10,10 @@ import { JournalRepository, EntryVisibility, LocationSharing, SortOrder } from '
 import { FileService, MediaType } from './FileService';
 import { DatabaseService } from './DatabaseService';
 import { SettingsService, StorageMode } from './SettingsService';
+// The queue, for the one operation `reshareEntry` has to put there itself (see its comment).
+// A static import is safe: SyncQueue reaches only the database, so it closes no cycle the way
+// SyncEngine would -- that one is still required lazily in `_syncNow`.
+import { SyncQueue, SyncOperationType } from '../sync/SyncQueue';
 import { ContentBlockType, UploadStatus } from '../database/schema';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -652,6 +656,80 @@ class JournalServiceClass {
    */
   async setVisibility(localId, visibility) {
     return this.updateEntry(localId, { visibility });
+  }
+
+  /**
+   * Share a memory again, with an audience the person has just chosen, after the server could
+   * not apply the last one (FR-011, research R15).
+   *
+   * Three things happen, in this order: the chosen audience is stored, the memory is queued
+   * for the server **once**, and only then is the refusal cleared.
+   *
+   * ⚠ **Exactly one operation**, and the order is not interchangeable:
+   *
+   *   - **With a server id** this is an ordinary edit of the audience, and
+   *     `JournalRepository.update` already does it exactly right: it stores the field, moves a
+   *     synced memory back to pending, and queues one `UPDATE_ENTRY` carrying the server id.
+   *   - **Without one** the server has never held this memory. Its create was removed from the
+   *     queue when the refusal was final (`SyncQueue.removeOperation`), so something has to
+   *     put a create back -- and it must carry the content **as it stands now**, because a
+   *     memory refused before it ever uploaded keeps its later edits on the phone until it is
+   *     re-shared (R15, round-3 L4). `repository.update` cannot be used here: it queues an
+   *     `UPDATE_ENTRY` whether or not there is a server id, which would make two operations
+   *     out of one re-share, and an update with no server id is dropped as completed by
+   *     `SyncEngine._processSingleOperation` -- so the memory would stay unshared with nothing
+   *     on its card to say so. The audience is therefore written directly and the create
+   *     queued here.
+   *   - **The refusal is cleared last.** Clearing it first and then failing to queue would
+   *     leave a card reading "Family" over a memory on nobody else's screen -- SC-010's
+   *     "appears as shared", and the one failure mode with no safe side. The other way round
+   *     is harmless: the card says "Not shared" for a moment longer over a memory already on
+   *     its way, and a successful push clears it anyway (`JournalRepository.markSynced`).
+   *
+   * No audience is ever guessed or substituted: without an explicit choice this refuses and
+   * changes nothing (FR-011, *sharing fails closed*).
+   *
+   * @param {string} localId - Entry local ID
+   * @param {string} visibility - The audience the person chose, from `SaveAudienceSheet`
+   * @returns {Promise<object>} The entry as stored, with no share state left on it
+   */
+  async reshareEntry(localId, visibility) {
+    if (!localId) throw new Error('reshareEntry requires a localId');
+    if (!visibility) {
+      throw new Error('reshareEntry requires an audience: a memory is never shared without an explicit choice');
+    }
+
+    const entry = await this.repository.getByLocalId(localId);
+    if (!entry) throw new Error(`Entry not found: ${localId}`);
+
+    if (entry.serverId) {
+      await this.repository.update(localId, { visibility });
+    } else {
+      await this.dbService.updateEntry(localId, { visibility });
+      // The create carries the memory as it stands, audience included: anything the person
+      // added while it was refused exists nowhere else yet. (The push also re-reads the row,
+      // so a media upload that lands in the meantime is still picked up.)
+      await SyncQueue.enqueue({
+        type: SyncOperationType.CREATE_ENTRY,
+        entityId: localId,
+        serverId: null,
+        data: { ...entry, visibility, local_id: localId },
+      });
+    }
+
+    await this.repository.setShareState(localId, null);
+
+    const updated = await this.repository.getByLocalId(localId);
+
+    // The card stops saying "Not shared" without the screen reloading: useJournal listens
+    // for this and replaces the entry it holds.
+    this._emit('entryUpdated', updated);
+
+    // Same reasoning as create and edit: the person has just asked for this memory to be
+    // shared, so it goes now rather than at the next five-minute sweep.
+    this._syncNow('reshareEntry');
+
+    return updated;
   }
 
   // ============================================================

@@ -64,6 +64,7 @@ import { useAuth } from '../context/AuthContext';
 
 // Services
 import { SettingsService } from '../services/SettingsService';
+import { JournalService } from '../services/JournalService';
 import CaptureDraftStore, { DraftSlot } from '../services/CaptureDraftStore';
 import CaptureLocation from '../services/CaptureLocation';
 
@@ -744,6 +745,34 @@ export default function JournalScreen({ navigation }) {
   }, [allEntries, refresh]);
 
   /**
+   * The audience chosen again for a memory whose share the server would not apply (FR-011).
+   *
+   * The card offers the choice and reports it; the re-sharing itself is `reshareEntry`'s,
+   * which stores the audience, queues the memory once and only then clears the refusal. The
+   * card then stops saying "Not shared" because the service announces the change and this
+   * screen reloads the day.
+   *
+   * A failure is said, not logged: the refusal is still on the card, so silence would leave
+   * the person tapping a line that appears to do nothing (FR-017). Nothing is shared in that
+   * case -- `reshareEntry` leaves the refusal exactly as it was.
+   */
+  const handleReshare = useCallback(async (entry, visibility) => {
+    const localId = entry?.localId;
+    if (!localId || !visibility) return;
+
+    try {
+      await JournalService.reshareEntry(localId, visibility);
+      await refresh();
+    } catch (error) {
+      console.warn('[JournalScreen] the memory could not be shared again', error);
+      Alert.alert(
+        'Could not share that memory',
+        'It is still on this phone and still not shared with anyone. Please try again.',
+      );
+    }
+  }, [refresh]);
+
+  /**
    * Render entry card
    */
   const renderEntry = useCallback(({ item }) => {
@@ -764,10 +793,11 @@ export default function JournalScreen({ navigation }) {
         }}
         onReact={handleReact}
         onAddResponse={handleAddResponse}
+        onReshare={handleReshare}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
+  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare]);
 
   /**
    * Key extractor
