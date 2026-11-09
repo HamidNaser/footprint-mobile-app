@@ -788,6 +788,93 @@ describe('an operation the same batch reply both accepted and refused (fix round
       expect.objectContaining({ clientId: 'local-16' })
     );
   });
+
+  /**
+   * Fix round 2. The guard above skipped the whole memory, `share_state` included -- so the
+   * one reply shape where the server says "saved, but not with that audience" left the card
+   * reading as plainly shared with the audience the person chose. That is the wrong way round
+   * for a guard whose entire reason to exist is a server behaving differently from today's
+   * (CLAUDE.md *Sharing fails closed*: too many and the memory reaches someone it should
+   * not). The queue action is the only thing worth skipping -- resurrecting a completed
+   * create is what would write the memory twice -- so the refusal is recorded on the memory
+   * and the queue is left exactly as the earlier lists settled it.
+   */
+  it('still records the refusal on the memory, rather than leaving it looking shared', async () => {
+    await seedEntry('local-17');
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.CREATE_ENTRY,
+      entityId: 'local-17',
+      data: { local_id: 'local-17' },
+    });
+
+    const returnToPending = jest.spyOn(SyncQueue, 'returnToPending');
+    const removeOperation = jest.spyOn(SyncQueue, 'removeOperation');
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      created: [
+        { clientId: 'local-17', serverId: 'srv-17', serverTimestamp: '2026-11-09T10:00:00.000Z' },
+      ],
+      unresolvedAudience: [{ clientId: 'local-17', reason: 'source_unavailable' }],
+    }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(errorLog).not.toHaveBeenCalled();
+
+    // What a person sees: the card says the share is still waiting, not that it went out.
+    expect((await DatabaseService.getEntryByLocalId('local-17')).shareState).toBe('waiting');
+
+    // And round 1's guard still holds: the completed operation is not touched either way.
+    expect(returnToPending).not.toHaveBeenCalled();
+    expect(removeOperation).not.toHaveBeenCalled();
+    expect((await SyncQueue.getOperation(operationId)).status).toBe(OperationStatus.COMPLETED);
+
+    // Still said out loud, because the reply contradicted itself.
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('already settled'),
+      expect.objectContaining({ clientId: 'local-17' })
+    );
+
+    // And the audience itself is untouched, as on every other path here.
+    expect(audienceColumnsOf('local-17')).toEqual({
+      visibility: 'family',
+      location_sharing: 'family',
+    });
+  });
+
+  it('records a do_not_resend refusal the same way, without taking the operation out twice', async () => {
+    await seedEntry('local-18', { serverId: 'srv-18' });
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-18',
+      serverId: 'srv-18',
+      data: { local_id: 'local-18' },
+    });
+
+    const returnToPending = jest.spyOn(SyncQueue, 'returnToPending');
+    const removeOperation = jest.spyOn(SyncQueue, 'removeOperation');
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      updated: [
+        { clientId: 'local-18', serverId: 'srv-18', serverTimestamp: '2026-11-09T10:00:00.000Z' },
+      ],
+      unresolvedAudience: [{ clientId: 'local-18', reason: 'do_not_resend' }],
+    }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(errorLog).not.toHaveBeenCalled();
+    expect((await DatabaseService.getEntryByLocalId('local-18')).shareState).toBe('refused');
+    expect(returnToPending).not.toHaveBeenCalled();
+    expect(removeOperation).not.toHaveBeenCalled();
+    expect((await SyncQueue.getOperation(operationId)).status).toBe(OperationStatus.COMPLETED);
+    expect(audienceColumnsOf('local-18')).toEqual({
+      visibility: 'family',
+      location_sharing: 'family',
+    });
+  });
 });
 
 describe('two queued updates for the same memory, both refused (round-4 U2)', () => {

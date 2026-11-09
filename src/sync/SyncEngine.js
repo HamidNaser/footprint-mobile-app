@@ -829,7 +829,10 @@ class SyncEngineClass {
    *     in the conflicts loop, so an operation-keyed exclusion left the second one here and
    *     wrote a `share_state` beside an existing conflict row.
    *   - an operation the reply settled as COMPLETED is not resurrected: returning a finished
-   *     create to `pending` would make the next batch write the memory a second time.
+   *     create to `pending` would make the next batch write the memory a second time. Only
+   *     the QUEUE action is skipped there -- `share_state` is still written, because a memory
+   *     the server says it saved without the chosen audience must not be left showing a card
+   *     that reads as shared with it.
    *
    * @param {array} items - `unresolvedAudience` from the batch reply
    * @param {object} pushed - the operations just pushed, as `{ creates, updates }`
@@ -882,16 +885,6 @@ class SyncEngineClass {
 
       const operations = matching.filter((op) => !completedOperationIds.has(op.id));
 
-      if (operations.length === 0) {
-        console.warn(
-          matching.length === 0
-            ? '[SyncEngine] The server could not apply an audience for a change that matches no queued operation:'
-            : '[SyncEngine] The server refused this memory\'s audience in a reply that had already settled every operation for it; the settlement stands:',
-          { clientId, reason }
-        );
-        continue;
-      }
-
       // `do_not_resend` and nothing else means give up. Anything unrecognised falls to
       // `waiting`, which mirrors the server's own rule -- both default arms of
       // `AudienceRefusalExtensions` are the retryable one -- and fails closed the way that
@@ -899,6 +892,35 @@ class SyncEngineClass {
       // where abandoning it would lose a share that would have gone through.
       const refusedForGood = reason === UnresolvedAudienceReason.DO_NOT_RESEND;
       const shareState = refusedForGood ? ShareState.REFUSED : ShareState.WAITING;
+
+      if (operations.length === 0) {
+        if (matching.length === 0) {
+          console.warn(
+            '[SyncEngine] The server could not apply an audience for a change that matches no queued operation:',
+            { clientId, reason }
+          );
+          continue;
+        }
+
+        // Every operation for this memory was settled as COMPLETED by the same reply, which
+        // today's Hub never sends -- its refusal arm leaves the item out of `created`,
+        // `updated` and `deleted` -- so this is the shape of a server that has changed.
+        // Settling it means recording the refusal on the memory and NOT touching the queue:
+        // skipping both would leave a memory the server says it saved without the chosen
+        // audience showing a card that reads as shared with exactly that audience, which is
+        // the wrong way round for a guard (CLAUDE.md *Sharing fails closed* -- too many and
+        // it reaches someone it should not). The queue is what must be left alone: returning
+        // a finished create to `pending` would write the memory a second time, and removing
+        // the operation would undo a settlement that already stands.
+        console.warn(
+          '[SyncEngine] The server refused this memory\'s audience in a reply that had already settled every operation for it; the refusal is recorded on the memory and the queue settlement stands:',
+          { clientId, reason, shareState }
+        );
+        for (const localId of new Set(matching.map((op) => op.entityId || clientId))) {
+          await JournalRepository.setShareState(localId, shareState);
+        }
+        continue;
+      }
 
       // The entity each matched operation is about. `clientId` IS the local id -- it is sent
       // as the entry's `local_id` -- so this is one memory in every realistic case; derived
