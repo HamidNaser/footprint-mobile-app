@@ -1,5 +1,22 @@
 /**
- * 013 T029 -- `CaptureScreen`, new mode. The heart of User Story 1.
+ * 013 T029 / T039 -- `CaptureScreen`, new mode. The heart of User Stories 1 and 2.
+ *
+ * T039 adds User Story 2 -- **nothing captured is ever lost, and nothing unsaved ever
+ * leaves the phone** -- in the four describes at the foot of this file:
+ *
+ *   - the unsaved memory is written whenever it may be taken away: `AppState` leaving the
+ *     foreground, the keyboard leaving a note, and Close (FR-012);
+ *   - tapping + reopens it with every piece, of every kind, text and all (FR-013);
+ *   - a save that failed stays open, says the memory is still here, and can be **tried
+ *     again** -- once, for a save that genuinely did not happen (FR-017, quickstart M5);
+ *   - nothing is written as a memory or queued for sync before Save (FR-014, SC-004);
+ *   - and a draft left behind by a save whose tidying up failed never comes back as a
+ *     phantom unsaved memory.
+ *
+ * What jest cannot prove, and is not claimed anywhere below: the phone actually locking, a
+ * real incoming call, and the operating system force-closing the app. Those are the owner's
+ * device checks Q-D1, Q-D2, Q-D3 and Q-D6. What is driven here is the signal the screen sees
+ * from each of them -- an `AppState` change -- and the state it has to come back to.
  *
  * This is the screen the whole feature is for: one memory, any number of notes, voice clips,
  * photos and videos, in any order, each switch one tap away, and nothing lost on the way
@@ -70,7 +87,7 @@
 
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Alert, Linking, TextInput } from 'react-native';
+import { Alert, AppState, Linking, TextInput } from 'react-native';
 
 // ============================================================
 // Mocks
@@ -103,6 +120,35 @@ jest.mock('../../../services/CaptureDraftStore', () => {
   };
 
   return { __esModule: true, ...store, default: store };
+});
+
+/**
+ * FR-014's negative half, kept honest by a mock rather than by a promise.
+ *
+ * Nothing in the capture path imports the sync machinery today -- `CaptureScreen`,
+ * `CaptureDraftStore`, `PieceList`, `CaptureDock` and `journalBlocks` between them name
+ * `SyncQueue` nowhere, and nothing but the schema and the store itself touches the
+ * `capture_drafts` table, while the push reads `sync_queue` and `journal_entries` (both
+ * searched; see the task report). This mock is what turns that from a fact about today into
+ * a test: an import added later that enqueues a draft fails here instead of shipping.
+ */
+jest.mock('../../../sync/SyncQueue', () => {
+  const queue = {
+    enqueue: jest.fn(async () => {}),
+    enqueueBatch: jest.fn(async () => {}),
+    getPendingOperations: jest.fn(async () => []),
+    hasPendingOperations: jest.fn(async () => false),
+  };
+  return {
+    __esModule: true,
+    SyncQueue: queue,
+    default: queue,
+    SyncOperationType: {
+      CREATE_ENTRY: 'CREATE_ENTRY',
+      UPDATE_ENTRY: 'UPDATE_ENTRY',
+    },
+    OperationStatus: { PENDING: 'pending' },
+  };
 });
 
 jest.mock('../../../services/CaptureLocation', () => {
@@ -346,6 +392,7 @@ jest.mock('../../../components/capture/SaveAudienceSheet', () => {
 });
 
 import CaptureDraftStore from '../../../services/CaptureDraftStore';
+import { SyncQueue } from '../../../sync/SyncQueue';
 import CaptureLocation from '../../../services/CaptureLocation';
 import * as captureLocationModule from '../../../services/CaptureLocation';
 import * as journalHook from '../../../hooks/useJournal';
@@ -410,6 +457,17 @@ const tap = async (tree, testID) => {
   });
 };
 
+/** The keyboard leaving a note, which is one of FR-012's write triggers (research R7). */
+const blur = async (tree, testID) => {
+  const input = tree.root.findAll(
+    (n) => n.props?.testID === testID && typeof n.props?.onBlur === 'function',
+  )[0];
+  expect(input).toBeDefined();
+  await act(async () => {
+    input.props.onBlur();
+  });
+};
+
 const type = async (tree, testID, value) => {
   const input = tree.root.findAll(
     (n) => n.props?.testID === testID && typeof n.props?.onChangeText === 'function',
@@ -457,6 +515,24 @@ const rows = (tree) =>
       ].join(' | '),
     );
 
+/**
+ * Every `AppState` listener the screen registered, and the subscription it was handed back.
+ * The phone locking, a call arriving and the app switcher are all this one event, and it is
+ * the only one of FR-012's triggers jest can drive at all (the lock screen itself is the
+ * owner's device check Q-D1).
+ */
+let appStateListeners = [];
+let appStateSubscriptions = [];
+
+/** The app changes state, the way `AppState` delivers it. */
+const appStateGoes = async (next) => {
+  const listeners = appStateListeners.filter(({ type: event }) => event === 'change');
+  expect(listeners.length).toBeGreaterThan(0);
+  await act(async () => {
+    listeners.forEach(({ listener }) => listener(next));
+  });
+};
+
 /** A promise the test resolves or rejects when it chooses. */
 const deferred = () => {
   let settle;
@@ -484,6 +560,15 @@ beforeEach(() => {
 
   navigation = { goBack: jest.fn(), navigate: jest.fn(), setOptions: jest.fn() };
   taps = 0;
+
+  appStateListeners = [];
+  appStateSubscriptions = [];
+  jest.spyOn(AppState, 'addEventListener').mockImplementation((event, listener) => {
+    const subscription = { remove: jest.fn() };
+    appStateListeners.push({ type: event, listener });
+    appStateSubscriptions.push(subscription);
+    return subscription;
+  });
 
   // Real focus on a mocked native input does nothing useful, and this is how the test can
   // see *which* input the screen asked for (`spy.mock.instances[i].props.testID`).
@@ -1566,5 +1651,572 @@ describe('CaptureScreen: the Sam scenario costs the taps SC-001 budgets', () => 
     // The screen never sent anyone anywhere: one screen, three ways to capture.
     expect(navigation.navigate).not.toHaveBeenCalled();
     expect(navigation.goBack).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// US2 (T039) -- nothing captured is ever lost, and nothing unsaved ever leaves
+// ============================================================
+
+/** A draft as the store hands one back, for the restore cases. */
+const storedDraft = (pieces) => ({
+  id: 'new',
+  entryLocalId: null,
+  createdAt: '2026-11-08T08:00:00.000Z',
+  updatedAt: '2026-11-08T08:44:00.000Z',
+  pieces,
+});
+
+/**
+ * One of each kind, with the media already pointing where the store put it -- a restored
+ * draft's media lives under `documentDirectory/capture-drafts/new/`, never the cache.
+ * The instants are built from local time so the expected `HH:mm` holds in any zone.
+ */
+const FOUR_RESTORED_PIECES = [
+  {
+    localId: 'p1',
+    kind: 'text',
+    content: 'Rain on the bus window',
+    capturedAt: new Date(2026, 10, 8, 8, 41).toISOString(),
+    location: ARCADE,
+  },
+  {
+    localId: 'p2',
+    kind: 'audio',
+    uri: 'file:///documents/capture-drafts/new/p2.m4a',
+    duration: 31,
+    waveform: [0.2, 0.7],
+    capturedAt: new Date(2026, 10, 8, 8, 42).toISOString(),
+  },
+  {
+    localId: 'p3',
+    kind: 'photo',
+    uri: 'file:///documents/capture-drafts/new/p3.jpg',
+    width: 4032,
+    height: 3024,
+    capturedAt: new Date(2026, 10, 8, 8, 43).toISOString(),
+  },
+  {
+    localId: 'p4',
+    kind: 'video',
+    uri: 'file:///documents/capture-drafts/new/p4.mov',
+    duration: 12,
+    capturedAt: new Date(2026, 10, 8, 8, 44).toISOString(),
+  },
+];
+
+describe('CaptureScreen: the unsaved memory is written whenever it may be taken away (FR-012)', () => {
+  /**
+   * FR-012's third trigger: "immediately when the app leaves the foreground". It is the one
+   * that covers the phone locking, a call arriving and the app being killed afterwards --
+   * from this screen's side all three are the same `AppState` change, and after it the app
+   * may never run again.
+   *
+   * `flush` rather than a write of its own: the store's `flush` cancels the pending debounce
+   * and writes whatever the draft in hand is, which is exactly "write it now".
+   */
+  it('flushes the draft when the app goes to the background', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    CaptureDraftStore.flush.mockClear();
+
+    await appStateGoes('background');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('new');
+  });
+
+  // iOS delivers `inactive` for an incoming call and for the app switcher, and a call is
+  // US2-2's own scenario. R7 names both states for exactly this reason.
+  it('flushes the draft when the app goes inactive (a call, the app switcher)', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    CaptureDraftStore.flush.mockClear();
+
+    await appStateGoes('inactive');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('new');
+  });
+
+  // Not "on every AppState change". Coming *back* has nothing to save from, and a flush
+  // there would be a database write for every unlock -- and would make the three cases above
+  // pass on a listener that could not tell leaving from arriving.
+  it('does not flush on the way back to the foreground', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    CaptureDraftStore.flush.mockClear();
+
+    await appStateGoes('active');
+
+    expect(CaptureDraftStore.flush).not.toHaveBeenCalled();
+  });
+
+  it('stops listening when the screen goes', async () => {
+    const tree = await render();
+    expect(appStateSubscriptions).toHaveLength(1);
+
+    await act(async () => {
+      tree.unmount();
+    });
+    trees = trees.filter((t) => t !== tree);
+
+    expect(appStateSubscriptions[0].remove).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * FR-012's second trigger is the debounce, which is the store's. Blur is the companion the
+   * store asks its caller for: the keyboard leaving a note is the moment the person has
+   * stopped typing, and `PieceList` has carried an unwired `onBlurText` since T030 waiting
+   * for this.
+   */
+  it('flushes the draft when the keyboard leaves a note', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    CaptureDraftStore.flush.mockClear();
+
+    await blur(tree, 'piece-note-input-0');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('new');
+  });
+
+  // FR-012 names the screen being closed. The debounced write would land by itself, but only
+  // because the store is a module that outlives this screen -- which is not a thing the
+  // screen should be relying on for the half second after the last keystroke.
+  it('flushes the draft on the way out when Close is tapped', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    CaptureDraftStore.flush.mockClear();
+
+    await tap(tree, 'capture-close-button');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('new');
+    // And it is still only leaving: Close never discards (UI contract).
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CaptureScreen: tapping + reopens the unsaved memory with every piece (FR-013)', () => {
+  // US2-3, and the independent test for this story: a note, a clip and the rest are all
+  // back. One of each kind, because a restore that handled only the kinds with media -- or
+  // only text -- would be the same loss with a narrower blast radius.
+  it('restores every piece of a stored draft, in capture order, text and all', async () => {
+    CaptureDraftStore.load.mockImplementation(async () => storedDraft(FOUR_RESTORED_PIECES));
+
+    const tree = await render();
+
+    expect(CaptureDraftStore.load).toHaveBeenCalledWith('new');
+    expect(rows(tree)).toEqual([
+      'Note | 08:41 | Old arcade, Bridge St',
+      'Voice clip | 08:42 | No place',
+      'Photo | 08:43 | No place',
+      'Video | 08:44 | No place',
+    ]);
+    // The note's words, not just a note-shaped row.
+    expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+    expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 4 pieces');
+    // And it is a memory that can be saved, not a read-only ghost.
+    expect(pressable(tree, 'capture-save-button').props.disabled).toBe(false);
+  });
+
+  // The store's rule 2: `updateText` throws on a cold cache, by design, because a keystroke
+  // handler cannot wait for a read. The mount's `load` is what warms it -- so typing into a
+  // *restored* note, with no capture in between, is the case that proves the slot is in the
+  // store's hand before any keystroke can reach it.
+  it('keeps a keystroke typed straight into a restored note', async () => {
+    CaptureDraftStore.load.mockImplementation(async () => storedDraft(FOUR_RESTORED_PIECES));
+
+    const tree = await render();
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window, still');
+
+    expect(CaptureDraftStore.updateText).toHaveBeenCalledWith(
+      'new',
+      'p1',
+      'Rain on the bus window, still',
+    );
+    expect(has(tree, 'capture-capture-error')).toBe(false);
+  });
+
+  it('shows no unsaved memory, and no status line, when there is none', async () => {
+    const tree = await render();
+
+    expect(rows(tree)).toHaveLength(0);
+    expect(has(tree, 'capture-status-line')).toBe(false);
+    expect(has(tree, 'capture-empty-hint')).toBe(true);
+  });
+});
+
+describe('CaptureScreen: discarding is the only thing that throws a memory away (FR-015)', () => {
+  // The confirmed path is pinned in the header describe above ("offers Discard behind the
+  // overflow, and asks before throwing anything away"). This is the branch it does not
+  // cover: the person thought better of it, and nothing at all should have happened.
+  it('keeps everything when the confirmation is declined', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+
+    await tap(tree, 'capture-overflow-button');
+    await tap(tree, 'capture-discard-button');
+
+    const [, , buttons] = Alert.alert.mock.calls[0];
+    const keep = buttons.find((button) => button.style === 'cancel');
+    expect(keep).toBeDefined();
+    expect(keep.text).toMatch(/keep/i);
+    await act(async () => {
+      keep.onPress?.();
+    });
+
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+  });
+});
+
+describe('CaptureScreen: a save that failed can be tried again (FR-017, M5)', () => {
+  /** Captures a note with words in it, chooses Family, and fails the save. */
+  const failTheSave = async () => {
+    const save = deferred();
+    createEntry.mockImplementation(() => save.promise);
+
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    await act(async () => {
+      save.fail(new Error('disk full'));
+    });
+    return tree;
+  };
+
+  it('stays open with every piece, says the memory is still here, and offers Try again', async () => {
+    const tree = await failTheSave();
+
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+    expect(textAt(tree, 'capture-save-error')).toMatch(/couldn.t save/i);
+    expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
+    expect(pressable(tree, 'capture-save-retry-button')).toBeDefined();
+    // The draft is the only copy of this memory there is, and it is untouched.
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+  });
+
+  // The audience was already chosen, and asking for it again would be asking the same
+  // question twice about the same memory -- and would let a dismissal strand a memory the
+  // person had already said who could see.
+  it('retries with the audience already chosen, without asking again', async () => {
+    const tree = await failTheSave();
+    createEntry.mockImplementation(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+
+    await tap(tree, 'capture-save-retry-button');
+
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(createEntry).toHaveBeenCalledTimes(2);
+    expect(createEntry.mock.calls[1][0].visibility).toBe('family');
+    // Same memory, same pieces -- a retry, not a different save.
+    expect(createEntry.mock.calls[1][0].contentBlocks).toEqual(
+      createEntry.mock.calls[0][0].contentBlocks,
+    );
+    // And now that it worked, the draft goes and the person leaves.
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledWith('new');
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'capture-save-error')).toBe(false);
+  });
+
+  it('can be tried again more than once, and the banner comes back each time', async () => {
+    const tree = await failTheSave();
+
+    createEntry.mockImplementation(async () => {
+      throw new Error('still full');
+    });
+    await tap(tree, 'capture-save-retry-button');
+    expect(createEntry).toHaveBeenCalledTimes(2);
+    expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
+
+    createEntry.mockImplementation(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+    await tap(tree, 'capture-save-retry-button');
+    expect(createEntry).toHaveBeenCalledTimes(3);
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The one way Try again could be worse than no Try again: writing the memory twice.
+   *
+   * Two taps in one tick is the realistic shape. The banner unmounts when the retry starts,
+   * so a second tap cannot be *aimed* -- but the handler the first tap is bound to is still
+   * live, and `isSaving` is state that no render has carried yet.
+   */
+  it('writes one memory, not two, when Try again is tapped twice in a tick', async () => {
+    const tree = await failTheSave();
+
+    const save = deferred();
+    createEntry.mockImplementation(() => save.promise);
+    const retry = pressable(tree, 'capture-save-retry-button').props.onPress;
+
+    await act(async () => {
+      retry();
+      retry();
+    });
+
+    expect(createEntry).toHaveBeenCalledTimes(2); // the first attempt, and one retry
+
+    await act(async () => {
+      save.settle({ localId: 'entry-1', date: '2026-11-08' });
+    });
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Try again must retry only a save that genuinely did not happen. A `clearAfterSave` that
+   * failed happens *after* the memory is on the phone, so offering Try again there would
+   * write a second copy of a memory that saved perfectly well -- which is the defect the
+   * save path was deliberately built to avoid.
+   */
+  it('is not offered when the save worked and only the tidying up did not', async () => {
+    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
+
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'capture-save-error')).toBe(false);
+    expect(has(tree, 'capture-save-retry-button')).toBe(false);
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/saved/i);
+  });
+
+  it('is not offered when only closing the screen failed', async () => {
+    navigation.goBack.mockImplementation(() => {
+      throw new Error('no route to go back to');
+    });
+
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(has(tree, 'capture-save-retry-button')).toBe(false);
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/saved/i);
+  });
+
+  /**
+   * A retry is the same write as the first attempt, so it has to wait for the same things.
+   * This is the invisible one: a photograph taken while the banner was on screen can still
+   * be inside `withLocation`'s four-second wait, and a retry that built its blocks now would
+   * save the memory without it and then clear the draft the photo was about to land in.
+   */
+  it('waits for a capture still on its way into the draft, as Save does', async () => {
+    const tree = await failTheSave();
+
+    // A cold GPS, the same shape the Save guard's own case uses.
+    const fix = deferred();
+    CaptureLocation.withLocation.mockImplementationOnce(async (capture) => {
+      await fix.promise;
+      return capture;
+    });
+    createEntry.mockClear();
+
+    await tap(tree, 'capture-camera-button');
+    await tap(tree, 'camera-photo-button'); // in flight: inside withLocation
+    await tap(tree, 'camera-done-button');
+
+    await tap(tree, 'capture-save-retry-button');
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/moment|still keeping/i);
+
+    // Once the photo has landed, the retry goes through -- with the photo in it.
+    await act(async () => {
+      fix.settle(null);
+    });
+    createEntry.mockImplementation(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+    await tap(tree, 'capture-save-retry-button');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(createEntry.mock.calls[0][0].contentBlocks.map((block) => block.type)).toEqual([
+      'text',
+      'photos',
+    ]);
+  });
+
+  it('will not retry while a recording is still running', async () => {
+    const tree = await failTheSave();
+    createEntry.mockClear();
+
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'capture-save-retry-button');
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/tap stop/i);
+  });
+});
+
+describe('CaptureScreen: an unsaved memory never leaves the phone (FR-014, SC-004)', () => {
+  /**
+   * SC-004 is **0** unsaved memories ever becoming visible to anyone else or appearing in
+   * the Journal without the person choosing Save. FR-014 is the mechanism: an unsaved memory
+   * is not uploaded, not shared, and not saved as a memory by itself, *at any time*.
+   *
+   * A whole session, including every moment that writes the draft -- the pieces, the typing,
+   * the backgrounding, the blur, closing, and reopening it afterwards. None of it may write a
+   * journal entry or queue anything for sync.
+   */
+  it('captures a whole memory, and nothing is written as a memory or queued for sync', async () => {
+    captureLocationModule.__setPlace(ARCADE);
+    const tree = await render();
+
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+    await tap(tree, 'capture-camera-button');
+    await tap(tree, 'camera-photo-button');
+    await tap(tree, 'camera-done-button');
+    await blur(tree, 'piece-note-input-0');
+    await appStateGoes('background');
+    await appStateGoes('active');
+    await tap(tree, 'capture-close-button');
+
+    // Three pieces are on the phone, and every one of them went into the draft slot.
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledTimes(3);
+    expect(CaptureDraftStore.addPiece.mock.calls.every(([slot]) => slot === 'new')).toBe(true);
+    expect(CaptureDraftStore.flush.mock.calls.every(([slot]) => slot === 'new')).toBe(true);
+
+    // And nothing has been saved as a memory or handed to the sync machinery.
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(journalHook.__updateEntry).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueue).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueueBatch).not.toHaveBeenCalled();
+  });
+
+  it('reopens an unsaved memory without making it one', async () => {
+    CaptureDraftStore.load.mockImplementation(async () => storedDraft(FOUR_RESTORED_PIECES));
+
+    const tree = await render();
+    expect(rows(tree)).toHaveLength(4);
+    await appStateGoes('background');
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(journalHook.__updateEntry).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueue).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueueBatch).not.toHaveBeenCalled();
+  });
+
+  it('writes the memory only once the person has chosen who can see it', async () => {
+    const tree = await render();
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+
+    // Save opens the question, and opening the question saves nothing.
+    await tap(tree, 'capture-save-button');
+    expect(has(tree, 'audience-sheet')).toBe(true);
+    expect(createEntry).not.toHaveBeenCalled();
+
+    await tap(tree, 'audience-option-private');
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(createEntry.mock.calls[0][0].visibility).toBe('private');
+  });
+});
+
+/**
+ * Deliberately the last describe in this file.
+ *
+ * It is the only one that leaves anything behind between mounts -- the screen has to remember
+ * across its own unmount that a slot's memory was saved and only the clearing failed, because
+ * that is precisely what the *next* mount needs to know. Both cases below put that memory
+ * back the way they found it (the first by letting the draft go, the second by capturing into
+ * the slot again), and being last means a case that somehow did not could not reach anything.
+ */
+describe('CaptureScreen: a draft left behind by a save that worked does not come back', () => {
+  /**
+   * The ghost. `clearAfterSave` runs after the memory is on the phone and can fail on its
+   * own account, and when it does the draft row outlives the memory it was a draft of. The
+   * next tap on + would restore it as an unsaved memory, offer Save, and write the memory a
+   * second time -- the person's afternoon in their Journal twice, which is exactly the defect
+   * the save path refuses to report a successful save as a failure in order to avoid.
+   */
+  it('lets it go the next time + is tapped, and offers no phantom unsaved memory', async () => {
+    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
+
+    const first = await render();
+    await tap(first, 'capture-type-button');
+    await type(first, 'piece-note-input-0', 'Rain on the bus window');
+    await tap(first, 'capture-save-button');
+    await tap(first, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(textAt(first, 'capture-saved-notice')).toMatch(/saved/i);
+    await tap(first, 'capture-close-button');
+
+    // The row really is still there, and the store would happily hand it back.
+    CaptureDraftStore.load.mockImplementation(async () =>
+      storedDraft([
+        {
+          localId: 'p1',
+          kind: 'text',
+          content: 'Rain on the bus window',
+          capturedAt: new Date(2026, 10, 8, 8, 41).toISOString(),
+        },
+      ]),
+    );
+    CaptureDraftStore.clearAfterSave.mockClear();
+
+    const second = await render();
+
+    // It is let go rather than restored, and nothing is offered as unsaved.
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledWith('new');
+    expect(rows(second)).toHaveLength(0);
+    expect(has(second, 'capture-status-line')).toBe(false);
+    expect(pressable(second, 'capture-save-button').props.disabled).toBe(true);
+  });
+
+  /**
+   * The other side of it, and the one that would lose a piece if it were wrong. The screen
+   * stays open after a save whose tidying up failed, so the person can go on capturing into
+   * that same slot -- and the moment they do, the slot is a real unsaved memory again and
+   * must never be let go unasked.
+   */
+  it('treats the slot as a real unsaved memory again once something new goes into it', async () => {
+    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
+
+    const first = await render();
+    await tap(first, 'capture-type-button');
+    await tap(first, 'capture-save-button');
+    await tap(first, 'audience-option-family');
+    expect(textAt(first, 'capture-saved-notice')).toMatch(/saved/i);
+
+    // The person carries on: one more clip, into the slot that was left behind.
+    await tap(first, 'voice-record-button');
+    await tap(first, 'voice-stop-button');
+    await tap(first, 'capture-close-button');
+
+    CaptureDraftStore.load.mockImplementation(async () =>
+      storedDraft([
+        {
+          localId: 'p9',
+          kind: 'audio',
+          uri: 'file:///documents/capture-drafts/new/p9.m4a',
+          duration: 31,
+          capturedAt: new Date(2026, 10, 8, 9, 10).toISOString(),
+        },
+      ]),
+    );
+    CaptureDraftStore.clearAfterSave.mockClear();
+
+    const second = await render();
+
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(rows(second)).toEqual(['Voice clip | 09:10 | No place']);
   });
 });
