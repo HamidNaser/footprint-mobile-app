@@ -203,10 +203,22 @@ class DatabaseServiceClass {
 
   /**
    * Update a journal entry
+   *
+   * `updated_at` is stamped with every call, because almost every call is a change the person
+   * made and that column is what says when they last made one. The one exception is
+   * bookkeeping about a push that has already happened -- `share_state` -- where stamping it
+   * is not merely redundant but can decide a conflict: `ConflictResolver._resolveLastWriteWins`
+   * compares this column against the server copy's `updatedAt`, so a write here on a memory
+   * still PENDING can tip an already-detected UPDATE_UPDATE toward the client and discard a
+   * newer server copy, including a narrower audience chosen on another device. Hence the
+   * opt-out, which defaults to today's behaviour so no existing caller changes.
+   *
    * @param {string} localId - Local ID of the entry
    * @param {object} updates - Fields to update
+   * @param {object} [options]
+   * @param {boolean} [options.touchUpdatedAt=true] - False to leave `updated_at` as it stands
    */
-  async updateEntry(localId, updates) {
+  async updateEntry(localId, updates, { touchUpdatedAt = true } = {}) {
     const db = await this.getDb();
     const now = Date.now();
 
@@ -264,8 +276,15 @@ class DatabaseServiceClass {
       values.push(updates.commentsCount);
     }
 
-    fields.push('updated_at = ?');
-    values.push(now);
+    if (touchUpdatedAt) {
+      fields.push('updated_at = ?');
+      values.push(now);
+    }
+
+    // Nothing recognised and no timestamp to stamp: there is no statement to run, and
+    // `SET  WHERE local_id = ?` is not valid SQL.
+    if (fields.length === 0) return;
+
     values.push(localId);
 
     await db.runAsync(

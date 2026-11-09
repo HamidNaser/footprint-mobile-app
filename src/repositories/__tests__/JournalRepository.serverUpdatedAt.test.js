@@ -84,6 +84,9 @@ jest.mock('../../sync/SyncQueue', () => ({
 const { __freshDatabase, __rawDb } = require('../../database');
 const { JournalRepository } = require('../JournalRepository');
 const { DatabaseService } = require('../../services/DatabaseService');
+// The other writer of `server_updated_at`: accepting the server's version of a conflicted
+// memory is a server copy arriving, exactly as a pull is.
+const { ConflictResolver, ConflictType } = require('../../sync/ConflictResolver');
 
 const SERVER_UPDATED_AT = '2026-11-08T17:42:09.123Z';
 
@@ -160,6 +163,61 @@ describe('server_updated_at, from the server copies that carry it', () => {
   });
 });
 
+describe('accepting the server copy of a conflicted memory (fix round 1)', () => {
+  /**
+   * `ConflictResolver._acceptServerVersion` is the third place a server copy lands locally,
+   * alongside the pull's `createFromServer` and `applyServerUpdate`. It applied the server's
+   * blocks and visibility and passed no `updatedAt`, so the row kept whatever
+   * `server_updated_at` it had from before the conflict -- which for a memory edited on
+   * another device is always EARLIER than the copy just accepted. FR-029's threshold then
+   * sits too early and drops genuine capture moments from the ordering. (It can never sit too
+   * late, so nothing is ever mis-shown; it is a lost fact, not a wrong one.)
+   */
+  const LATER = '2026-11-09T08:15:00.000Z';
+
+  /** A conflict of the shape `detectConflict` builds, server copy newer than the local edit. */
+  const conflictWithServerNewer = (entry, serverOverrides = {}) => ({
+    type: ConflictType.UPDATE_UPDATE,
+    localEntry: entry,
+    serverEntry: serverEntry({ updatedAt: LATER, ...serverOverrides }),
+    localModified: '2026-11-08T18:00:00.000Z',
+    serverModified: LATER,
+  });
+
+  it("stores the accepted copy's updatedAt as the new ordering reference", async () => {
+    const entry = await JournalRepository.createFromServer(serverEntry());
+    expect(storedRow(entry.localId).server_updated_at).toBe(SERVER_UPDATED_AT);
+
+    const resolution = await ConflictResolver.resolveConflict(conflictWithServerNewer(entry));
+
+    expect(resolution.action).toBe('accept_server');
+    expect(storedRow(entry.localId).server_updated_at).toBe(LATER);
+  });
+
+  it('leaves the stored reference alone when the accepted copy carries no updatedAt', async () => {
+    // A partial copy must not erase a threshold that is still valid, and must never replace
+    // it with this phone's clock.
+    const entry = await JournalRepository.createFromServer(serverEntry());
+
+    await ConflictResolver.resolveConflict(
+      conflictWithServerNewer(entry, { updatedAt: undefined }),
+      'server_wins'
+    );
+
+    expect(storedRow(entry.localId).server_updated_at).toBe(SERVER_UPDATED_AT);
+  });
+
+  it('keeps it as the exact string the server sent, not the local updated_at', async () => {
+    const entry = await JournalRepository.createFromServer(serverEntry());
+
+    await ConflictResolver.resolveConflict(conflictWithServerNewer(entry), 'server_wins');
+
+    const row = storedRow(entry.localId);
+    expect(row.server_updated_at).toBe(LATER);
+    expect(typeof row.updated_at).toBe('number');
+  });
+});
+
 describe('share_state, the only record of what the server said about the audience', () => {
   it('setShareState writes waiting and refused', async () => {
     const entry = await JournalRepository.createFromServer(serverEntry());
@@ -202,6 +260,40 @@ describe('share_state, the only record of what the server said about the audienc
     expect(after.visibility).toBe('friends');
     expect(after.visibility).toBe(before.visibility);
     expect(after.location_sharing).toBe(before.location_sharing);
+  });
+
+  it('does not bump the row\'s local updated_at, which can decide a conflict (fix round 1)', async () => {
+    // Recording what the server said is bookkeeping about a push that already happened, not
+    // an edit the person made, and `updated_at` is what `ConflictResolver._resolveLastWriteWins`
+    // compares against the server copy. Stamping it here cannot CREATE a conflict --
+    // `detectConflict` keys on `syncStatus` and `syncedAt` -- but on a still-pending memory it
+    // can DECIDE one already detected, tipping it toward the client and discarding a newer
+    // server copy, including a narrower audience chosen on another device. That is a
+    // fail-closed concern, not a cosmetic one.
+    const entry = await JournalRepository.createFromServer(serverEntry());
+    // Backdated explicitly: `createFromServer` and this call can land in the same millisecond,
+    // which would let the assertion pass without the behaviour.
+    __rawDb()
+      .prepare('UPDATE journal_entries SET updated_at = ? WHERE local_id = ?')
+      .run(1_000, entry.localId);
+
+    await JournalRepository.setShareState(entry.localId, 'waiting');
+
+    const row = storedRow(entry.localId);
+    expect(row.share_state).toBe('waiting');
+    expect(row.updated_at).toBe(1_000);
+  });
+
+  it('still bumps updated_at for an ordinary edit, which is a change the person made', async () => {
+    // The narrow write above must not have been bought by weakening the shared write path.
+    const entry = await JournalRepository.createFromServer(serverEntry());
+    __rawDb()
+      .prepare('UPDATE journal_entries SET updated_at = ? WHERE local_id = ?')
+      .run(1_000, entry.localId);
+
+    await DatabaseService.updateEntry(entry.localId, { visibility: 'friends' });
+
+    expect(storedRow(entry.localId).updated_at).toBeGreaterThan(1_000);
   });
 
   it('never queues anything to send, because there is nothing new to tell the server', async () => {

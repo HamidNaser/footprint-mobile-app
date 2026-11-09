@@ -461,6 +461,15 @@ class JournalRepositoryClass extends BaseRepository {
    * No push is enqueued either, for the same reason: there is nothing new to tell the server,
    * and re-sending a memory it has just refused for good is the loop research R15 closes.
    *
+   * ⚠ **And the row's local `updated_at` is left exactly as it stands.** This is bookkeeping
+   * about a push that already happened, not a change the person made. It could not CREATE a
+   * conflict -- `ConflictResolver.detectConflict` keys on `syncStatus` and `syncedAt` -- but it
+   * could DECIDE one: the default strategy is last-write-wins, and
+   * `_resolveLastWriteWins` compares this column against the server copy's `updatedAt`, so
+   * stamping it on a still-PENDING memory can tip an already-detected UPDATE_UPDATE toward the
+   * client and discard a newer server copy -- including a narrower audience chosen on another
+   * device. That is a fail-closed concern, not a cosmetic one, so it is not stamped.
+   *
    * @param {string} localId - Local ID
    * @param {string|null} state - 'waiting', 'refused', or null to clear
    */
@@ -469,7 +478,11 @@ class JournalRepositoryClass extends BaseRepository {
       throw new Error('JournalRepository.setShareState requires a localId');
     }
 
-    await this.dbService.updateEntry(localId, { shareState: state ?? null });
+    await this.dbService.updateEntry(
+      localId,
+      { shareState: state ?? null },
+      { touchUpdatedAt: false }
+    );
 
     this.log('setShareState', { localId, state: state ?? null });
   }

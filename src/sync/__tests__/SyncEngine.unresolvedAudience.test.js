@@ -2,10 +2,12 @@
  * A memory whose audience the server could not apply must stop being pretended about -- and
  * must never be shared with anybody else instead.
  *
- * The Hub saves such a memory's content and tells the phone it could not work out who may see
- * it: on the batch route as `unresolvedAudience: [{ clientId, reason }]`, and on the
- * single-operation route as a problem response whose title begins "The audience for this
- * entry". `reason` is one of exactly two tokens -- `source_unavailable`, send it again later,
+ * The Hub saves NOTHING for such a memory -- both refusal arms report it and stop before any
+ * persistence, which is why the problem title says "nothing was saved" -- and tells the phone
+ * it could not work out who may see it: on the batch route as
+ * `unresolvedAudience: [{ clientId, reason }]`, and on the single-operation route as a problem
+ * response whose title begins "The audience for this entry" and whose body carries the same
+ * token. `reason` is one of exactly two tokens -- `source_unavailable`, send it again later,
  * and `do_not_resend`, never. The phone read neither, so the operation sat pending and was
  * re-sent forever with nothing shown anywhere: the silent sharing failure CLAUDE.md's
  * *Sharing fails closed* rule exists to forbid (research R15, FR-011, SC-010).
@@ -19,7 +21,9 @@
  *   2. When one item carries BOTH signals -- a conflict "Entry not found" and an
  *      `unresolvedAudience` `do_not_resend`, which the Hub sends together on purpose for an
  *      update to an entry that is gone -- the conflict wins: today's handling settles it and
- *      `share_state` stays unset (round-3 H2, the owner's own choice).
+ *      `share_state` stays unset (round-3 H2, the owner's own choice). It wins for the whole
+ *      MEMORY, however many operations for it are queued, which is what two offline edits to
+ *      one deleted memory turn on.
  *   3. A `waiting` share never spends a retry and never counts as failed: `returnToPending`
  *      leaves `retry_count` alone, and `markFailed` is never called on the single-operation
  *      audience path (round-3 H1).
@@ -194,22 +198,27 @@ const audienceColumnsOf = (localId) => {
   return { visibility: row.visibility, location_sharing: row.location_sharing };
 };
 
-/** A problem response of the shape AudienceRefusalExtensions.AudienceCouldNotBeDetermined builds. */
-function audienceProblem(status) {
-  const error = new Error(
+/**
+ * A problem response of the shape AudienceRefusalExtensions.AudienceCouldNotBeDetermined
+ * builds. The Hub ships the machine-readable token in `details.Extensions["reason"]`, so it is
+ * part of every one of these; `{ reason: null }` drops it, for the body-without-a-token case.
+ */
+function audienceProblem(status, { reason, title } = {}) {
+  const defaultTitle =
     status === 422
       ? 'The audience for this entry can never be determined, so nothing was saved and sending it again will not help.'
-      : 'The audience for this entry could not be determined, so nothing was saved.'
-  );
+      : 'The audience for this entry could not be determined, so nothing was saved.';
+  const problemTitle = title === undefined ? defaultTitle : title;
+  const problemReason =
+    reason === undefined ? (status === 422 ? 'do_not_resend' : 'source_unavailable') : reason;
+
+  const error = new Error(problemTitle);
   error.status = status;
   error.data = {
     status,
-    title:
-      status === 422
-        ? 'The audience for this entry can never be determined, so nothing was saved and sending it again will not help.'
-        : 'The audience for this entry could not be determined, so nothing was saved.',
+    title: problemTitle,
     detail: 'The custom group this entry is shared with could not be read.',
-    reason: status === 422 ? 'do_not_resend' : 'source_unavailable',
+    ...(problemReason ? { reason: problemReason } : {}),
   };
   return error;
 }
@@ -602,6 +611,185 @@ describe('one item carrying both signals at once (round-3 H2)', () => {
   });
 });
 
+describe('two edits to a memory deleted elsewhere, both signals for each (fix round 1)', () => {
+  /**
+   * The case the per-operation exclusion could not see.
+   *
+   * `SyncQueue.enqueue` does not deduplicate, so two offline edits to one memory are two
+   * `UPDATE_ENTRY` rows carrying the same `serverId`. If that memory has meanwhile been
+   * deleted on another device the Hub answers per update: two conflicts and two
+   * `unresolvedAudience` `do_not_resend` items. `_findRefusedOperation` matches by
+   * `serverId` with `.find`, so BOTH conflicts resolve to the first operation -- and an
+   * exclusion keyed on the operation therefore held only that one. The second operation
+   * was then settled by the audience path, which wrote `share_state` for a memory that
+   * already had a conflict row: two records of one fact, in exactly the case round-2 D1 and
+   * round-3 H2 settled as "the conflict wins and `share_state` stays unset".
+   *
+   * The exclusion is keyed on the MEMORY, so the whole reply's conflict is what settles it.
+   */
+  const bothSignalsTwice = () => ({
+    ...acceptedEverything(),
+    conflicts: [
+      { clientId: 'local-15', serverId: 'srv-15', reason: 'Entry not found' },
+      { clientId: 'local-15', serverId: 'srv-15', reason: 'Entry not found' },
+    ],
+    unresolvedAudience: [
+      { clientId: 'local-15', reason: 'do_not_resend' },
+      { clientId: 'local-15', reason: 'do_not_resend' },
+    ],
+  });
+
+  async function queueTwoEdits() {
+    await seedEntry('local-15', { serverId: 'srv-15' });
+    const first = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-15',
+      serverId: 'srv-15',
+      data: { local_id: 'local-15', content: 'first edit' },
+    });
+    const second = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-15',
+      serverId: 'srv-15',
+      data: { local_id: 'local-15', content: 'second edit' },
+    });
+    return { first, second };
+  }
+
+  it('leaves share_state unset, so the conflict is still the only record', async () => {
+    await queueTwoEdits();
+    mockServer.batchSync.mockImplementation(async () => bothSignalsTwice());
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(storedRow('local-15').share_state).toBeNull();
+    expect((await DatabaseService.getEntryByLocalId('local-15')).shareState).toBeNull();
+  });
+
+  it("keeps today's words for it, and says them once", async () => {
+    await queueTwoEdits();
+    mockServer.batchSync.mockImplementation(async () => bothSignalsTwice());
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(refusedMemoriesFrom(await SyncQueue.getConflictedOperations())).toEqual([
+      expect.objectContaining({
+        why: 'This memory was deleted on another device, so your change could not be saved.',
+      }),
+    ]);
+  });
+
+  it('does not let the audience path delete the operation the conflict has yet to settle', async () => {
+    // Both conflict items match the first operation, so only it is settled this time round.
+    // The second one belongs to the conflict handling as well -- the next sync asks again and
+    // gets the same answer -- and the audience path must not quietly remove it in the
+    // meantime, which is what wrote a `share_state` for a deleted memory.
+    const { first, second } = await queueTwoEdits();
+    mockServer.batchSync.mockImplementation(async () => bothSignalsTwice());
+
+    await SyncEngine._pushLocalChanges();
+
+    expect((await SyncQueue.getOperation(first)).status).toBe(OperationStatus.CONFLICT);
+    expect(markConflict).not.toHaveBeenCalledWith(second, expect.anything());
+
+    const left = await SyncQueue.getOperation(second);
+    expect(left).not.toBeNull();
+    expect(left.status).toBe(OperationStatus.PENDING);
+  });
+
+  it('leaves who may see the memory exactly as the person chose it', async () => {
+    await seedEntry('local-15', { serverId: 'srv-15', visibility: 'friends' });
+    const before = audienceColumnsOf('local-15');
+    await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-15',
+      serverId: 'srv-15',
+      data: { local_id: 'local-15', content: 'first edit' },
+    });
+    await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-15',
+      serverId: 'srv-15',
+      data: { local_id: 'local-15', content: 'second edit' },
+    });
+    mockServer.batchSync.mockImplementation(async () => bothSignalsTwice());
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(audienceColumnsOf('local-15')).toEqual(before);
+    expect(audienceColumnsOf('local-15').visibility).toBe('friends');
+  });
+});
+
+describe('an operation the same batch reply both accepted and refused (fix round 1)', () => {
+  /**
+   * Insurance, not a live defect: today's Hub deliberately leaves a refused item out of
+   * `created`/`updated`/`deleted`, so this reply cannot arrive from it. But the phone settles
+   * those three lists BEFORE the audience items, and the `waiting` arm calls `returnToPending`
+   * unconditionally -- so an item in both lists would put a COMPLETED create back in the
+   * queue and the next batch would write the memory a second time. A duplicated memory is a
+   * bad enough outcome to be worth a guard.
+   */
+  it('is never returned to pending, so the memory cannot be written twice', async () => {
+    await seedEntry('local-16');
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.CREATE_ENTRY,
+      entityId: 'local-16',
+      data: { local_id: 'local-16' },
+    });
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      created: [
+        { clientId: 'local-16', serverId: 'srv-16', serverTimestamp: '2026-11-09T10:00:00.000Z' },
+      ],
+      unresolvedAudience: [{ clientId: 'local-16', reason: 'source_unavailable' }],
+    }));
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    expect(errorLog).not.toHaveBeenCalled();
+    expect(result.succeeded).toBe(1);
+
+    const operation = await SyncQueue.getOperation(operationId);
+    expect(operation.status).toBe(OperationStatus.COMPLETED);
+
+    const entry = await DatabaseService.getEntryByLocalId('local-16');
+    expect(entry.serverId).toBe('srv-16');
+
+    // The consequence, stated as a person would meet it: nothing is sent again, so there is
+    // no second copy of the memory on the server.
+    mockServer.batchSync.mockClear();
+    await SyncEngine._pushLocalChanges();
+    expect(mockServer.batchSync).not.toHaveBeenCalled();
+  });
+
+  it('reports the contradiction rather than passing over it in silence', async () => {
+    await seedEntry('local-16');
+    await SyncQueue.enqueue({
+      type: SyncOperationType.CREATE_ENTRY,
+      entityId: 'local-16',
+      data: { local_id: 'local-16' },
+    });
+
+    mockServer.batchSync.mockImplementation(async () => ({
+      ...acceptedEverything(),
+      created: [
+        { clientId: 'local-16', serverId: 'srv-16', serverTimestamp: '2026-11-09T10:00:00.000Z' },
+      ],
+      unresolvedAudience: [{ clientId: 'local-16', reason: 'source_unavailable' }],
+    }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('already settled'),
+      expect.objectContaining({ clientId: 'local-16' })
+    );
+  });
+});
+
 describe('two queued updates for the same memory, both refused (round-4 U2)', () => {
   it('removes both of them in one sync', async () => {
     // The Hub answers per update, so two queued edits to one entry come back as two items
@@ -786,6 +974,115 @@ describe('the single-operation route, when the batch could not be reached (round
 
     expect(markFailed).toHaveBeenCalledWith(operationId, expect.any(String));
     expect((await DatabaseService.getEntryByLocalId('local-9')).shareState).toBeNull();
+  });
+});
+
+describe('an audience refusal under a status this phone does not know (fix round 1)', () => {
+  /**
+   * Today only 422 and 503 carry this title, so branching on the status alone is right for
+   * today's server -- and a third status with the same title would have fallen through to
+   * `markFailed` and been abandoned in silence after three retries, which is the very defect
+   * research R15 exists to remove. The Hub already ships the machine-readable token in the
+   * problem body (`details.Extensions["reason"]`), so it is honoured as the fallback.
+   *
+   * Each of these uses the "could not be determined" wording with the OPPOSITE token, so what
+   * is being proved is that the token decides and not the words.
+   */
+  function refuseSingleOperationWith(error) {
+    mockServer.batchSync.mockImplementation(async () => {
+      throw batchUnreachable();
+    });
+    mockServer.updateEntry.mockImplementation(async () => {
+      throw error;
+    });
+  }
+
+  it('takes do_not_resend as refused, and takes the operation out of the queue', async () => {
+    await seedEntry('local-17', { serverId: 'srv-17' });
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-17',
+      serverId: 'srv-17',
+      data: { local_id: 'local-17' },
+    });
+
+    refuseSingleOperationWith(audienceProblem(409, { reason: 'do_not_resend' }));
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    expect((await DatabaseService.getEntryByLocalId('local-17')).shareState).toBe('refused');
+    expect(await SyncQueue.getOperation(operationId)).toBeNull();
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(markConflict).not.toHaveBeenCalled();
+    expect(result.failed).toBe(0);
+    expect(audienceColumnsOf('local-17').visibility).toBe('family');
+  });
+
+  it('takes source_unavailable as waiting, spending no retry', async () => {
+    await seedEntry('local-18', { serverId: 'srv-18' });
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-18',
+      serverId: 'srv-18',
+      data: { local_id: 'local-18' },
+    });
+
+    refuseSingleOperationWith(
+      audienceProblem(409, {
+        reason: 'source_unavailable',
+        title:
+          'The audience for this entry can never be determined, so nothing was saved and sending it again will not help.',
+      })
+    );
+
+    await SyncEngine._pushLocalChanges();
+
+    expect((await DatabaseService.getEntryByLocalId('local-18')).shareState).toBe('waiting');
+    const operation = await SyncQueue.getOperation(operationId);
+    expect(operation.status).toBe(OperationStatus.PENDING);
+    expect(operation.retryCount).toBe(0);
+    expect(markFailed).not.toHaveBeenCalled();
+  });
+
+  it('takes an unrecognised token as waiting, so no share is abandoned on a token we misread', async () => {
+    await seedEntry('local-19', { serverId: 'srv-19' });
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-19',
+      serverId: 'srv-19',
+      data: { local_id: 'local-19' },
+    });
+
+    refuseSingleOperationWith(audienceProblem(409, { reason: 'some_token_added_later' }));
+
+    await SyncEngine._pushLocalChanges();
+
+    expect((await DatabaseService.getEntryByLocalId('local-19')).shareState).toBe('waiting');
+    expect((await SyncQueue.getOperation(operationId)).status).toBe(OperationStatus.PENDING);
+    expect(markFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps today's handling when neither the status nor a token classifies it", async () => {
+    // The title matches but there is nothing to say which refusal it is. Nothing is claimed
+    // about the audience on a guess; today's handling at least counts the failure, where
+    // inventing `waiting` would retry an unknown condition for as long as the app is
+    // installed.
+    await seedEntry('local-20', { serverId: 'srv-20' });
+    const operationId = await SyncQueue.enqueue({
+      type: SyncOperationType.UPDATE_ENTRY,
+      entityId: 'local-20',
+      serverId: 'srv-20',
+      data: { local_id: 'local-20' },
+    });
+
+    refuseSingleOperationWith(audienceProblem(409, { reason: null }));
+
+    const result = await SyncEngine._pushLocalChanges();
+
+    expect(markFailed).toHaveBeenCalledWith(operationId, expect.any(String));
+    expect((await SyncQueue.getOperation(operationId)).status).toBe(OperationStatus.FAILED);
+    expect((await DatabaseService.getEntryByLocalId('local-20')).shareState).toBeNull();
+    expect(result.failed).toBe(1);
   });
 });
 

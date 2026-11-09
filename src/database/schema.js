@@ -272,6 +272,23 @@ export const SyncStatus = {
 };
 
 /**
+ * What `journal_entries.share_state` may hold: the only record of what the server last said
+ * about a memory's chosen audience (research R15). `null` means it has said nothing, which is
+ * every memory until it has not.
+ *
+ * Here beside `SyncStatus`, and not in `SyncEngine.js`, because the column is this file's and
+ * the sync engine is only one of its readers: the memory's own card has to render these two
+ * states, and a component importing a card string out of the sync engine is a dependency
+ * pointing the wrong way.
+ */
+export const ShareState = {
+  /** The server could not work the audience out yet; the phone sends it again by itself. */
+  WAITING: 'waiting',
+  /** It never will, so the phone has stopped. Nothing about the memory is shared. */
+  REFUSED: 'refused',
+};
+
+/**
  * Upload status values for media
  */
 export const UploadStatus = {
