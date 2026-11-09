@@ -46,6 +46,12 @@
  * very same thing and never reports anything else, so the confirmation alone would be a flag
  * nothing could ever open and the bar would claim to record until somebody tapped Stop.
  *
+ * That second half is a **timer armed at `record()`**, not a check made on the next status, and
+ * it has to be: `useAudioRecorderState` hands back the previous status object unless one of its
+ * fields changed, and in this one scenario the interruption is the last field change there is.
+ * So no further status is ever delivered, and anything waiting for one waits for ever. When it
+ * fires it asks the recorder directly -- a slow-but-real start is confirmed, not ended.
+ *
  * An **unmount is not an interruption** and is handled here, not there: nothing takes the
  * session back, so without a cleanup `stop()` is never called, the session is never
  * released, and the status poll's interval goes with the tree -- leaving a native recording
@@ -243,6 +249,10 @@ export default function VoiceRecorderBar({
   // the confirmation above is a flag that can never be opened, and the bar claims to record
   // for as long as the person leaves it alone (T037 fix round 1).
   const recordStartedAtRef = useRef(0);
+  // The one-shot that *asks* at the end of that window. The clock has to be read by something
+  // that fires by itself: `useAudioRecorderState` de-duplicates (see `startRecording`), so in
+  // the very case this is for there is no later status to read it on (fix round 2).
+  const graceTimerRef = useRef(null);
 
   /**
    * Ends the recording and hands the clip over, whatever ended it.
@@ -311,6 +321,11 @@ export default function VoiceRecorderBar({
       levelsRef.current = [];
       lastLevelStatusRef.current = null;
       recorderConfirmedRef.current = false;
+      // However this recording ended, nothing is waiting on its start any more.
+      if (graceTimerRef.current) {
+        clearTimeout(graceTimerRef.current);
+        graceTimerRef.current = null;
+      }
       capturedAtRef.current = null;
       onRecordingChange?.(false);
 
@@ -380,6 +395,48 @@ export default function VoiceRecorderBar({
       setIsRecording(true);
       isRecordingRef.current = true;
       onRecordingChange?.(true);
+
+      // Ask once, at the end of the start-up window, whether this recording ever got going.
+      //
+      // **It has to be a timer, and it cannot be the status effect.** `useAudioRecorderState`
+      // hands back the *previous* status object unless one of its fields changed
+      // (`expo-audio/build/utils/useAudioRecorderState.js`), so in the one case this is for --
+      // the session taken before the recorder ever reported itself -- the last field to change
+      // is the interruption itself, inside this window, and no further status is ever
+      // delivered. An effect keyed on the status therefore never runs again, and the clock it
+      // would have read is never read: the bar goes on claiming to record, with the timer
+      // frozen and the 5:00 cap unable to fire, until somebody taps Stop. That is exactly what
+      // fix round 1 shipped, and the suite only passed it because the mock handed out a fresh
+      // object every poll. Nothing else in this component owns a timer, so this is it.
+      //
+      // The recorder is asked **directly** rather than through the polled status, for the same
+      // reason: the status may be stale by design.
+      if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
+      graceTimerRef.current = setTimeout(() => {
+        graceTimerRef.current = null;
+        // Already answered, or already over: the status effect confirmed the recording, or the
+        // clip has been finished by a Stop, the cap, an interruption or an unmount.
+        if (recorderConfirmedRef.current || !isRecordingRef.current) return;
+
+        let stillRecording = false;
+        try {
+          stillRecording = !!recorder.getStatus?.()?.isRecording;
+        } catch {
+          // An invalidated recorder is not a recording one.
+          stillRecording = false;
+        }
+
+        if (stillRecording) {
+          // A start slower than the whole window, but a real one. Confirmed here so the next
+          // status that stops saying `isRecording` is read as the interruption it is.
+          recorderConfirmedRef.current = true;
+          return;
+        }
+
+        // It never got going and it is not going to: the session was taken. Finished the way
+        // every other ending finishes it, so the part that was recorded is kept (US2-2).
+        finishClipRef.current();
+      }, START_GRACE_MS);
     } catch (error) {
       console.warn('[VoiceRecorderBar] could not start recording', error);
     } finally {
@@ -469,6 +526,12 @@ export default function VoiceRecorderBar({
    */
   useEffect(
     () => () => {
+      // The start-up one-shot goes with the tree, whether or not there was a clip to finish:
+      // a timer outliving its component has nothing left to decide and nowhere to report.
+      if (graceTimerRef.current) {
+        clearTimeout(graceTimerRef.current);
+        graceTimerRef.current = null;
+      }
       if (isRecordingRef.current) finishClipRef.current();
     },
     [],

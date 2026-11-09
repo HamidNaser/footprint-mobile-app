@@ -992,14 +992,33 @@ describe('CaptureDraftStore: letting go of a draft only if it is still the one s
     expect(files.has(`${NEW_DIR}p9.jpg`)).toBe(true);
   });
 
-  /** A null never matches, so an unidentifiable draft is simply left where it is. */
-  it('never lets go of a draft it cannot identify', async () => {
+  /** A null never matches, so a caller that has nothing to name lets go of nothing. */
+  it('never lets go of a draft when the name it is given is no name', async () => {
     await store.addPiece('new', photo('p1'));
 
     await expect(store.clearAfterSave('new', { onlyIfIdentity: null })).resolves.toBe(false);
 
     expect(rowFor('new')).not.toBeNull();
     expect(files.has(`${NEW_DIR}p1.jpg`)).toBe(true);
+  });
+
+  /**
+   * The other side of the same rule, and the one that is a deletion if it is wrong: the draft
+   * **in the slot** is the unidentifiable one. Two nulls compare equal, so a guard that only
+   * asked "is it the name I was given?" would delete a draft nobody can identify -- which is
+   * the one draft there is least reason to trust a comparison about. Null matches nothing,
+   * including null, so an unidentifiable draft is simply left where it is.
+   */
+  it('never lets go of a draft it cannot identify, even when asked by that name', async () => {
+    // A piece with no `localId` at all, which is what makes the draft unidentifiable.
+    await store.addPiece('new', { kind: 'text', content: 'Rain on the bus window' });
+    expect(store.draftIdentity(piecesOf('new'))).toBeNull();
+
+    await expect(store.clearAfterSave('new', { onlyIfIdentity: null })).resolves.toBe(false);
+
+    expect(rowFor('new')).not.toBeNull();
+    expect(piecesOf('new')).toHaveLength(1);
+    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalledWith(NEW_DIR, { idempotent: true });
   });
 
   it('says it let go of nothing when the slot is already empty', async () => {

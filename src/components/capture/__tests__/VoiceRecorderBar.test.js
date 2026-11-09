@@ -121,10 +121,46 @@ jest.mock('expo-audio', () => {
     requestRecordingPermissionsAsync: jest.fn(async () => granted),
     getRecordingPermissionsAsync: jest.fn(async () => granted),
     useAudioRecorder: () => recorder,
+    /**
+     * **It de-duplicates, exactly as the installed hook does**
+     * (`node_modules/expo-audio/build/utils/useAudioRecorderState.js:33-48`): a poll whose
+     * status differs from the last one in none of `canRecord`, `isRecording`,
+     * `mediaServicesDidReset`, `url`, `durationMillis` (by more than 50 ms) or `metering` (by
+     * more than 0.1) returns the **previous object**, so no new state is set and nothing
+     * downstream re-renders or re-runs.
+     *
+     * That is not a detail: handing out a fresh object every tick, as this mock used to, makes
+     * every effect keyed on the status re-run on a timetable the real component never gets.
+     * A component that waits for the *next* status to notice something therefore works here
+     * and hangs on a phone -- which is precisely what it did (fix round 2, item B). A recorder
+     * that is recording still reports a growing `durationMillis`, so a healthy recording
+     * yields a new object every poll either way; what stops is the stream of statuses after a
+     * recorder has stopped and nothing about it is changing any more.
+     */
     useAudioRecorderState: (rec, interval = 500) => {
       const [state, setState] = useState(rec.getStatus());
       useEffect(() => {
-        const handle = setInterval(() => setState(rec.getStatus()), interval);
+        const handle = setInterval(() => {
+          const next = rec.getStatus();
+          setState((prev) => {
+            const meteringChanged =
+              (prev.metering === undefined) !== (next.metering === undefined) ||
+              (prev.metering !== undefined &&
+                next.metering !== undefined &&
+                Math.abs(prev.metering - next.metering) > 0.1);
+            if (
+              prev.canRecord !== next.canRecord ||
+              prev.isRecording !== next.isRecording ||
+              prev.mediaServicesDidReset !== next.mediaServicesDidReset ||
+              prev.url !== next.url ||
+              Math.abs(prev.durationMillis - next.durationMillis) > 50 ||
+              meteringChanged
+            ) {
+              return next;
+            }
+            return prev;
+          });
+        }, interval);
         return () => clearInterval(handle);
       }, [rec.id, interval]);
       return state;
@@ -741,6 +777,14 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
    * What separates this from the case above is only the clock, so that is what decides it:
    * a status that does not say `isRecording` is "not got going yet" for `START_GRACE_MS`
    * after `record()`, and an interruption after that.
+   *
+   * **And nothing may be waiting on a status to read that clock.** The interruption is the last
+   * thing in this scenario that changes any field of the recorder's status, so the hook -- which
+   * de-duplicates, as the mock above now does -- delivers nothing after it. A component that
+   * checked the clock on the next status would therefore never check it at all, which is the
+   * defect this case was written for and the one it missed first time round (fix round 2).
+   * Every `elapse` below is the fake clock only: no status arrives after the interruption, so
+   * what ends the recording can only be a timer the component armed itself.
    */
   it('stops claiming to record when the session is taken before the first status', async () => {
     // A native start that has not reported yet -- the same latency as the case above, so this
@@ -755,16 +799,30 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
     await act(async () => {
       audio.__interrupt();
     });
+    const statusesAfterTheInterruption = () => {
+      // Every field the hook compares is now fixed: the recorder is stopped, so its duration
+      // no longer moves, and its url and metering are settled. Proof that the assertions below
+      // cannot be satisfied by a poll.
+      const first = audio.__recorder.getStatus();
+      const second = audio.__recorder.getStatus();
+      return (
+        first.isRecording === second.isRecording &&
+        first.durationMillis === second.durationMillis &&
+        first.url === second.url &&
+        first.metering === second.metering
+      );
+    };
+    expect(statusesAfterTheInterruption()).toBe(true);
 
-    // A few polls in, the grace window has not run out, so the bar is still giving the
-    // recorder the benefit of the doubt -- which is what keeps a slow native start alive.
-    await elapse(POLL_MS * 2);
+    // Just short of the window measured from `record()`: the bar is still giving the recorder
+    // the benefit of the doubt, which is what keeps a slow native start alive.
+    await elapse(START_GRACE_MS - 200);
     expect(onClip).not.toHaveBeenCalled();
     expect(has(tree, 'voice-recorder-bar')).toBe(true);
 
-    // Once it has, the recorder has plainly been taken: the clip is finished the way every
-    // other ending finishes it, and the bar stops saying it is recording.
-    await elapse(START_GRACE_MS);
+    // Just past it: the recorder has plainly been taken, so the clip is finished the way every
+    // other ending finishes it and the bar stops saying it is recording.
+    await elapse(300);
 
     expect(onClip).toHaveBeenCalledTimes(1);
     expect(onClip.mock.calls[0][0].uri).toBe(audio.CLIP_URI);
@@ -774,6 +832,38 @@ describe('VoiceRecorderBar: an interruption keeps what was recorded (T037, US2-2
     expect(onRecordingChange.mock.calls).toEqual([[true], [false]]);
     expect(has(tree, 'voice-recorder-bar')).toBe(false);
     expect(has(tree, 'voice-record-button')).toBe(true);
+  });
+
+  /**
+   * The safety side of that timer, and the reason it asks the recorder instead of assuming.
+   *
+   * A native start slower than the whole grace window is still a start. If the one-shot took
+   * "no status has confirmed it" for "the session was taken", it would stop a recorder that is
+   * recording perfectly well and hand over a clip of nothing -- the same failure the start-up
+   * protection exists to prevent, moved from the first poll to the two-second mark. So it reads
+   * `getStatus()` directly when it fires: a recorder that says it is recording is confirmed,
+   * and the recording carries on to a real Stop.
+   */
+  it('confirms a native start slower than the whole window instead of ending it', async () => {
+    audio.__setStartLatency(START_GRACE_MS - 200);
+    const tree = render();
+    await tap(tree, 'voice-record-button');
+
+    // Past the window, with the native recorder having got going only just before it.
+    await elapse(START_GRACE_MS + POLL_MS);
+
+    expect(onClip).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(audio.__recorder.stop).not.toHaveBeenCalled();
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+
+    // And it is an ordinary recording from there: Stop hands over the clip.
+    await elapse(1000);
+    await tap(tree, 'voice-stop-button');
+
+    expect(onClip).toHaveBeenCalledTimes(1);
+    expect(onClip.mock.calls[0][0].uri).toBe(audio.CLIP_URI);
+    expect(onClip.mock.calls[0][0].capturedAt).toBe(START_ISO);
   });
 });
 

@@ -402,6 +402,10 @@ export default function CaptureScreen({ route, navigation }) {
           // The store found something else in the slot, so this is not the draft that was
           // saved after all. It is restored below, like any other unsaved memory, and the
           // marker is left alone so a later mount can still recognise it.
+          //
+          // Re-checked after this await like every other one in this effect: the screen can
+          // have gone while the store was deciding, and nothing below should then run.
+          if (cancelled) return;
         } catch (error) {
           // Still there, and still not an unsaved memory. The next + tries again.
           console.warn(
