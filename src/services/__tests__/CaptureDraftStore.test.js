@@ -858,7 +858,7 @@ describe('CaptureDraftStore: letting go of a draft (M3, FR-015, FR-016)', () => 
     // A save that succeeded must not report an error, or the person saves again and ends up with
     // the memory twice. Files nobody can reach are harmless -- no screen reads the folder -- but
     // a draft that outlives its save is not.
-    await expect(store.clearAfterSave('new')).resolves.toBeUndefined();
+    await expect(store.clearAfterSave('new')).resolves.toBe(true);
     expect(rowFor('new')).toBeNull();
     await expect(store.load('new')).resolves.toBeNull();
   });
@@ -895,6 +895,116 @@ describe('CaptureDraftStore: letting go of a draft (M3, FR-015, FR-016)', () => 
 
     expect(rowFor('new')).toBeNull();
     expect((await store.getEditFor('e1')).pieces).toHaveLength(1);
+  });
+});
+
+/**
+ * Letting go of a draft **only if it is still the one that was saved** -- the reconciliation the
+ * capture screen needs, kept here because here is the only place it can be done safely.
+ *
+ * `clearAfterSave` runs once the memory is on the phone and can fail on its own account: it opens
+ * the database and runs a `DELETE`. What it leaves behind then is a draft row for a memory that is
+ * already in the Journal, and the next tap on + would restore it as an unsaved memory and offer
+ * Save for a second copy of it. So the screen remembers which draft that was and lets it go on the
+ * next mount.
+ *
+ * The thing that makes that dangerous is the gap between deciding and deleting. The screen's read
+ * is `load`, and every call that changes a slot is queued behind one per-slot lock, so a capture
+ * taken while the read is still in flight lands **between** the read and the delete: decide from
+ * the draft the read returned, and the delete takes a piece that was captured afterwards -- and
+ * its media -- with it. Deleting a draft is irreversible and SC-002 is zero pieces lost, so the
+ * comparison and the delete have to be one step, and the only place they can be is inside the
+ * lock, which is here.
+ */
+describe('CaptureDraftStore: letting go of a draft only if it is still the one saved (FR-016)', () => {
+  it('identifies a draft by its pieces, and refuses to identify one it cannot', () => {
+    expect(store.draftIdentity([{ localId: 'p1' }, { localId: 'p2' }])).toBe('p1|p2');
+    // Order is part of it: the same pieces in a different order is a different draft.
+    expect(store.draftIdentity([{ localId: 'p2' }, { localId: 'p1' }])).toBe('p2|p1');
+
+    // Null rather than a guess, for anything there is nothing to compare: a guess here is a
+    // guess about whether to delete somebody's memory. A null must never match anything.
+    expect(store.draftIdentity([])).toBeNull();
+    expect(store.draftIdentity()).toBeNull();
+    expect(store.draftIdentity([{ localId: 'p1' }, { kind: 'photo' }])).toBeNull();
+  });
+
+  it('lets the draft go when it is still the one that was saved', async () => {
+    await store.addPiece('new', photo('p1'));
+    await store.addPiece('new', note('t1', 'Rain on the bus window'));
+    const identity = store.draftIdentity(piecesOf('new'));
+
+    await expect(store.clearAfterSave('new', { onlyIfIdentity: identity })).resolves.toBe(true);
+
+    expect(rowFor('new')).toBeNull();
+    expect([...files].filter((path) => path.startsWith(NEW_DIR))).toEqual([]);
+  });
+
+  /**
+   * The race this guard exists for, driven rather than reasoned about.
+   *
+   * The person taps + while a previous save's leftover draft is still in the slot; the mount's
+   * `load` is a cold database read, and before it comes back they tap Camera. The capture is
+   * queued on the slot's lock, the let-go behind it, so the let-go runs on a slot that is no
+   * longer what the screen decided about. The photograph and its file must both still be there
+   * afterwards -- a piece that reads as present and plays as missing is worse than no piece.
+   */
+  it('leaves the draft alone when a piece was captured while it was being read', async () => {
+    // The draft a save left behind, and the identity the screen remembers it by.
+    await store.addPiece('new', photo('p1'));
+    const saved = store.draftIdentity(piecesOf('new'));
+
+    // The next mount's read comes back with exactly that draft...
+    const draft = await store.load('new');
+    expect(store.draftIdentity(draft.pieces)).toBe(saved);
+
+    // ...and a photograph is taken before the screen can act on it. Held mid-copy so the
+    // let-go is genuinely issued inside the window rather than after it.
+    const copying = deferred();
+    stallCopies = copying;
+    const capturing = store.addPiece('new', photo('p2'));
+    await until(() => copiesStarted() === 2, 'the second photograph to start copying');
+
+    const lettingGo = store.clearAfterSave('new', { onlyIfIdentity: saved });
+    await settle();
+    expect(rowFor('new')).not.toBeNull(); // still queued behind the copy
+
+    copying.release();
+    stallCopies = null;
+    await capturing;
+
+    // The slot is no longer the draft that was saved, so it is not let go.
+    await expect(lettingGo).resolves.toBe(false);
+    expect(piecesOf('new').map((piece) => piece.localId)).toEqual(['p1', 'p2']);
+    expect(files.has(`${NEW_DIR}p2.jpg`)).toBe(true);
+    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalledWith(NEW_DIR, { idempotent: true });
+    expect((await store.load('new')).pieces).toHaveLength(2);
+  });
+
+  it('leaves a draft that is not the one that was saved alone', async () => {
+    await store.addPiece('new', photo('p9'));
+
+    await expect(
+      store.clearAfterSave('new', { onlyIfIdentity: 'p1|p2' }),
+    ).resolves.toBe(false);
+
+    expect(piecesOf('new').map((piece) => piece.localId)).toEqual(['p9']);
+    expect(files.has(`${NEW_DIR}p9.jpg`)).toBe(true);
+  });
+
+  /** A null never matches, so an unidentifiable draft is simply left where it is. */
+  it('never lets go of a draft it cannot identify', async () => {
+    await store.addPiece('new', photo('p1'));
+
+    await expect(store.clearAfterSave('new', { onlyIfIdentity: null })).resolves.toBe(false);
+
+    expect(rowFor('new')).not.toBeNull();
+    expect(files.has(`${NEW_DIR}p1.jpg`)).toBe(true);
+  });
+
+  it('says it let go of nothing when the slot is already empty', async () => {
+    await expect(store.clearAfterSave('new', { onlyIfIdentity: 'p1' })).resolves.toBe(false);
+    expect(rowFor('new')).toBeNull();
   });
 });
 

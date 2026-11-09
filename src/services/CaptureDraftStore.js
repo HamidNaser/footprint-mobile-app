@@ -39,7 +39,10 @@ import { getDatabase } from '../database';
  *    folder with it — see `addPiece`, which settles that before the copy lands in it.
  *
  * A slot and its folder are deleted only **after** the save has succeeded on the phone
- * (FR-016), or when the person discards the draft (FR-015).
+ * (FR-016), or when the person discards the draft (FR-015). A `clearAfterSave` that failed can
+ * be asked for again on the way back in, and then it names the draft it means
+ * (`onlyIfIdentity`): the name is compared with the slot as it stands, inside the slot's lock,
+ * so a piece captured between the caller's read and this call is never deleted under it.
  *
  * There are two slots and no more (FR-013): the unsaved new memory and the unsaved edit. The
  * slot id is the table's primary key, so "at most one of each" is the schema's promise rather
@@ -556,12 +559,64 @@ export function discard(slot) {
 }
 
 /**
+ * A draft's pieces as one value two drafts can be compared by — or **null** if any piece carries
+ * no `localId`, because then there is nothing to compare and a guess here is a guess about
+ * whether to delete somebody's memory. A null never matches anything, so an unidentifiable draft
+ * is simply left where it is.
+ *
+ * Order is part of it: capture order *is* the memory's order (FR-005), so the same pieces in a
+ * different order are a different draft.
+ *
+ * @param {object[]} [pieces]
+ * @returns {string|null}
+ */
+export function draftIdentity(pieces = []) {
+  return pieces.length && pieces.every((piece) => piece?.localId)
+    ? pieces.map((piece) => piece.localId).join('|')
+    : null;
+}
+
+/**
  * Let go of the draft because the memory has been saved on the phone. Call it only once
  * `createEntry` / `updateEntry` has resolved: a save that failed must leave the draft exactly
  * where it was (FR-016).
+ *
+ * **`onlyIfIdentity` is for the second caller**, which is not the save at all: it is the
+ * reconciliation on the way back in. `clearAfterSave` can fail on its own account — it opens the
+ * database and runs a `DELETE` — and what it leaves behind then is a draft row for a memory that
+ * is already in the Journal. The capture screen remembers which draft that was and asks for it to
+ * be let go the next time, and **that** call must let go of nothing else: any other draft in the
+ * slot is somebody's unsaved memory, and letting one go takes its pieces and their media with it.
+ *
+ * It is a parameter here, and not a comparison the caller makes before calling, because the
+ * comparison and the delete have to be one step and this is the only place they can be. Every
+ * call that changes a slot queues on the slot's lock, so a capture taken while the caller's `load`
+ * was still in flight lands **between** that read and this delete: compared outside, the delete
+ * would take a piece captured afterwards — and its media — with it, which is SC-002's zero pieces
+ * lost, lost. Compared in here, it is read after that capture has landed, and the draft no longer
+ * matches, so nothing is deleted.
+ *
+ * @param {'new'|'edit'} slot
+ * @param {{onlyIfIdentity?: string|null}} [options] - when `onlyIfIdentity` is given, the draft is
+ *   let go only if `draftIdentity` of the draft actually in the slot equals it
+ * @returns {Promise<boolean>} whether a draft was let go
  */
-export function clearAfterSave(slot) {
-  return withSlotLock(slot, () => removeHeld(slot));
+export function clearAfterSave(slot, options = {}) {
+  const conditional = Object.prototype.hasOwnProperty.call(options, 'onlyIfIdentity');
+  return withSlotLock(slot, async () => {
+    if (conditional) {
+      // Read inside the lock, so this is the slot as it stands now rather than as the caller
+      // last saw it. `loadHeld` is also what gives the draft in hand precedence over the row,
+      // which matters here: typing is half a second ahead of the database.
+      const draft = await loadHeld(slot);
+      const identity = draftIdentity(draft?.pieces);
+      if (identity === null || identity !== options.onlyIfIdentity) {
+        return false;
+      }
+    }
+    await removeHeld(slot);
+    return true;
+  });
 }
 
 export default {
@@ -577,4 +632,5 @@ export default {
   getEditFor,
   discard,
   clearAfterSave,
+  draftIdentity,
 };

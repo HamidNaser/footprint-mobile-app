@@ -107,6 +107,15 @@ jest.mock('../../../services/CaptureDraftStore', () => {
     DraftSlot: { NEW: 'new', EDIT: 'edit' },
     TEXT_DEBOUNCE_MS: 500,
     slotDirectory,
+    /**
+     * A pure function, so the real one is reproduced rather than stubbed: the screen compares
+     * drafts with it, and a stub would make the comparison say whatever the mock felt like.
+     * Null for anything unidentifiable, because a null must never match (see the store).
+     */
+    draftIdentity: (pieces = []) =>
+      pieces.length && pieces.every((piece) => piece?.localId)
+        ? pieces.map((piece) => piece.localId).join('|')
+        : null,
     load: jest.fn(async () => null),
     addPiece: jest.fn(async (slot, piece) => stored(slot, piece)),
     removePiece: jest.fn(async () => null),
@@ -115,7 +124,9 @@ jest.mock('../../../services/CaptureDraftStore', () => {
     startEdit: jest.fn(async () => null),
     getEditFor: jest.fn(async () => null),
     discard: jest.fn(async () => {}),
-    clearAfterSave: jest.fn(async () => {}),
+    // Reports whether it let a draft go. `true` for the unconditional call the save makes;
+    // the conditional call's own refusal is driven per-case where it matters.
+    clearAfterSave: jest.fn(async () => true),
     __stored: stored,
   };
 
@@ -554,7 +565,10 @@ beforeEach(() => {
   CaptureDraftStore.addPiece.mockImplementation(async (slot, piece) =>
     piece?.uri ? { ...piece, uri: `file:///documents/capture-drafts/${slot}/${piece.localId}` } : piece,
   );
-  CaptureDraftStore.clearAfterSave.mockImplementation(async () => {});
+  // Resolves `true`: the store reports whether it let a draft go, and the conditional form
+  // (`onlyIfIdentity`) can answer `false` without that being a failure. A case that needs the
+  // refusal says so itself.
+  CaptureDraftStore.clearAfterSave.mockImplementation(async () => true);
   CaptureDraftStore.discard.mockImplementation(async () => {});
   createEntry.mockImplementation(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
 
@@ -1850,6 +1864,47 @@ describe('CaptureScreen: tapping + reopens the unsaved memory with every piece (
     expect(has(tree, 'capture-status-line')).toBe(false);
     expect(has(tree, 'capture-empty-hint')).toBe(true);
   });
+
+  /**
+   * The restore is a cold database read, and every capture button is live for the whole of it
+   * (fix round 1).
+   *
+   * So a photograph or a note can land *while* the read is in flight, and the piece it adds is
+   * one the read cannot know about -- the store appends it to the draft the read returned. A
+   * restore that simply replaced what was on screen would take that piece off it, leaving a
+   * piece that is in the slot and nowhere a person can see. The cost is not cosmetic: Save
+   * builds the memory from what is on screen and then lets the whole slot go, so the piece and
+   * its media would be deleted having never been saved. SC-002 is zero pieces lost.
+   */
+  it('keeps a piece captured while the stored draft was still being read', async () => {
+    const loading = deferred();
+    CaptureDraftStore.load.mockImplementation(() => loading.promise);
+
+    const tree = await render();
+
+    // A note, captured before the read comes back. It is the only piece on screen so far.
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'The arcade lights');
+
+    await act(async () => {
+      loading.settle(storedDraft(FOUR_RESTORED_PIECES));
+    });
+
+    // Every stored piece is back, and the one captured in the window is still here -- after
+    // them, which is the order the slot itself holds them in: the store appended it to the
+    // stored draft.
+    expect(rows(tree)).toHaveLength(5);
+    expect(rows(tree).slice(0, 4)).toEqual([
+      'Note | 08:41 | Old arcade, Bridge St',
+      'Voice clip | 08:42 | No place',
+      'Photo | 08:43 | No place',
+      'Video | 08:44 | No place',
+    ]);
+    expect(rows(tree)[4]).toMatch(/^Note \| \d{2}:\d{2} \| No place$/);
+    expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+    expect(valueAt(tree, 'piece-note-input-4')).toBe('The arcade lights');
+    expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 5 pieces');
+  });
 });
 
 describe('CaptureScreen: discarding is the only thing that throws a memory away (FR-015)', () => {
@@ -2187,8 +2242,12 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
 
     const second = await render();
 
-    // It is let go rather than restored, and nothing is offered as unsaved.
-    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledWith('new');
+    // It is let go rather than restored, and nothing is offered as unsaved. Named piece for
+    // piece, and the store re-checks that name inside the slot's lock before it deletes
+    // anything -- see the fourth case below, and the store's own suite.
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledWith('new', {
+      onlyIfIdentity: localId,
+    });
     expect(rows(second)).toHaveLength(0);
     expect(has(second, 'capture-status-line')).toBe(false);
     expect(pressable(second, 'capture-save-button').props.disabled).toBe(true);
@@ -2254,5 +2313,59 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
 
     expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
     expect(rows(second)).toEqual(['Voice clip | 09:10 | No place']);
+  });
+
+  /**
+   * The window the first case cannot see, and the one that costs a piece (fix round 1).
+   *
+   * Reading the leftover draft is a cold database read on the way in, and every capture button
+   * is live the whole time it is in flight. So: + is tapped, `load` goes out, and before it
+   * comes back the person taps Type. That capture queues on the slot's lock, and a let-go
+   * decided from what `load` returned would queue *behind* it -- deleting a piece, and any
+   * media already copied into the slot's folder, that was captured after the draft the screen
+   * was comparing. SC-002 is zero pieces lost.
+   *
+   * Two things stop it, and this case pins the first: nothing is let go at all once something
+   * has been captured since the mount. The second is the store's, because only inside the
+   * slot's lock can the comparison and the delete be one step -- "leaves the draft alone when a
+   * piece was captured while it was being read" in `CaptureDraftStore.test.js`, which drives
+   * the same race against the real database and the real folder.
+   */
+  it('lets go of nothing when something was captured while the draft was still loading', async () => {
+    const first = await render();
+    const localId = await saveLeavingTheDraftBehind(first);
+    await tap(first, 'capture-close-button');
+
+    // The next mount's read, held in flight: the screen is up and every button works.
+    const loading = deferred();
+    CaptureDraftStore.load.mockImplementation(() => loading.promise);
+    CaptureDraftStore.clearAfterSave.mockClear();
+    CaptureDraftStore.addPiece.mockClear();
+
+    const second = await render();
+
+    // A note, captured inside that window and really in the slot. Nothing is typed into it:
+    // typing says "this slot holds something that was never saved" by itself, and this case
+    // is about the window where nothing has said that.
+    await tap(second, 'capture-type-button');
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledTimes(1);
+    const captured = CaptureDraftStore.addPiece.mock.calls[0][1].localId;
+    expect(captured).not.toBe(localId);
+
+    // Only now does the read come back, with the draft the save left behind -- piece for
+    // piece the one it was comparing against.
+    await act(async () => {
+      loading.settle(storedDraft(leftoverNote(localId)));
+    });
+
+    // Nothing is deleted. The slot holds the saved note *and* the one just captured, and a
+    // delete decided on what the read returned would have taken both.
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+
+    // What is on screen is the piece captured in the window -- empty, not the saved note's
+    // words -- and the already-saved pieces are neither restored nor offered for saving again.
+    expect(rows(second)).toHaveLength(1);
+    expect(valueAt(second, 'piece-note-input-0')).toBe('');
   });
 });

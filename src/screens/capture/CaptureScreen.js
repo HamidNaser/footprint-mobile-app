@@ -55,7 +55,11 @@
  *     never arms it, because a retry there writes the memory twice -- which is the defect the
  *     save path below is shaped around.
  *   - **A draft left behind by a save whose tidying up failed never comes back as a phantom
- *     unsaved memory** (`draftsLeftAfterSave`).
+ *     unsaved memory** (`draftsLeftAfterSave`) -- and letting one go can never take a piece
+ *     captured while the mount was still reading it, because the mount's read and that capture
+ *     are both queued on the slot's lock and the capture lands in between. Nothing is let go
+ *     once anything has been captured since the screen opened, and the store re-reads and
+ *     compares the draft **inside** that lock before it deletes anything.
  *   - **None of it ever leaves the phone** (FR-014, SC-004). Everything captured goes into the
  *     `capture_drafts` slot and nowhere else, and nothing here reaches the sync machinery; the
  *     only write of a memory is `createEntry`, after the person has chosen who can see it.
@@ -80,7 +84,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { v4 as uuidv4 } from 'uuid';
 
-import CaptureDraftStore, { DraftSlot } from '../../services/CaptureDraftStore';
+import CaptureDraftStore, {
+  DraftSlot,
+  draftIdentity,
+} from '../../services/CaptureDraftStore';
 import CaptureLocation from '../../services/CaptureLocation';
 import { SettingsService } from '../../services/SettingsService';
 import { useAuth } from '../../context/AuthContext';
@@ -168,7 +175,8 @@ const SAVED_MESSAGE =
 const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
 
 /**
- * Which draft each slot was left holding by a save that worked: slot → its pieces' identity.
+ * Which draft each slot was left holding by a save that worked: slot → `draftIdentity` of the
+ * pieces that were saved.
  *
  * Module state, deliberately: what it guards against happens on the **next** mount, so it has
  * to outlive this screen. `clearAfterSave` runs once `createEntry` has resolved and can fail
@@ -178,14 +186,19 @@ const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece'
  * in the Journal, and without this the next tap on + would restore it as an unsaved memory and
  * offer Save for the second copy.
  *
- * **It records the draft, not just the slot**, and the next mount lets a draft go only when the
- * draft it actually found is piece-for-piece the one that was saved. Anything else in that slot
- * is somebody's unsaved memory, and the one thing worse than a phantom draft is letting go of a
- * real one. That covers a piece captured after the save by itself: the screen stays open after a
- * save whose tidying up failed, and a new piece changes the identity below.
+ * **It records the draft, not just the slot**, so that a draft can only ever be let go for being
+ * the very one that was saved. Anything else in that slot is somebody's unsaved memory, and the
+ * one thing worse than a phantom draft is letting go of a real one.
  *
- * What it does not cover is **typing into a note that is already there**, which changes nothing
- * about the identity -- so `handleChangeText` forgets the slot outright. From the first
+ * **The comparison itself is not made here.** This is a name to ask by, not a decision: the name
+ * goes to `CaptureDraftStore.clearAfterSave(slot, { onlyIfIdentity })`, which re-reads the slot
+ * and compares it **inside the slot's lock**, the only place the comparison and the delete are
+ * one step. Deciding it out here, from what the mount's `load` returned, would be decided before
+ * a capture that queues behind that read and lands before the delete -- and the delete would
+ * then take that piece and its media with it. Fix round 1; the race is driven in both suites.
+ *
+ * What the identity cannot see is **typing into a note that is already there**, which leaves
+ * every id exactly as it was -- so `handleChangeText` forgets the slot outright. From the first
  * keystroke after that save, the slot holds something that was never saved.
  *
  * **Its limit, said rather than hidden:** it lives in memory, so it does not survive the app
@@ -196,17 +209,6 @@ const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece'
  * not anticipate, so it is reported rather than taken.
  */
 const draftsLeftAfterSave = new Map();
-
-/**
- * A draft's pieces, as a value two drafts can be compared by -- or **null** if any piece
- * carries no id, because then there is nothing to compare and a guess would be a guess about
- * whether to delete somebody's memory. A null never matches, so an unidentifiable draft is
- * simply shown, which is the safe direction.
- */
-const pieceIdentity = (pieces = []) =>
-  pieces.length && pieces.every((piece) => piece?.localId)
-    ? pieces.map((piece) => piece.localId).join('|')
-    : null;
 
 export default function CaptureScreen({ route, navigation }) {
   const isEditMode = route?.params?.mode === 'edit';
@@ -246,6 +248,14 @@ export default function CaptureScreen({ route, navigation }) {
    * tick as the capture that made it, before any render.
    */
   const capturesInFlightRef = useRef(0);
+  /**
+   * Whether anything at all has been captured since this screen opened. Set before the first
+   * await of the first capture and never cleared, because what reads it is asking "could this
+   * slot be holding something the mount's read did not know about?" and once the answer is yes
+   * it stays yes. A ref for the same reason as the counter above: the mount's read resolves in
+   * a closure that was made with `pieces` empty, so state cannot answer it (fix round 1).
+   */
+  const capturedSinceMountRef = useRef(false);
   /**
    * Whether a save is between its first line and its outcome. A ref rather than `isSaving`
    * for the same reason as the two above: both of Save's callers are taps, and Try again's
@@ -355,24 +365,65 @@ export default function CaptureScreen({ route, navigation }) {
       // Is this the very draft the last save already wrote as a memory, left behind only
       // because letting it go failed (see `draftsLeftAfterSave`)? If it is, it is not an
       // unsaved memory: it is let go rather than restored, because restoring it would offer
-      // Save for a memory that is already in the Journal. Compared piece for piece -- any
-      // other draft in that slot is somebody's unsaved memory and is never let go unasked.
-      const identity = pieceIdentity(draft.pieces);
+      // Save for a memory that is already in the Journal.
+      //
+      // **Not if anything has been captured since this screen opened.** The read above is a
+      // cold database read and every capture button is live throughout it, so a photograph or
+      // a note can land while it is in flight -- queued on the slot's lock, and so *before*
+      // any delete issued from here. Letting go then deletes that piece and the media already
+      // copied into the slot's folder, and SC-002 is zero pieces lost. Nothing is deleted and
+      // nothing is restored in that case: the already-saved pieces stay in the slot, unoffered
+      // and unsaveable from here, and the next mount that opens on a quiet window lets them
+      // go. The store re-checks the identity inside the slot's lock as well, which is the only
+      // place the comparison and the delete are one step -- so the two guards are independent.
+      const identity = draftIdentity(draft.pieces);
       if (identity !== null && draftsLeftAfterSave.get(slot) === identity) {
+        if (capturedSinceMountRef.current) {
+          // Neither let go nor restored. Not let go, because the slot is no longer only what
+          // was read -- it also holds the capture, which a delete would take. Not restored
+          // either, because these pieces *are* a memory already in the Journal and putting
+          // them back on screen would offer Save for a second copy of it; the person is
+          // looking at the piece they have just captured, which is the unsaved memory here.
+          // The marker stays, so a later mount with a quiet window still lets them go.
+          console.warn(
+            '[CaptureScreen] an already-saved draft was found after something was captured ' +
+              'in the same window; it is left in the slot rather than deleted under the capture',
+          );
+          return;
+        }
         try {
-          await CaptureDraftStore.clearAfterSave(slot);
-          draftsLeftAfterSave.delete(slot);
+          const letGo = await CaptureDraftStore.clearAfterSave(slot, {
+            onlyIfIdentity: identity,
+          });
+          if (letGo) {
+            draftsLeftAfterSave.delete(slot);
+            return;
+          }
+          // The store found something else in the slot, so this is not the draft that was
+          // saved after all. It is restored below, like any other unsaved memory, and the
+          // marker is left alone so a later mount can still recognise it.
         } catch (error) {
           // Still there, and still not an unsaved memory. The next + tries again.
           console.warn(
             '[CaptureScreen] the draft of an already-saved memory still could not be let go',
             error,
           );
+          return;
         }
-        return;
       }
 
-      setPieces(draft.pieces);
+      // Restored *underneath* anything captured while the read was in flight, never over the
+      // top of it. The store appends a capture to the draft it finds, so slot order is the
+      // stored pieces and then the new one -- and a plain replacement would take that piece
+      // off the screen while leaving it in the slot, where Save would build the memory without
+      // it and then let the whole slot go, deleting it (fix round 1).
+      setPieces((previous) => {
+        const restored = new Set(draft.pieces.map((piece) => piece.localId));
+        return [
+          ...draft.pieces,
+          ...previous.filter((piece) => !restored.has(piece.localId)),
+        ];
+      });
     })();
     return () => {
       cancelled = true;
@@ -400,6 +451,10 @@ export default function CaptureScreen({ route, navigation }) {
       // Counted before the first await, released however this ends, so that Save can tell
       // "nothing captured" from "captured, not recorded yet" (CAPTURE_IN_FLIGHT_MESSAGE).
       capturesInFlightRef.current += 1;
+      // Before the first await as well, and never unset: from here on this slot may hold
+      // something the mount's read did not see, so no draft may be let go for being the one a
+      // previous save wrote (see `draftsLeftAfterSave`).
+      capturedSinceMountRef.current = true;
       try {
         const stamped = await CaptureLocation.withLocation(piece);
         const stored = await CaptureDraftStore.addPiece(slot, stamped);
@@ -687,7 +742,10 @@ export default function CaptureScreen({ route, navigation }) {
         );
         // The draft row has outlived the memory it was a draft of. Remembered, piece for
         // piece, so the next tap on + lets this draft go instead of offering it as unsaved.
-        draftsLeftAfterSave.set(slot, pieceIdentity(pieces));
+        // An identity of null is not remembered at all: it could never match anything, and a
+        // marker that cannot match is a line of state that says nothing.
+        const saved = draftIdentity(pieces);
+        if (saved !== null) draftsLeftAfterSave.set(slot, saved);
         if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
       }
 
