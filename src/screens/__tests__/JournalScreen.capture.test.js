@@ -189,21 +189,43 @@ jest.mock('../../services/LocationService', () => ({
  */
 jest.mock('../../hooks/useJournal', () => {
   const createEntry = jest.fn(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+  const refresh = jest.fn(async () => {});
+  // The feed the screen is given. Held in a box rather than closed over as a constant so a
+  // test can put a memory in it (T036's re-share needs a card on screen) and the harness can
+  // empty it again afterwards.
+  const feed = { entries: [] };
   return {
     __esModule: true,
     useJournal: jest.fn(() => ({
-      entries: [],
+      entries: feed.entries,
       loading: false,
       error: null,
       refreshing: false,
       hasMore: false,
-      refresh: jest.fn(async () => {}),
+      refresh,
       loadMore: jest.fn(async () => {}),
       createEntry,
       deleteEntry: jest.fn(async () => {}),
     })),
     __createEntry: createEntry,
+    __refresh: refresh,
+    __setEntries: (entries) => {
+      feed.entries = entries;
+    },
   };
+});
+
+/**
+ * The service behind the card's re-share (T036). Mocked so that "the Journal screen re-shares
+ * the memory" is a statement about `reshareEntry` being called with the person's choice, and
+ * so no database is reached from here.
+ */
+jest.mock('../../services/JournalService', () => {
+  const service = {
+    reshareEntry: jest.fn(async () => ({ localId: 'local-refused', shareState: null })),
+    on: jest.fn(() => () => {}),
+  };
+  return { __esModule: true, JournalService: service, default: service };
 });
 
 /**
@@ -251,7 +273,7 @@ jest.mock('../../services/CaptureLocation', () => {
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { Alert, TextInput, TouchableOpacity } from 'react-native';
+import { Alert, Text, TextInput, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import JournalScreen from '../JournalScreen';
@@ -259,7 +281,16 @@ import { QuickCaptureBar } from '../../components/journal';
 import { JournalComposeModal } from '../../components/journal/JournalComposeModal';
 import CaptureDraftStore from '../../services/CaptureDraftStore';
 import CaptureLocation from '../../services/CaptureLocation';
-import { __createEntry as createEntry } from '../../hooks/useJournal';
+import {
+  __createEntry as createEntry,
+  __refresh as refreshFeed,
+  __setEntries as setFeedEntries,
+} from '../../hooks/useJournal';
+import { JournalService } from '../../services/JournalService';
+import { JournalEntryCard } from '../../components/journal/JournalEntryCard';
+import SaveAudienceSheet from '../../components/capture/SaveAudienceSheet';
+import { toDateKey } from '../../utils/journalDate';
+import { ShareState } from '../../database/schema';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -289,6 +320,9 @@ afterEach(() => {
       /* already gone */
     }
   }
+  // Back to an empty feed, so a test that puts a memory on screen cannot leak it into the
+  // next one (`jest.clearAllMocks` does not touch the box it is held in).
+  setFeedEntries([]);
   jest.clearAllMocks();
 });
 
@@ -605,4 +639,128 @@ describe('the compose modal’s remaining save path', () => {
   // detail view's Edit; that is the journey T060 rewrites, and it is where the expectation
   // belongs. Until then the handler's own shape is the guarantee: it closes the modal only
   // after a resolved `createEntry`, and says so on a rejected one.
+});
+
+// ---------------------------------------------------------------------------
+// FR-011, US1-8 — a memory the server would not share is shared again from the Journal
+// ---------------------------------------------------------------------------
+
+/**
+ * T036 wires the card's `onReshare` on this screen. What the card does on its own — the two
+ * lines, "Not shared yet" in place of the audience label, and opening `SaveAudienceSheet` — is
+ * `JournalEntryCard.share.test.js`. What is here is the one thing only the screen can do:
+ * turn the person's choice into a re-share, and say so if that fails.
+ *
+ * It is driven through a real card in the real list, by tapping, because that is the last
+ * stretch of US1 and the checkpoint is "US1 works end to end in jest". The memory is dated
+ * today so the screen's own day filter shows it without relying on its jump-to-the-newest
+ * effect.
+ */
+describe('a refused memory is shared again from the Journal screen (US1-8)', () => {
+  const refused = {
+    localId: 'local-refused',
+    id: 'local-refused',
+    userId: 'user-1',
+    journalId: 'journal-1',
+    date: toDateKey(new Date()),
+    createdAt: Date.now(),
+    visibility: 'family',
+    syncStatus: 'pending',
+    shareState: ShareState.REFUSED,
+    contentBlocks: [{ type: 'text', content: 'the arcade on the corner' }],
+  };
+
+  const REFUSED_LINE = 'Not shared — tap to choose who can see it';
+
+  const CardComponent = JournalEntryCard.type ?? JournalEntryCard;
+
+  const textsIn = (node) =>
+    node
+      .findAllByType(Text)
+      .map((t) => (Array.isArray(t.props.children) ? t.props.children.join('') : t.props.children))
+      .filter((value) => typeof value === 'string');
+
+  /** The card for the refused memory, as the list really renders it. */
+  const card = (tree) => tree.root.findByType(CardComponent);
+
+  const refusedLine = (tree) => {
+    const matches = card(tree)
+      .findAllByType(TouchableOpacity)
+      .filter((node) => typeof node.props?.onPress === 'function' && textsIn(node).includes(REFUSED_LINE));
+    if (matches.length === 0) {
+      throw new Error('No control on the card carries the refused-share line');
+    }
+    return matches[matches.length - 1];
+  };
+
+  const audienceOption = (tree, value) =>
+    tree.root.findAll(
+      (node) =>
+        node.props?.testID === `audience-option-${value}` &&
+        typeof node.props?.onPress === 'function',
+    )[0];
+
+  const chooseFriends = async (tree) => {
+    await tap(refusedLine(tree));
+    await tap(audienceOption(tree, 'friends'));
+  };
+
+  beforeEach(() => {
+    setFeedEntries([refused]);
+  });
+
+  it('shows the memory with its refusal, and no audience label (SC-010)', async () => {
+    // The guard that stops the cases below asserting nothing: if the card were not on screen,
+    // `refusedLine` would throw, and this says why.
+    const { tree } = await render();
+
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+    expect(textsIn(card(tree))).toContain('Not shared yet');
+    expect(textsIn(card(tree))).not.toContain('Family');
+  });
+
+  it('re-shares the memory with the audience the person chose', async () => {
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(JournalService.reshareEntry).toHaveBeenCalledTimes(1);
+    expect(JournalService.reshareEntry).toHaveBeenCalledWith('local-refused', 'friends');
+  });
+
+  it('reloads the day so the card stops saying the memory is not shared', async () => {
+    const { tree } = await render();
+    refreshFeed.mockClear();
+
+    await chooseFriends(tree);
+
+    expect(refreshFeed).toHaveBeenCalled();
+  });
+
+  it('shares nothing when the sheet is dismissed', async () => {
+    const { tree } = await render();
+
+    await tap(refusedLine(tree));
+    await act(async () => {
+      tree.root.findByType(SaveAudienceSheet).props.onDismiss();
+    });
+
+    expect(JournalService.reshareEntry).not.toHaveBeenCalled();
+  });
+
+  it('says so when the re-share fails, rather than leaving it looking shared (FR-017)', async () => {
+    // The refusal is still on the card — `reshareEntry` clears it only once the memory is
+    // queued — so silence here would leave the person tapping a line that does nothing.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    JournalService.reshareEntry.mockRejectedValueOnce(new Error('queue is unavailable'));
+
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+
+    alert.mockRestore();
+  });
 });
