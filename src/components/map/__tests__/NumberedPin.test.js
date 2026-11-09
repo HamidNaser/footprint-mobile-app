@@ -66,7 +66,7 @@ describe('a pin is coloured by its kind', () => {
     ['audio', '#8e44ad'],
     ['photo', '#2f9e6e'],
     ['video', '#c27c0e'],
-  ])('a %s piece is %s', (kind, colour) => {
+  ])('%s pieces are %s', (kind, colour) => {
     expect(PIN_COLOURS[kind]).toBe(colour);
     expect(bubbleStyle(render({ kind })).backgroundColor).toBe(colour);
   });
@@ -106,24 +106,35 @@ describe('a pin is drawn only where there is a place', () => {
   ])('draws nothing with %s', (_why, coords) => {
     expect(render(coords).root.findAllByType('Marker')).toHaveLength(0);
   });
+
+  it('draws nothing for a group holding no pieces, rather than a pin reading "undefined"', () => {
+    expect(render({ numbers: [] }).root.findAllByType('Marker')).toHaveLength(0);
+  });
 });
 
 describe('pressing a pin', () => {
+  const press = (tree) => {
+    const onMarkerPress = marker(tree).props.onPress;
+    act(() => onMarkerPress());
+  };
+
   it('hands back the one number it holds', () => {
     const onPress = jest.fn();
-    act(() => marker(render({ numbers: [3], onPress })).props.onPress());
+    press(render({ numbers: [3], onPress }));
 
     expect(onPress).toHaveBeenCalledWith([3]);
   });
 
   it('hands back every number a merged pin holds, so the card can highlight them all', () => {
     const onPress = jest.fn();
-    act(() => marker(render({ numbers: [2, 3, 4], onPress })).props.onPress());
+    press(render({ numbers: [2, 3, 4], onPress }));
 
     expect(onPress).toHaveBeenCalledWith([2, 3, 4]);
   });
 
   it('is pressable with no handler given', () => {
-    expect(() => act(() => marker(render({ onPress: undefined })).props.onPress())).not.toThrow();
+    const tree = render({ onPress: undefined });
+
+    expect(() => press(tree)).not.toThrow();
   });
 });
