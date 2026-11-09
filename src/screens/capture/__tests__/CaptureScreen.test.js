@@ -2133,12 +2133,40 @@ describe('CaptureScreen: an unsaved memory never leaves the phone (FR-014, SC-00
  * Deliberately the last describe in this file.
  *
  * It is the only one that leaves anything behind between mounts -- the screen has to remember
- * across its own unmount that a slot's memory was saved and only the clearing failed, because
- * that is precisely what the *next* mount needs to know. Both cases below put that memory
- * back the way they found it (the first by letting the draft go, the second by capturing into
- * the slot again), and being last means a case that somehow did not could not reach anything.
+ * across its own unmount which draft a save already wrote as a memory, because that is
+ * precisely what the *next* mount needs to know. Being last means a case that did not tidy up
+ * after itself could not reach anything. (It is remembered piece for piece rather than by
+ * slot, so a later mount that finds a different draft -- or no draft -- is unaffected anyway;
+ * that is the third case below.)
  */
 describe('CaptureScreen: a draft left behind by a save that worked does not come back', () => {
+  /**
+   * Saves one note, with the clearing of the draft failing. Returns the note's `localId`,
+   * which is the identity the screen has to recognise the leftover draft by.
+   */
+  const saveLeavingTheDraftBehind = async (tree) => {
+    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
+
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-option-family');
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(textAt(tree, 'capture-saved-notice')).toMatch(/saved/i);
+    return CaptureDraftStore.addPiece.mock.calls[0][1].localId;
+  };
+
+  /** The leftover row, as the store would hand it back on the next mount. */
+  const leftoverNote = (localId, content = 'Rain on the bus window') => [
+    {
+      localId,
+      kind: 'text',
+      content,
+      capturedAt: new Date(2026, 10, 8, 8, 41).toISOString(),
+    },
+  ];
+
   /**
    * The ghost. `clearAfterSave` runs after the memory is on the phone and can fail on its
    * own account, and when it does the draft row outlives the memory it was a draft of. The
@@ -2147,28 +2175,13 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
    * the save path refuses to report a successful save as a failure in order to avoid.
    */
   it('lets it go the next time + is tapped, and offers no phantom unsaved memory', async () => {
-    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
-
     const first = await render();
-    await tap(first, 'capture-type-button');
-    await type(first, 'piece-note-input-0', 'Rain on the bus window');
-    await tap(first, 'capture-save-button');
-    await tap(first, 'audience-option-family');
-
-    expect(createEntry).toHaveBeenCalledTimes(1);
-    expect(textAt(first, 'capture-saved-notice')).toMatch(/saved/i);
+    const localId = await saveLeavingTheDraftBehind(first);
     await tap(first, 'capture-close-button');
 
     // The row really is still there, and the store would happily hand it back.
     CaptureDraftStore.load.mockImplementation(async () =>
-      storedDraft([
-        {
-          localId: 'p1',
-          kind: 'text',
-          content: 'Rain on the bus window',
-          capturedAt: new Date(2026, 10, 8, 8, 41).toISOString(),
-        },
-      ]),
+      storedDraft(leftoverNote(localId)),
     );
     CaptureDraftStore.clearAfterSave.mockClear();
 
@@ -2182,29 +2195,52 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
   });
 
   /**
-   * The other side of it, and the one that would lose a piece if it were wrong. The screen
-   * stays open after a save whose tidying up failed, so the person can go on capturing into
-   * that same slot -- and the moment they do, the slot is a real unsaved memory again and
-   * must never be let go unasked.
+   * The first of the two sides that would lose a memory if they were wrong.
+   *
+   * The screen stays open after a save whose tidying up failed, so the person can go on
+   * typing into the note that is still on it -- and the moment they do, that slot holds
+   * something that was never saved. Typing is the shape the piece-for-piece check cannot see
+   * on its own, because editing a note that is already there leaves every id exactly as it
+   * was.
    */
-  it('treats the slot as a real unsaved memory again once something new goes into it', async () => {
-    CaptureDraftStore.clearAfterSave.mockRejectedValueOnce(new Error('database is locked'));
-
+  it('treats the slot as unsaved again once the person types into it', async () => {
     const first = await render();
-    await tap(first, 'capture-type-button');
-    await tap(first, 'capture-save-button');
-    await tap(first, 'audience-option-family');
-    expect(textAt(first, 'capture-saved-notice')).toMatch(/saved/i);
+    const localId = await saveLeavingTheDraftBehind(first);
 
-    // The person carries on: one more clip, into the slot that was left behind.
-    await tap(first, 'voice-record-button');
-    await tap(first, 'voice-stop-button');
+    // They carry on writing in the note that is still on screen.
+    await type(first, 'piece-note-input-0', 'Rain on the bus window, and the arcade lights');
     await tap(first, 'capture-close-button');
 
     CaptureDraftStore.load.mockImplementation(async () =>
+      storedDraft(leftoverNote(localId, 'Rain on the bus window, and the arcade lights')),
+    );
+    CaptureDraftStore.clearAfterSave.mockClear();
+
+    const second = await render();
+
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(rows(second)).toHaveLength(1);
+    expect(valueAt(second, 'piece-note-input-0')).toBe(
+      'Rain on the bus window, and the arcade lights',
+    );
+  });
+
+  /**
+   * The second side. Letting go of a draft is irreversible -- it takes the pieces and their
+   * media with it -- so "a save left something behind in this slot" is never enough on its
+   * own. It has to be *this* draft. Any other draft in that slot is somebody's unsaved
+   * memory, and SC-002 is zero pieces lost.
+   */
+  it('leaves a draft that is not the one that was saved alone', async () => {
+    const first = await render();
+    await saveLeavingTheDraftBehind(first);
+    await tap(first, 'capture-close-button');
+
+    // A different memory in the slot by the time + is tapped again.
+    CaptureDraftStore.load.mockImplementation(async () =>
       storedDraft([
         {
-          localId: 'p9',
+          localId: 'a-different-piece',
           kind: 'audio',
           uri: 'file:///documents/capture-drafts/new/p9.m4a',
           duration: 31,

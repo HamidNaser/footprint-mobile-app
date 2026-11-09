@@ -41,10 +41,28 @@
  * here opens the audience sheet for an edit -- FR-010 forbids it there. Nothing navigates to
  * this screen with `mode: 'edit'` until T060.
  *
- * **Durability is T039/T040**: the `AppState` flush, the text-blur flush and the Try again
- * on a failed save. What is already here is what the other rulings required: the mount's
- * `load` (which is also what warms the draft store's cache), and a save that leaves the
- * draft exactly where it was when anything goes wrong.
+ * **Durability is T040**, and it is User Story 2: whatever happens mid-capture, what was
+ * captured is still here afterwards, private, until the person saves or discards it.
+ *
+ *   - **The unsaved memory is written whenever it may be taken away** (FR-012). The store
+ *     writes after every piece and half a second after the last keystroke by itself; the two
+ *     moments it asks its caller for are the keyboard leaving a note and the app leaving the
+ *     foreground -- `background` or `inactive`, which is the phone locking, an incoming call
+ *     and the app switcher, and the last moment before the operating system may close the app.
+ *     Close is a third, for the half second after the last keystroke.
+ *   - **A failed save can be tried again** (FR-017), for exactly one failure: a `createEntry`
+ *     that rejected. Everything after `createEntry` resolves reports a *saved* memory and
+ *     never arms it, because a retry there writes the memory twice -- which is the defect the
+ *     save path below is shaped around.
+ *   - **A draft left behind by a save whose tidying up failed never comes back as a phantom
+ *     unsaved memory** (`draftsLeftAfterSave`).
+ *   - **None of it ever leaves the phone** (FR-014, SC-004). Everything captured goes into the
+ *     `capture_drafts` slot and nowhere else, and nothing here reaches the sync machinery; the
+ *     only write of a memory is `createEntry`, after the person has chosen who can see it.
+ *
+ * What jest cannot prove, and what is therefore nowhere claimed: the phone actually locking,
+ * a real incoming call, and the operating system force-closing the app. Those are the owner's
+ * device checks Q-D1, Q-D2, Q-D3 and Q-D6.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -55,6 +73,7 @@ import {
   ScrollView,
   StyleSheet,
   Alert,
+  AppState,
   Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -89,8 +108,11 @@ const lostCaptureMessage = (kind) =>
  * FR-017, and the draft store's deliberate behaviour: a failed write leaves the slot
  * unwritten so the next one retries it, which means the memory **is still on the phone**.
  * Saying it was lost would be false as well as frightening.
+ *
+ * The instruction to try again is the Try again button beside it rather than words in the
+ * sentence, which is what the UI contract asks for ("banner … + Try again").
  */
-const SAVE_FAILED_MESSAGE = 'Couldn’t save — your memory is still here. Try again.';
+const SAVE_FAILED_MESSAGE = 'Couldn’t save — your memory is still here.';
 
 /** The microphone refusal the voice bar delegates upward (UI contract). */
 const MICROPHONE_DENIED_MESSAGE =
@@ -145,6 +167,47 @@ const SAVED_MESSAGE =
 /** "Draft kept · n pieces" (UI contract), in English for one. */
 const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
 
+/**
+ * Which draft each slot was left holding by a save that worked: slot → its pieces' identity.
+ *
+ * Module state, deliberately: what it guards against happens on the **next** mount, so it has
+ * to outlive this screen. `clearAfterSave` runs once `createEntry` has resolved and can fail
+ * on its own account -- it opens the database and runs a `DELETE` -- and `performSave` will
+ * not report that as a failed save, because reporting a successful save as a failure is how a
+ * memory gets written twice. What it leaves behind is a draft row for a memory that is already
+ * in the Journal, and without this the next tap on + would restore it as an unsaved memory and
+ * offer Save for the second copy.
+ *
+ * **It records the draft, not just the slot**, and the next mount lets a draft go only when the
+ * draft it actually found is piece-for-piece the one that was saved. Anything else in that slot
+ * is somebody's unsaved memory, and the one thing worse than a phantom draft is letting go of a
+ * real one. That covers a piece captured after the save by itself: the screen stays open after a
+ * save whose tidying up failed, and a new piece changes the identity below.
+ *
+ * What it does not cover is **typing into a note that is already there**, which changes nothing
+ * about the identity -- so `handleChangeText` forgets the slot outright. From the first
+ * keystroke after that save, the slot holds something that was never saved.
+ *
+ * **Its limit, said rather than hidden:** it lives in memory, so it does not survive the app
+ * being force-closed between the failed clear and the next +. There the leftover draft comes
+ * back, indistinguishable from a genuine unsaved memory, and so it is shown -- the safe
+ * direction, since SC-002 is zero pieces lost. Surviving that would mean recording the fact
+ * *in* the draft row, which is a change to `CaptureDraftStore`'s slot model that the plan did
+ * not anticipate, so it is reported rather than taken.
+ */
+const draftsLeftAfterSave = new Map();
+
+/**
+ * A draft's pieces, as a value two drafts can be compared by -- or **null** if any piece
+ * carries no id, because then there is nothing to compare and a guess would be a guess about
+ * whether to delete somebody's memory. A null never matches, so an unidentifiable draft is
+ * simply shown, which is the safe direction.
+ */
+const pieceIdentity = (pieces = []) =>
+  pieces.length && pieces.every((piece) => piece?.localId)
+    ? pieces.map((piece) => piece.localId).join('|')
+    : null;
+
 export default function CaptureScreen({ route, navigation }) {
   const isEditMode = route?.params?.mode === 'edit';
   const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
@@ -164,6 +227,11 @@ export default function CaptureScreen({ route, navigation }) {
   const [saveError, setSaveError] = useState(null);
   /** SAVED_MESSAGE, once the memory is saved and something after it did not finish. */
   const [savedNotice, setSavedNotice] = useState(null);
+  /**
+   * The audience already chosen for this memory, so Try again does not ask again (FR-017).
+   * Null until the sheet has been answered, which is also the only time a save can fail.
+   */
+  const [chosenAudience, setChosenAudience] = useState(null);
   const [permissionNotice, setPermissionNotice] = useState(null);
   /** Which note should take the keyboard, and a nonce so the same one can be asked twice. */
   const [focusRequest, setFocusRequest] = useState(null);
@@ -178,6 +246,13 @@ export default function CaptureScreen({ route, navigation }) {
    * tick as the capture that made it, before any render.
    */
   const capturesInFlightRef = useRef(0);
+  /**
+   * Whether a save is between its first line and its outcome. A ref rather than `isSaving`
+   * for the same reason as the two above: both of Save's callers are taps, and Try again's
+   * second tap in a tick cannot wait for a render -- and two of them would be two memories.
+   * Released only where nothing was written (see `performSave`).
+   */
+  const saveInFlightRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -204,6 +279,56 @@ export default function CaptureScreen({ route, navigation }) {
   }, [user?.id]);
 
   /**
+   * Write the unsaved memory now (FR-012).
+   *
+   * Fire-and-forget, and the rejection is caught here, because every caller is a synchronous
+   * one with nowhere to await: an `AppState` handler, a `TextInput`'s `onBlur`, and Close.
+   *
+   * A failure says nothing on screen on purpose. The store leaves the slot unwritten when a
+   * write fails, precisely so the next flush retries it, so the memory **is** still on the
+   * phone -- and the one thing this screen may never do is tell somebody a memory was lost
+   * when it was not.
+   */
+  const flushDraft = useCallback(
+    (reason) => {
+      (async () => {
+        try {
+          await CaptureDraftStore.flush(slot);
+        } catch (error) {
+          console.warn(
+            `[CaptureScreen] the unsaved memory could not be written (${reason}); it is still ` +
+              'in the draft store and the next write will retry it',
+            error,
+          );
+        }
+      })();
+    },
+    [slot],
+  );
+
+  /**
+   * FR-012's "immediately when the app leaves the foreground", which is the trigger that
+   * covers the phone locking, an incoming call and the app being closed by the system
+   * afterwards: from this screen all three arrive as one `AppState` change, and after it the
+   * app may never run again.
+   *
+   * **Leaving, not arriving.** `active` is the way back, has nothing to save from, and a
+   * flush there would be a database write on every unlock. `inactive` is iOS's incoming call
+   * and app switcher; `background` is the lock and the switch away (research R7).
+   *
+   * Not branched on the mode: an edit slot that has had no change is not unwritten, and the
+   * store's `flush` does nothing for a slot with nothing to write.
+   */
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'background' || next === 'inactive') {
+        flushDraft(`AppState → ${next}`);
+      }
+    });
+    return () => subscription?.remove?.();
+  }, [flushDraft]);
+
+  /**
    * The unsaved memory, if there is one (FR-013: tapping + reopens it).
    *
    * It is also what puts this slot in the draft store's hand before anything can type into
@@ -218,14 +343,36 @@ export default function CaptureScreen({ route, navigation }) {
 
     let cancelled = false;
     (async () => {
+      let draft;
       try {
-        const draft = await CaptureDraftStore.load(slot);
-        if (!cancelled && draft?.pieces?.length) {
-          setPieces(draft.pieces);
-        }
+        draft = await CaptureDraftStore.load(slot);
       } catch (error) {
         console.warn('[CaptureScreen] could not read the unsaved memory', error);
+        return;
       }
+      if (cancelled || !draft?.pieces?.length) return;
+
+      // Is this the very draft the last save already wrote as a memory, left behind only
+      // because letting it go failed (see `draftsLeftAfterSave`)? If it is, it is not an
+      // unsaved memory: it is let go rather than restored, because restoring it would offer
+      // Save for a memory that is already in the Journal. Compared piece for piece -- any
+      // other draft in that slot is somebody's unsaved memory and is never let go unasked.
+      const identity = pieceIdentity(draft.pieces);
+      if (identity !== null && draftsLeftAfterSave.get(slot) === identity) {
+        try {
+          await CaptureDraftStore.clearAfterSave(slot);
+          draftsLeftAfterSave.delete(slot);
+        } catch (error) {
+          // Still there, and still not an unsaved memory. The next + tries again.
+          console.warn(
+            '[CaptureScreen] the draft of an already-saved memory still could not be let go',
+            error,
+          );
+        }
+        return;
+      }
+
+      setPieces(draft.pieces);
     })();
     return () => {
       cancelled = true;
@@ -326,6 +473,11 @@ export default function CaptureScreen({ route, navigation }) {
   /** A keystroke. Synchronous all the way down: typing never waits for a copy. */
   const handleChangeText = useCallback(
     (piece, content) => {
+      // A keystroke is the one change a draft's piece identity cannot see, so it is said here
+      // outright: from now on this slot holds something that was never saved. See
+      // `draftsLeftAfterSave`.
+      draftsLeftAfterSave.delete(slot);
+
       setPieces((previous) =>
         previous.map((candidate) =>
           candidate.localId === piece.localId ? { ...candidate, content } : candidate,
@@ -341,6 +493,15 @@ export default function CaptureScreen({ route, navigation }) {
     },
     [slot],
   );
+
+  /**
+   * The keyboard has left a note: the person has stopped typing, so write it now rather than
+   * waiting out the store's half-second debounce (FR-012, research R7). This is the caller
+   * `PieceList`'s `onBlurText` has been waiting for since T030.
+   */
+  const handleBlurText = useCallback(() => {
+    flushDraft('the keyboard left a note');
+  }, [flushDraft]);
 
   /** One clip per recording. `capturedAt` is when recording **started** (research R8). */
   const handleClip = useCallback(
@@ -418,8 +579,12 @@ export default function CaptureScreen({ route, navigation }) {
   /** Close never discards, in either mode (FR-015, UI contract). Leaving is just leaving. */
   const handleClose = useCallback(() => {
     setIsMenuOpen(false);
+    // FR-012 names the screen being closed. The store's debounced write would land by itself
+    // -- but only because the store is a module that outlives this screen, which is not a
+    // thing to be relying on for the half second after the last keystroke.
+    flushDraft('the screen was closed');
     navigation?.goBack?.();
-  }, [navigation]);
+  }, [flushDraft, navigation]);
 
   const handleDiscardConfirmed = useCallback(async () => {
     try {
@@ -483,6 +648,10 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const performSave = useCallback(
     async (visibility) => {
+      // Synchronous, before any render can carry `isSaving`: both callers are taps, and Try
+      // again's second tap in a tick would otherwise be a second memory.
+      if (saveInFlightRef.current) return;
+      saveInFlightRef.current = true;
       setIsSaving(true);
 
       try {
@@ -496,23 +665,29 @@ export default function CaptureScreen({ route, navigation }) {
         });
       } catch (error) {
         console.error('[CaptureScreen] the memory could not be saved', error);
+        // Save is handed back here and only here: nothing was written, so a second tap -- or
+        // Try again, which is armed by this same banner -- is a retry rather than a duplicate.
+        saveInFlightRef.current = false;
         if (mountedRef.current) {
           setSaveError(SAVE_FAILED_MESSAGE);
-          // Save is handed back here and only here: nothing was written, so a second tap is
-          // a retry rather than a duplicate.
           setIsSaving(false);
         }
         return;
       }
 
-      // The memory is on the phone. Nothing below may claim otherwise or re-arm Save.
+      // The memory is on the phone. Nothing below may claim otherwise, re-arm Save, or offer
+      // Try again -- a retry from here would write the memory a second time.
       try {
         await CaptureDraftStore.clearAfterSave(slot);
+        draftsLeftAfterSave.delete(slot);
       } catch (error) {
         console.warn(
           '[CaptureScreen] the memory saved, but the unsaved copy could not be let go',
           error,
         );
+        // The draft row has outlived the memory it was a draft of. Remembered, piece for
+        // piece, so the next tap on + lets this draft go instead of offering it as unsaved.
+        draftsLeftAfterSave.set(slot, pieceIdentity(pieces));
         if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
       }
 
@@ -527,6 +702,22 @@ export default function CaptureScreen({ route, navigation }) {
   );
 
   /**
+   * What stops a save this instant, in words, or null.
+   *
+   * Shared by Save and Try again, because a retry runs the very same write from the very same
+   * `pieces` and so has to wait for the very same things. Both are said rather than ignored: a
+   * button that does nothing is indistinguishable from a button that is broken -- and the
+   * capture-in-flight one has no visible cue at all.
+   */
+  const saveBlockedMessage = useCallback(() => {
+    if (isRecording) return STOP_RECORDING_FIRST_MESSAGE;
+    // Neither `isRecording` nor `pieces.length` can see a capture already taken and still on
+    // its way into the draft, and that is the one this screen could lose silently.
+    if (capturesInFlightRef.current > 0) return CAPTURE_IN_FLIGHT_MESSAGE;
+    return null;
+  }, [isRecording]);
+
+  /**
    * FR-010: a new memory asks who can see it, in one sheet, and nothing else.
    *
    * An edit saves straight away with the memory's existing audience and **no sheet** -- that
@@ -537,32 +728,52 @@ export default function CaptureScreen({ route, navigation }) {
     if (pieces.length === 0 || isSaving || isEditMode) return;
     setIsMenuOpen(false);
 
-    // Said rather than ignored: a Save button that does nothing is indistinguishable from a
-    // Save button that is broken.
-    if (isRecording) {
-      setCaptureError(STOP_RECORDING_FIRST_MESSAGE);
-      return;
-    }
-
-    // Neither `isRecording` nor `pieces.length` can see a capture already taken and still on
-    // its way into the draft, and that is the one this screen could lose silently.
-    if (capturesInFlightRef.current > 0) {
-      setCaptureError(CAPTURE_IN_FLIGHT_MESSAGE);
+    const blocked = saveBlockedMessage();
+    if (blocked) {
+      setCaptureError(blocked);
       return;
     }
 
     setSaveError(null);
     setIsAudienceSheetOpen(true);
-  }, [isEditMode, isRecording, isSaving, pieces.length]);
+  }, [isEditMode, isSaving, pieces.length, saveBlockedMessage]);
 
   /** FR-011: a choice saves; a dismissal saves nothing and defaults to nothing. */
   const handleAudienceChosen = useCallback(
     (visibility) => {
       setIsAudienceSheetOpen(false);
+      // Kept so that Try again does not ask the same question about the same memory twice.
+      setChosenAudience(visibility);
       void performSave(visibility);
     },
     [performSave],
   );
+
+  /**
+   * FR-017's "offer to try again".
+   *
+   * **It is offered for one failure and one only**: a `createEntry` that rejected, which is
+   * the only thing in this file that sets `saveError`. Letting the draft go and closing the
+   * screen both happen *after* the memory is on the phone, and both report a saved memory
+   * instead -- so a Try again can never be reached for a save that actually happened, and can
+   * never write the memory a second time.
+   *
+   * It does not ask for the audience again: the person has already answered that about this
+   * memory, and asking twice would also let a dismissal strand a memory they had already said
+   * who could see.
+   */
+  const handleRetrySave = useCallback(() => {
+    if (isSaving || chosenAudience == null) return;
+
+    const blocked = saveBlockedMessage();
+    if (blocked) {
+      setCaptureError(blocked);
+      return;
+    }
+
+    setSaveError(null);
+    void performSave(chosenAudience);
+  }, [chosenAudience, isSaving, performSave, saveBlockedMessage]);
 
   const handleAudienceDismissed = useCallback(() => {
     setIsAudienceSheetOpen(false);
@@ -656,6 +867,15 @@ export default function CaptureScreen({ route, navigation }) {
             <Text testID="capture-save-error" style={styles.noticeText}>
               {saveError}
             </Text>
+            <TouchableOpacity
+              testID="capture-save-retry-button"
+              accessibilityRole="button"
+              accessibilityLabel="Try saving again"
+              style={styles.noticeButton}
+              onPress={handleRetrySave}
+            >
+              <Text style={styles.noticeButtonText}>Try again</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -701,6 +921,7 @@ export default function CaptureScreen({ route, navigation }) {
           <PieceList
             pieces={pieces}
             onChangeText={handleChangeText}
+            onBlurText={handleBlurText}
             focusRequest={focusRequest}
           />
         </ScrollView>
