@@ -5,33 +5,27 @@
  * a scrollable list of event cards, and a FAB to create a new event. Data comes
  * from `useEvents(tab)` which uses the Hub API when authenticated and falls back
  * to mock data otherwise.
+ *
+ * The list body (loading / empty / error states, the rows themselves) is
+ * `EventsList` (T064, research R11) — the same component the Timeline tab's
+ * Events pane uses, in its flat-list mode. `route.params.initialTab` is read as a
+ * plain prop, not via `useRoute()`, so a direct render with no navigator (as this
+ * screen's own FR-035 regression guard, `EventsScreen.route.test.js`, does) still
+ * works and still defaults to 'my' — additive only, every existing way of reaching
+ * this screen keeps working unchanged.
  */
 
 import React, { useState, useCallback, memo } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  FlatList,
-  ActivityIndicator,
-  RefreshControl,
-} from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { EVENT_TABS } from '../data/eventsData';
 import { useEvents } from '../hooks/useEvents';
-import { EventCard } from '../components/events';
+import { EventsList } from '../components/events';
 
 const PRIMARY = '#4361ee';
 const BACKGROUND = '#F0F4FF';
-
-const TAB_EMPTY = {
-  my: { icon: 'calendar-outline', title: 'No events yet', hint: 'Tap + to create your first event.' },
-  invites: { icon: 'mail-outline', title: 'No invitations', hint: "Invitations you receive will show up here." },
-  drafts: { icon: 'document-outline', title: 'No drafts', hint: 'Saved-but-unsent events live here.' },
-};
 
 const Header = memo(({ onBack }) => (
   <View style={styles.header}>
@@ -65,43 +59,11 @@ const SegmentedTabs = memo(({ active, onChange }) => (
 ));
 SegmentedTabs.displayName = 'SegmentedTabs';
 
-const EmptyState = memo(({ tab }) => {
-  const cfg = TAB_EMPTY[tab] || TAB_EMPTY.my;
-  return (
-    <View style={styles.empty}>
-      <Ionicons name={cfg.icon} size={54} color="#c7d2fe" />
-      <Text style={styles.emptyTitle}>{cfg.title}</Text>
-      <Text style={styles.emptyHint}>{cfg.hint}</Text>
-    </View>
-  );
-});
-EmptyState.displayName = 'EventsEmptyState';
-
-/**
- * Shown when the request failed. Distinct from EmptyState on purpose: "you have
- * no events" and "we could not ask" are different facts, and collapsing them
- * into one blank screen is what hid the failure before.
- */
-const ErrorState = memo(({ error, onRetry }) => {
-  const detail = [error?.status, error?.code].filter(Boolean).join(' · ');
-  return (
-    <View style={styles.empty}>
-      <Ionicons name="cloud-offline-outline" size={54} color="#fca5a5" />
-      <Text style={styles.emptyTitle}>Couldn't load events</Text>
-      <Text style={styles.emptyHint}>{error?.message || 'Something went wrong.'}</Text>
-      {!!detail && <Text style={styles.errorDetail}>{detail}</Text>}
-      <TouchableOpacity style={styles.retryBtn} onPress={onRetry}>
-        <Ionicons name="refresh" size={18} color="#fff" />
-        <Text style={styles.retryText}>Try again</Text>
-      </TouchableOpacity>
-    </View>
-  );
-});
-ErrorState.displayName = 'EventsErrorState';
-
-export default function EventsScreen() {
+export default function EventsScreen({ route }) {
   const navigation = useNavigation();
-  const [activeTab, setActiveTab] = useState('my');
+  const requestedTab = route?.params?.initialTab;
+  const initialTab = EVENT_TABS.some((t) => t.id === requestedTab) ? requestedTab : 'my';
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [refreshing, setRefreshing] = useState(false);
   const { events, isLoading, error, refresh } = useEvents(activeTab);
 
@@ -122,37 +84,21 @@ export default function EventsScreen() {
     setTimeout(() => setRefreshing(false), 600);
   }, [refresh]);
 
-  const renderItem = useCallback(
-    ({ item }) => <EventCard event={item} onPress={handleSelect} />,
-    [handleSelect]
-  );
-
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <Header onBack={() => navigation.goBack()} />
       <SegmentedTabs active={activeTab} onChange={setActiveTab} />
 
-      {isLoading && !refreshing ? (
-        <View style={styles.loading}>
-          <ActivityIndicator size="large" color={PRIMARY} />
-        </View>
-      ) : (
-        <FlatList
-          data={events}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.list}
-          ListEmptyComponent={
-            error
-              ? <ErrorState error={error} onRetry={refresh} />
-              : <EmptyState tab={activeTab} />
-          }
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={PRIMARY} />
-          }
-          showsVerticalScrollIndicator={false}
-        />
-      )}
+      <EventsList
+        events={events}
+        tab={activeTab}
+        isLoading={isLoading}
+        error={error}
+        refreshing={refreshing}
+        onRefresh={handleRefresh}
+        onRetry={refresh}
+        onSelect={handleSelect}
+      />
 
       <TouchableOpacity style={styles.fab} onPress={handleCreate} activeOpacity={0.85}>
         <Ionicons name="add" size={30} color="#fff" />
@@ -184,26 +130,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#1e293b',
   },
-  errorDetail: {
-    marginTop: 6,
-    fontSize: 12,
-    color: '#94a3b8',
-  },
-  retryBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    backgroundColor: '#4361ee',
-  },
-  retryText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
   tabs: {
     flexDirection: 'row',
     backgroundColor: '#e2e8f0',
@@ -233,34 +159,6 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: PRIMARY,
-  },
-  loading: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  list: {
-    paddingTop: 4,
-    paddingBottom: 100,
-    flexGrow: 1,
-  },
-  empty: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingTop: 80,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#1e293b',
-    marginTop: 16,
-  },
-  emptyHint: {
-    fontSize: 14,
-    color: '#64748b',
-    textAlign: 'center',
-    marginTop: 6,
   },
   fab: {
     position: 'absolute',
