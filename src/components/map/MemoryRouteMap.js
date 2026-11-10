@@ -63,8 +63,8 @@ const ROUTE_DASH_PATTERN = [5, 5];
 
 /**
  * The region that shows every group, from the coordinates themselves rather than by calling
- * `fitToCoordinates` on a ref: the map is static, so the opening region is the only region,
- * and arithmetic needs no map instance and no `onMapReady`.
+ * `fitToCoordinates` on a ref: the map takes no gestures, so the region is always the one that
+ * fits the pins, and arithmetic needs no map instance and no `onMapReady`.
  */
 function regionFor(groups) {
   const lats = groups.map((group) => group.lat);
@@ -100,6 +100,17 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
     [entry, serverUpdatedAt],
   );
 
+  // `region`, not `initialRegion`: `initialRegion` applies once, at mount, and this map takes
+  // no gestures, so a viewport left behind by a memory whose places changed under it could not
+  // be recovered -- the pins would sit off-screen with no pan and no zoom to find them. Editing
+  // a saved memory in place is part of this feature (FR-018), and a refetched entry re-renders
+  // this card without unmounting it. There is no user-adjusted viewport to preserve here, which
+  // is what `initialRegion` is for.
+  //
+  // Memoized on the groups, because a fresh object on every render would re-apply the region --
+  // and on a real map re-applying it mid-animation is how a map judders.
+  const region = useMemo(() => (groups.length === 0 ? null : regionFor(groups)), [groups]);
+
   // FR-022: a memory with no places shows no map at all -- not an empty one, and not a
   // heading over nothing. Its card then looks exactly as it does today (SC-008).
   if (groups.length === 0) return null;
@@ -120,7 +131,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
         <MapView
           style={StyleSheet.absoluteFill}
           provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
-          initialRegion={regionFor(groups)}
+          region={region}
           showsUserLocation={false}
           showsMyLocationButton={false}
           scrollEnabled={false}
