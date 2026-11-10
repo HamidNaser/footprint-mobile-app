@@ -16,7 +16,9 @@
  * string compare of `'YYYY-MM-DD' >= localToday` never does.
  */
 
-jest.mock('../../api', () => ({ EventsApi: { getEvents: jest.fn() } }));
+jest.mock('../../api', () => ({
+  EventsApi: { getEvents: jest.fn(), isAuthenticated: jest.fn() },
+}));
 
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
@@ -25,7 +27,88 @@ import { useUpcomingEvents } from '../useUpcomingEvents';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
-const originalTZ = process.env.TZ;
+/**
+ * A local, explicit time-zone shim for the two FR-032 cases below -- not a request to the
+ * OS/ICU for a real zone.
+ *
+ * The documented ways to simulate a device in a different zone are reassigning
+ * `process.env.TZ` mid-process, or `jest.useFakeTimers({ timezone })`. Both are reported to
+ * work by a reviewer who redid this arithmetic independently. **On this machine, neither one
+ * does** -- verified directly: a bare `node -e` script honours a mid-process `process.env.TZ`
+ * change immediately (confirmed repeatedly, offsets 600 and -780, matching the reviewer), but
+ * the identical reassignment made no difference at all once run through this project's Jest
+ * (with or without fake timers, with or without `--runInBand`, in a from-scratch throwaway
+ * Jest project with none of this project's config). `@sinonjs/fake-timers`' own `timezone`
+ * option, exercised directly and outside Jest entirely, did not move `getTimezoneOffset()`
+ * here either. Subclassing the installed fake `Date` doesn't work either, for a third,
+ * independent reason verified the same way: `@sinonjs/fake-timers`' fake `Date` constructor
+ * does not thread `new.target` through to a derived class, so `new Foo()` (`Foo extends
+ * global.Date`) silently comes back as a plain fake `Date`, not a `Foo` -- `instanceof Foo` is
+ * `false` and the subclass's overrides are never consulted. This is a genuine, verified gap on
+ * this machine's Node/Jest/Windows combination, not a typo in a zone string -- and per Minor 3,
+ * these two cases exist specifically to guard a bug this product has already shipped once, so
+ * they must not pass for the wrong reason on whichever machine happens to run them.
+ *
+ * This shim sidesteps the OS/ICU/fake-timers mechanisms rather than depending on any of them:
+ * a freestanding replacement for `global.Date` (no inheritance, so the `new.target` trap above
+ * cannot recur) that returns a fixed instant for `new Date()` with no arguments -- the only
+ * form the hook under test calls -- with `getFullYear`/`getMonth`/`getDate` computed from that
+ * instant under an explicit offset, and `getTimezoneOffset`/`getTime`/`Date.now` reporting
+ * consistently with it. Deterministic on every machine, this one included, without weakening
+ * what the two cases prove: the fixed instant is still a real, correct absolute instant, so an
+ * instant-based comparison (what these cases exist to catch) would compare against it exactly
+ * as it would against a real device's clock. A `Date` constructed with arguments (none of this
+ * file's own code does, but something else might) has its time computed by the real `Date`,
+ * just not re-wrapped in it -- only the handful of methods this file needs are implemented.
+ */
+function installSimulatedNow(offsetMinutes, epochMs) {
+  const RealDate = global.Date;
+
+  function localPartsOf(ms) {
+    // local = UTC - offset (offsetMinutes is minutes to ADD to local to reach UTC).
+    const shifted = new RealDate(ms - offsetMinutes * 60000);
+    return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() };
+  }
+
+  class SimulatedDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        this._ms = epochMs;
+      } else {
+        this._ms = new RealDate(...args).getTime();
+      }
+    }
+    getTime() {
+      return this._ms;
+    }
+    valueOf() {
+      return this._ms;
+    }
+    getTimezoneOffset() {
+      return offsetMinutes;
+    }
+    getFullYear() {
+      return localPartsOf(this._ms).y;
+    }
+    getMonth() {
+      return localPartsOf(this._ms).m;
+    }
+    getDate() {
+      return localPartsOf(this._ms).d;
+    }
+  }
+  SimulatedDate.now = () => epochMs;
+
+  global.Date = SimulatedDate;
+  return () => {
+    global.Date = RealDate;
+  };
+}
+
+/** The UTC instant for a local wall-clock time under a given offset (minutes to add to local to reach UTC). */
+function localInstant(offsetMinutes, year, month, day, hour, minute) {
+  return Date.UTC(year, month, day, hour, minute) + offsetMinutes * 60000;
+}
 
 function setup() {
   const out = { current: null };
@@ -67,6 +150,8 @@ const event = (overrides) => ({
 beforeEach(() => {
   jest.useFakeTimers();
   EventsApi.getEvents.mockReset();
+  EventsApi.isAuthenticated.mockReset();
+  EventsApi.isAuthenticated.mockReturnValue(true);
   // A neutral instant, nowhere near a day boundary, so ordering/dedup/drafts cases are not
   // accidentally sensitive to the civil-date split under test elsewhere in this file.
   jest.setSystemTime(new Date(2026, 0, 1, 12, 0));
@@ -74,8 +159,6 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-  if (originalTZ === undefined) delete process.env.TZ;
-  else process.env.TZ = originalTZ;
 });
 
 describe('useUpcomingEvents: sources', () => {
@@ -90,15 +173,16 @@ describe('useUpcomingEvents: sources', () => {
     expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
   });
 
-  it('merges my + invites, de-duplicated by id, published only', async () => {
+  it('merges my + invites, de-duplicated by id, published only, host copy wins but its RSVP is carried over when it has none', async () => {
     mockTabs({
       my: [
         event({ id: 'hosted', date: '2099-01-01' }),
-        event({ id: 'shared', date: '2099-01-02' }),
+        // Co-hosted: same id as an invite below. The two copies differ (title, rsvp) so the
+        // test can tell which one actually survived the merge, not just that one did.
+        event({ id: 'shared', date: '2099-01-02', title: 'My Copy', rsvp: null }),
       ],
       invites: [
-        // Same id as a hosted event (e.g. co-hosted) -- counted once, not twice.
-        event({ id: 'shared', date: '2099-01-02' }),
+        event({ id: 'shared', date: '2099-01-02', title: 'Invite Copy', rsvp: 'going' }),
         event({ id: 'invited', date: '2099-01-03' }),
         // An invite that is not published (still a draft on the host's side) never appears.
         event({ id: 'unpublished-invite', date: '2099-01-04', status: 'draft' }),
@@ -108,8 +192,24 @@ describe('useUpcomingEvents: sources', () => {
     const { result, mount } = setup();
     await mount();
 
-    const ids = [...result.current.upcoming, ...result.current.past].map((e) => e.id);
-    expect(ids.sort()).toEqual(['hosted', 'invited', 'shared']);
+    const merged = [...result.current.upcoming, ...result.current.past];
+    expect(merged.map((e) => e.id).sort()).toEqual(['hosted', 'invited', 'shared']);
+
+    const shared = merged.find((e) => e.id === 'shared');
+    expect(shared.title).toBe('My Copy'); // the host's own copy is the base, not the invite's
+    expect(shared.rsvp).toBe('going'); // ...but its missing RSVP is carried over from the invite
+  });
+
+  it("keeps the host's own RSVP when the host copy already has one", async () => {
+    mockTabs({
+      my: [event({ id: 'shared', date: '2099-01-02', rsvp: 'maybe' })],
+      invites: [event({ id: 'shared', date: '2099-01-02', rsvp: 'going' })],
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    const [shared] = [...result.current.upcoming, ...result.current.past];
+    expect(shared.rsvp).toBe('maybe');
   });
 
   it('reports draftsCount from the drafts tab', async () => {
@@ -156,30 +256,89 @@ describe('useUpcomingEvents: FR-032 civil-date split (no Date built from the civ
     // Local day has barely begun; the real UTC instant is already 10h into "today" in UTC
     // terms (or past midnight into the next UTC day, depending on the date), so an
     // instant-based compare puts a UTC-midnight-parsed "today" behind "now" and calls it past.
-    process.env.TZ = 'Etc/GMT+10'; // POSIX sign is inverted: this is UTC-10.
-    jest.setSystemTime(new Date(2026, 10, 10, 0, 5)); // 10 Nov 2026, 00:05 local.
-    mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+    jest.useRealTimers(); // the shim supplies its own fixed "now"; no jest clock needed here.
+    const UTC_MINUS_10 = 600; // minutes to ADD to local to reach UTC.
+    const epoch = localInstant(UTC_MINUS_10, 2026, 10, 10, 0, 5); // 10 Nov 2026, 00:05 local.
+    const restoreNow = installSimulatedNow(UTC_MINUS_10, epoch);
+    try {
+      // Guard the guard (Minor 3): if the shim were not actually wired up, both sides of the
+      // split below would move together and this case would keep passing while silently no
+      // longer exercising UTC-10 at all.
+      expect(new Date().getTimezoneOffset()).toBe(600);
+      mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
 
-    const { result, mount } = setup();
-    await mount();
+      const { result, mount } = setup();
+      await mount();
 
-    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
-    expect(result.current.past).toEqual([]);
+      expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+      expect(result.current.past).toEqual([]);
+    } finally {
+      restoreNow();
+    }
   });
 
   it('counts a same-day event as upcoming at 23:55 local under UTC+13', async () => {
     // Local day is almost over; the real UTC instant for "now" is already well past the
     // UTC-midnight instant a civil-date parse would assign to "today", so the same
     // instant-based compare puts it in the past here too.
-    process.env.TZ = 'Etc/GMT-13'; // POSIX sign is inverted: this is UTC+13.
-    jest.setSystemTime(new Date(2026, 10, 10, 23, 55)); // 10 Nov 2026, 23:55 local.
-    mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+    jest.useRealTimers();
+    const UTC_PLUS_13 = -780; // minutes to ADD to local to reach UTC.
+    const epoch = localInstant(UTC_PLUS_13, 2026, 10, 10, 23, 55); // 10 Nov 2026, 23:55 local.
+    const restoreNow = installSimulatedNow(UTC_PLUS_13, epoch);
+    try {
+      // Same guard as the UTC-10 case above.
+      expect(new Date().getTimezoneOffset()).toBe(-780);
+      mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+
+      const { result, mount } = setup();
+      await mount();
+
+      expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+      expect(result.current.past).toEqual([]);
+    } finally {
+      restoreNow();
+    }
+  });
+});
+
+describe('useUpcomingEvents: a malformed date fails closed, not silent', () => {
+  // The wire contract (`EventResponse.Date`) is non-nullable, so this should not happen -- but
+  // of the three outcomes for a date that is not `YYYY-MM-DD`, "gone from both lists with no
+  // signal" is exactly what this product's fail-closed rule exists to rule out. Visible-but-
+  // misplaced beats invisible.
+  it('an event with a non-civil-date date string is kept upcoming rather than vanishing from both lists', async () => {
+    mockTabs({ my: [event({ id: 'bad-date', date: 'not-a-date' })] });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['bad-date']);
+    expect(result.current.past).toEqual([]);
+  });
+
+  it('an event with a missing date is also kept upcoming', async () => {
+    mockTabs({ my: [event({ id: 'no-date', date: undefined })] });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['no-date']);
+    expect(result.current.past).toEqual([]);
+  });
+});
+
+describe('useUpcomingEvents: signed out', () => {
+  it('asks no tab, fails closed with NOT_AUTHENTICATED, and never issues an unauthenticated request', async () => {
+    EventsApi.isAuthenticated.mockReturnValue(false);
+    mockTabs({ my: [event({ id: 'would-have-shown' })] });
 
     const { result, mount } = setup();
     await mount();
 
-    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+    expect(EventsApi.getEvents).not.toHaveBeenCalled();
+    expect(result.current.error).toMatchObject({ code: 'NOT_AUTHENTICATED' });
+    expect(result.current.upcoming).toEqual([]);
     expect(result.current.past).toEqual([]);
+    expect(result.current.draftsCount).toBe(0);
+    expect(result.current.isLoading).toBe(false);
   });
 });
 

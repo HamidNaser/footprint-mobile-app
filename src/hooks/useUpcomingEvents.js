@@ -12,9 +12,21 @@
  * same-day event to count as upcoming for the whole day; building a `Date` from a date-only
  * string parses it as UTC midnight, and comparing that instant against "now" can misclassify
  * today's own event once the device's time zone and the clock disagree about which side of
- * UTC midnight they fall on (constitution: a civil date is a day, not an instant).
+ * UTC midnight they fall on (constitution: a civil date is a day, not an instant). A `date`
+ * that is not a well-formed `YYYY-MM-DD` string (contract says this cannot happen, but fail
+ * closed rather than silently dropping the event) is treated as upcoming, so it is at least
+ * visible rather than vanishing from both lists with no signal.
+ *
+ * An event hosted by the caller and also appearing on their invites tab (e.g. co-hosted) keeps
+ * the `my` copy as the base -- the person hosts it, so their own copy is authoritative -- but
+ * carries over `rsvp` from the `invites` copy when the base has none, so it does not lose its
+ * RSVP in the merge.
  *
  * Drafts are counted, not listed, from `getEvents('drafts')`.
+ *
+ * Signed out: mirrors `useEvents` -- no network call, `error.code === 'NOT_AUTHENTICATED'`,
+ * empty lists, so the three tabs are never asked unauthenticated and the card can show the
+ * right message rather than a generic failure.
  *
  * Any one of the three calls failing yields `error` and empty lists -- never a partial result
  * (sharing/reads fail closed, CLAUDE.md).
@@ -30,6 +42,11 @@ function localToday() {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   const day = String(now.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+/** A well-formed civil date string -- the only shape the string split below is valid on. */
+function isCivilDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
 export function useUpcomingEvents() {
@@ -54,6 +71,19 @@ export function useUpcomingEvents() {
       setIsLoading(true);
       setError(null);
 
+      // Not signed in: no network call, same shape useEvents uses for the same case --
+      // otherwise all three tabs go out unauthenticated and come back 401s.
+      if (!EventsApi.isAuthenticated()) {
+        if (!cancelled && mountedRef.current) {
+          setUpcoming([]);
+          setPast([]);
+          setDraftsCount(0);
+          setError({ message: 'Sign in to see your events.', code: 'NOT_AUTHENTICATED' });
+          setIsLoading(false);
+        }
+        return;
+      }
+
       try {
         const [mine, invited, drafts] = await Promise.all([
           EventsApi.getEvents('my'),
@@ -62,24 +92,34 @@ export function useUpcomingEvents() {
         ]);
         if (cancelled || !mountedRef.current) return;
 
+        const invitedById = new Map((invited || []).filter(Boolean).map((e) => [e.id, e]));
         const seen = new Set();
-        const published = [...(mine || []), ...(invited || [])].filter((event) => {
-          if (!event || event.status !== 'published' || seen.has(event.id)) return false;
+        const published = [];
+        (mine || []).forEach((event) => {
+          if (!event || event.status !== 'published' || seen.has(event.id)) return;
           seen.add(event.id);
-          return true;
+          const invite = invitedById.get(event.id);
+          // Keep the host's own copy as the base; carry the RSVP over from the invite copy
+          // only when the host copy has none, so a co-hosted event never loses it.
+          published.push(event.rsvp != null || !invite ? event : { ...event, rsvp: invite.rsvp });
+        });
+        (invited || []).forEach((event) => {
+          if (!event || event.status !== 'published' || seen.has(event.id)) return;
+          seen.add(event.id);
+          published.push(event);
         });
 
         const today = localToday();
         const nextUpcoming = published
-          .filter((event) => event.date >= today)
+          .filter((event) => !isCivilDate(event.date) || event.date >= today)
           .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
         const nextPast = published
-          .filter((event) => event.date < today)
+          .filter((event) => isCivilDate(event.date) && event.date < today)
           .sort((a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
 
         setUpcoming(nextUpcoming);
         setPast(nextPast);
-        setDraftsCount((drafts || []).length);
+        setDraftsCount(Array.isArray(drafts) ? drafts.length : 0);
       } catch (err) {
         if (cancelled || !mountedRef.current) return;
         // Fail closed: never leave a previous (or partial) list standing.

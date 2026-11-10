@@ -60,6 +60,11 @@ jest.mock('../../hooks/useEvents', () => ({ useEvents: jest.fn() }));
 const mockNavigate = jest.fn();
 const mockGoBack = jest.fn();
 jest.mock('@react-navigation/native', () => ({
+  // Spread the real module rather than replacing it outright: if a later change (e.g. T064's
+  // extraction) reaches for `useRoute`/`useFocusEffect`/anything else this file doesn't
+  // anticipate, the guard should fail on a real assertion, not on a missing-export module
+  // error that reads like the screen broke when only this mock is stale.
+  ...jest.requireActual('@react-navigation/native'),
   useNavigation: () => ({ navigate: mockNavigate, goBack: mockGoBack }),
 }));
 
@@ -77,7 +82,7 @@ const makeEvent = (overrides) => ({
   templateId: 'party',
   title: 'Birthday Bash',
   subtitle: '',
-  date: '2099-01-01T18:00:00.000Z',
+  date: '2099-01-01', // civil date, YYYY-MM-DD -- the real wire shape (CivilDateJsonConverter).
   location: { name: 'The Loft', address: '', lat: null, lng: null },
   host: { id: 'u1', name: 'Sam', avatar: null },
   coverImage: '',
@@ -246,5 +251,34 @@ describe('EventsScreen (FR-035 regression guard, pre-extraction)', () => {
     await press(pressableByText(tree, /^Birthday Bash$/));
 
     expect(mockNavigate).toHaveBeenCalledWith('EventDetail', { eventId: 'hosted-1', event });
+  });
+
+  // The screen's own comment records why these two are distinct: "you have no events" and "we
+  // could not ask" collapsing into one blank screen is exactly what hid a failure before this
+  // screen grew an error state at all (:80-84). T064 extracts this `FlatList` next, so this is
+  // the regression that extraction could most easily reintroduce without anyone noticing.
+  it('shows the error state, with a working Try again, when the hook reports an error', async () => {
+    const refresh = jest.fn();
+    useEvents.mockImplementation(() => ({
+      events: [],
+      isLoading: false,
+      error: { message: 'Network request failed', status: 503 },
+      refresh,
+    }));
+    const tree = await mount();
+
+    expect(shows(tree, /Couldn't load events/)).toBe(true);
+    expect(shows(tree, /Network request failed/)).toBe(true);
+
+    await press(pressableByText(tree, /^Try again$/));
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the empty state, not the error state, when there are no events and no error', async () => {
+    mockUseEvents({});
+    const tree = await mount();
+
+    expect(shows(tree, /No events yet/)).toBe(true);
+    expect(shows(tree, /Couldn't load events/)).toBe(false);
   });
 });
