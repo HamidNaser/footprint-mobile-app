@@ -69,6 +69,9 @@ const PLATFORM = { lat: 51.501, lng: -0.1401 };
 // two share one marker (FR-023).
 const BESIDE_THE_BUS = { lat: 51.500104, lng: -0.140097 };
 const THIRD_PLACE = { lat: 51.502, lng: -0.1401 };
+// Far enough away that a viewport still centred on the bus stop could not contain it, which is
+// what makes a stale viewport visible to a test.
+const ANOTHER_CITY = { lat: 48.8584, lng: 2.2945 };
 
 const text = (content, { at = null, location = null } = {}) => ({
   type: 'text',
@@ -224,7 +227,7 @@ describe('the map it draws on', () => {
         contentBlocks: [text('a', { location: BUS }), text('b', { location: PLATFORM })],
       },
     });
-    const { latitude, longitude, latitudeDelta, longitudeDelta } = map(tree).props.initialRegion;
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = map(tree).props.region;
 
     [BUS, PLATFORM].forEach((place) => {
       expect(Math.abs(place.lat - latitude)).toBeLessThan(latitudeDelta / 2);
@@ -232,11 +235,37 @@ describe('the map it draws on', () => {
     });
   });
 
+  it('follows its pins when the memory changes under it, having no other way back', () => {
+    // A real `MapView` applies `initialRegion` **once**, at mount, and this map takes no
+    // gestures (see below), so a viewport left behind by an edit could not be recovered -- the
+    // pins would sit off-screen with no pan and no zoom to find them. Editing a saved memory
+    // in place is part of this feature (FR-018), and a refetched entry re-renders this card
+    // without unmounting it.
+    //
+    // The prop *name* is what this test asserts, deliberately. The mocked map here is a plain
+    // host element, so it would happily report a recomputed `initialRegion` that a real map
+    // would have ignored -- the mount-once rule is the native side's and jest cannot model it.
+    // `region` is the prop a map re-applies; `initialRegion` must therefore be absent.
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    act(() => {
+      tree.update(
+        <MemoryRouteMap entry={{ contentBlocks: [text('a', { location: ANOTHER_CITY })] }} />,
+      );
+    });
+
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = map(tree).props.region;
+
+    expect(map(tree).props.initialRegion).toBeUndefined();
+    expect(Math.abs(ANOTHER_CITY.lat - latitude)).toBeLessThan(latitudeDelta / 2);
+    expect(Math.abs(ANOTHER_CITY.lng - longitude)).toBeLessThan(longitudeDelta / 2);
+  });
+
   it('opens close in on a memory that happened in one spot', () => {
     // A single pin has no span to fit, and a region of zero degrees is the whole world on
     // some providers and an error on others.
     const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
-    const { latitudeDelta, longitudeDelta } = map(tree).props.initialRegion;
+    const { latitudeDelta, longitudeDelta } = map(tree).props.region;
 
     expect(latitudeDelta).toBeGreaterThan(0);
     expect(longitudeDelta).toBeGreaterThan(0);
@@ -277,19 +306,29 @@ describe('one pin per group', () => {
   });
 
   it('merges the pieces within a metre into one marker showing how many it holds', () => {
-    // The spec's burst of photos: two photos at practically the same spot become one marker
-    // reading "2", and the note down the road keeps its own number (FR-023).
+    // The spec's burst of photos: three photos at practically the same spot become one marker
+    // reading "3", and the note down the road keeps its own number (FR-023).
+    //
+    // The burst is deliberately *not* the first thing in the memory, and is three pieces and
+    // not two. It therefore holds numbers 2, 3 and 4, so the count it must show -- 3 -- is
+    // neither the first number it holds nor the last: a marker showing any one of its numbers
+    // instead of how many there are reads differently here. With a burst of two starting at 1,
+    // the count and the last number are both "2" and this test could not tell them apart.
     const tree = render({
       entry: {
         contentBlocks: [
-          photos([photo('m1', { location: BUS }), photo('m2', { location: BESIDE_THE_BUS })]),
           text('on the platform', { location: PLATFORM }),
+          photos([
+            photo('m1', { location: BUS }),
+            photo('m2', { location: BESIDE_THE_BUS }),
+            photo('m3', { location: BUS }),
+          ]),
         ],
       },
     });
 
     expect(markers(tree)).toHaveLength(2);
-    expect(labels(tree)).toEqual(['2', '3']);
+    expect(labels(tree)).toEqual(['1', '3']);
   });
 
   it('keeps two places about 100 m apart as two pins', () => {
@@ -572,6 +611,6 @@ describe('its web sibling', () => {
     // prose, as the existing stubs do, so it is the import that is forbidden, not the word.
     const source = fs.readFileSync(path.join(__dirname, '..', 'MemoryRouteMap.web.js'), 'utf8');
 
-    expect(source).not.toMatch(/(?:from|require\()\s*['"]react-native-maps['"]/);
+    expect(source).not.toMatch(/['"]react-native-maps(\/|['"])/);
   });
 });

@@ -85,6 +85,6 @@ describe('the sibling itself', () => {
     // well under jest and would hide exactly the import that breaks the web bundle.
     const source = fs.readFileSync(path.join(__dirname, '..', 'NumberedPin.web.js'), 'utf8');
 
-    expect(source).not.toMatch(/(?:from|require\()\s*['"]react-native-maps['"]/);
+    expect(source).not.toMatch(/['"]react-native-maps(\/|['"])/);
   });
 });
