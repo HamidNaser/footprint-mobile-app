@@ -32,10 +32,25 @@
  * row's kind, time and place are the meta line above it, so the control carries only the
  * clip's position and length. It is the same `VoicePlayer` the Journal card's voice pill uses,
  * which is also what makes "one clip plays at a time" hold across the two screens.
+ *
+ * T073 adds **Remove**, at the end of each row's meta line (FR-036). Two things about it are
+ * this file's and not the screen's:
+ *
+ *   - **It reports the piece, not the row's number.** The screen removes by `localId`
+ *     (`CaptureDraftStore.removePiece(slot, localId)`), and an index is precisely the thing
+ *     that stops being true the moment a row goes.
+ *   - **The last remaining piece has none**, whatever its kind. A memory with no pieces cannot
+ *     be saved, so a control that could empty the list would leave Save silently doing nothing;
+ *     emptying a new memory is Discard [FR-015], and an edit's last piece would mean deleting
+ *     the memory itself, which this feature does not change.
+ *
+ * Everything else about a removal -- whether it happens, what the question says, what is
+ * written and what is said when it cannot be -- is the screen's (`CaptureScreen`). Here it is a
+ * button that reports a tap.
  */
 
 import React, { useEffect, useRef } from 'react';
-import { View, Text, TextInput, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 // `formatClock` comes with it: an audio row and the video row under it must not round the same
 // 11.6 seconds two different ways, and one of the two formatters had to go.
 import VoicePlayer, { formatClock } from '../journal/VoicePlayer';
@@ -86,7 +101,16 @@ const detailFor = (piece) => {
  * below runs again and focuses the field that is already there instead of a second empty note
  * being added. Zero means "not the focus target".
  */
-function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecording }) {
+function PieceRow({
+  piece,
+  index,
+  onChangeText,
+  onBlurText,
+  onRemove,
+  canRemove,
+  focusNonce,
+  isRecording,
+}) {
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -97,7 +121,7 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecord
 
   return (
     <View testID={`piece-row-${index}`} style={styles.row}>
-      <View style={styles.meta}>
+      <View testID={`piece-meta-${index}`} style={styles.meta}>
         <Text
           testID={`piece-kind-${index}`}
           style={[styles.kind, kind?.colour ? { color: kind.colour } : null]}
@@ -110,6 +134,25 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecord
         <Text testID={`piece-place-${index}`} style={styles.place} numberOfLines={1}>
           {placeLabel(piece.location)}
         </Text>
+
+        {canRemove && (
+          // ⚠ Deliberately **not** deadened while a recording runs, unlike the player below.
+          // The player's control is, because playing a clip asks the one shared audio session
+          // for `allowsRecording: false` and would end the recording; removing touches no
+          // audio session at all, so there is nothing for it to interrupt (FR-007).
+          <TouchableOpacity
+            testID={`piece-remove-${index}`}
+            accessibilityRole="button"
+            // The row's own kind, which is the only thing that tells four otherwise identical
+            // controls apart for somebody reading by label alone (UI contract).
+            accessibilityLabel={`Remove this ${kindLabel(piece.kind)}`}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.remove}
+            onPress={() => onRemove?.(piece)}
+          >
+            <Text style={styles.removeLabel}>Remove</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {piece.kind === 'text' ? (
@@ -157,6 +200,9 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecord
  * @param {object[]} props.pieces In capture order. The array *is* the order (FR-005).
  * @param {(piece: object, content: string) => void} [props.onChangeText]
  * @param {(piece: object) => void} [props.onBlurText]
+ * @param {(piece: object) => void} [props.onRemove] A row's Remove was tapped, with that row's
+ *   own piece (FR-036). Never offered on the last remaining piece, so this is never the call
+ *   that empties a memory.
  * @param {{localId: string, nonce: number}|null} [props.focusRequest] Which note should take
  *   the keyboard, and a nonce so the same note can be asked for twice.
  * @param {boolean} [props.isRecording] True while a voice recording is running on this screen,
@@ -166,9 +212,14 @@ export default function PieceList({
   pieces = [],
   onChangeText,
   onBlurText,
+  onRemove,
   focusRequest,
   isRecording = false,
 }) {
+  // How many pieces there are, and nothing about what kind the last one is: a one-piece memory
+  // offers no Remove at all, because the memory it would empty cannot be saved.
+  const canRemove = pieces.length > 1;
+
   return (
     <View testID="capture-piece-list" style={styles.list}>
       {pieces.map((piece, index) => (
@@ -178,6 +229,8 @@ export default function PieceList({
           index={index}
           onChangeText={onChangeText}
           onBlurText={onBlurText}
+          onRemove={onRemove}
+          canRemove={canRemove}
           focusNonce={focusRequest?.localId === piece.localId ? focusRequest.nonce : 0}
           isRecording={isRecording}
         />
@@ -213,6 +266,15 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 13,
     color: '#8E8E93',
+  },
+  remove: {
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+  },
+  removeLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#E5484D',
   },
   note: {
     marginTop: 6,

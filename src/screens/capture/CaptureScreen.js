@@ -212,6 +212,52 @@ const EDIT_LOAD_FAILED_MESSAGE =
   'Couldn’t open this memory to edit it. Nothing has been changed — close this screen and ' +
   'try again.';
 
+/**
+ * FR-036's one failure: the removal could not be **recorded**, so the piece is still part of
+ * this memory and the row stays. A row that vanished from the screen but not from the draft
+ * would come back on the next open, which is the one outcome worse than a refusal.
+ *
+ * A removal that *was* recorded and whose media file then could not be deleted is **not** a
+ * failure and says nothing: the piece is out, which is what was asked for, and the store logs
+ * the orphan rather than reporting it (`CaptureDraftStore.removePiece`).
+ */
+const REMOVE_FAILED_MESSAGE =
+  'Couldn’t remove that piece — it is still part of this memory.';
+
+/**
+ * What the confirmation says about **this** piece, because one wording cannot be true of all
+ * three (UI contract, *Remove, on every row*). ⚠ **Origin wins over kind**, and the three are
+ * checked in the contract's own order, so no piece falls between two of them.
+ *
+ * The first turns on `fromSavedMemory`, the mark both piece builders stamp: of a piece the
+ * memory already holds nothing is deleted and nothing is irreversible, because the memory
+ * itself is unchanged until Save and Discard changes would put the piece back. It is checked
+ * first because a photograph and a clip the memory holds *have* media, so the second body's
+ * words would fit them on kind alone -- and would be false.
+ *
+ * The second turns on the store's own `ownsMedia` predicate (`CaptureDraftStore.js:168`),
+ * reproduced here because it is private to the store: it is exactly the test the store applies
+ * when it decides whether to delete the file, so the sentence promises what the removal will
+ * actually do rather than what its kind suggests.
+ *
+ * The third is the rest, and it is where a note lands: there is no media to delete, and
+ * promising to delete one is a promise about something that does not exist.
+ */
+const removalBodyFor = (slot, piece) => {
+  if (piece?.fromSavedMemory) {
+    return 'It is taken out of this memory when you save. Nothing is deleted from this phone.';
+  }
+  const storeOwnsTheFile =
+    !!piece?.uri && !piece.remote && piece.uri.startsWith(CaptureDraftStore.slotDirectory(slot));
+  if (storeOwnsTheFile) {
+    return (
+      'It is taken out of this memory, and its photo, video or recording is deleted from ' +
+      'this phone. This cannot be undone.'
+    );
+  }
+  return 'It is taken out of this memory. This cannot be undone.';
+};
+
 /** "Draft kept · n pieces" (UI contract), in English for one. */
 const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
 
@@ -298,6 +344,18 @@ function pieceFromMediaItem(kind, block, item) {
     // address or a flag the phone put there -- `uploadFailed`/`missingFile` included, which is
     // what makes a tile say "Photo couldn't be uploaded" (`SyncEngine._planEntryMedia:710`).
     savedItem: { ...item },
+    // Where this piece came from, which is what FR-036's confirmation says something different
+    // about: nothing of it is deleted from the phone, and Discard changes would put it back, so
+    // "this cannot be undone" is false of it. Stamped unconditionally here and in
+    // `piecesOfEntry`'s text branch -- which is the branch that needs it, and says why.
+    //
+    // ⚠ A carrier, like `savedItem` and `blockId`, and **it never goes on the wire**:
+    // `buildContentBlocks` names the fields it writes out one by one and this is not one of
+    // them. It must stay that way, because `mediaItemFor` spreads `savedItem` back out
+    // underneath the piece's own values -- so a mark that reached the server once would be read
+    // back into `savedItem` on the next edit and re-sent for ever, on this memory and on every
+    // other one edited after it.
+    fromSavedMemory: true,
     ...(heldByTheServer
       ? {
         remote: {
@@ -349,6 +407,15 @@ function piecesOfEntry(entry) {
         // A block with no media is where its own capture time is a recorded fact (contract C3).
         capturedAt: block.capturedAt ?? null,
         location: block.location ?? null,
+        // The same mark `pieceFromMediaItem` stamps, and this is the branch that needs it:
+        // `remote`, `savedItem` and `sourceUri` are media-only, so a note rebuilt from a
+        // stored text block carries none of them and is indistinguishable by its own fields
+        // from one typed a moment ago -- and `blockId` is written only where the stored block
+        // had an id, so it is nearly but not quite the same predicate. It sits on the piece
+        // rather than being worked out when Remove is tapped because the `edit` slot is
+        // persisted: an unfinished edit reopened after a force-close is restored from the
+        // draft row, with no entry to re-derive anything from (data-model, *Piece*).
+        fromSavedMemory: true,
       });
       return;
     }
@@ -386,8 +453,18 @@ function blocksForSave(pieces, carried) {
   let from = 0;
 
   carried.forEach(({ block, piecesBefore }) => {
-    // Clamped and monotonic: the carried blocks come in stored order, and a `piecesBefore` can
-    // only be stale in one direction -- pieces are added at the end, never removed here.
+    // Clamped and monotonic, which is what keeps this safe against a stale `piecesBefore`: the
+    // carried blocks come in stored order, so `from` never goes backwards, and `pieces.length`
+    // is the far end.
+    //
+    // ⚠ **A `piecesBefore` can now be stale in both directions.** Until T073 pieces were only
+    // ever added, and always at the end; FR-036's Remove takes them out as well, and nothing
+    // adjusts `carriedBlocksRef` when one goes. The clamp still cannot throw and cannot drop a
+    // piece -- a count larger than the list is pulled back to the end of it -- but a carried
+    // block stored *between* two pieces slides later in the memory when a piece before it is
+    // removed: the count it was stored with now reaches past a piece that used to follow it,
+    // so that piece ends up before it. A block stored last, which is where the old composer
+    // writes its `location`, is unaffected: the clamp puts it after whatever is left.
     const upto = Math.min(Math.max(piecesBefore, from), pieces.length);
     blocks.push(...buildContentBlocks(pieces.slice(from, upto)), block);
     from = upto;
@@ -995,6 +1072,77 @@ export default function CaptureScreen({ route, navigation }) {
     flushDraft('the keyboard left a note');
   }, [flushDraft]);
 
+  /**
+   * Take one piece back out of this memory, once the question has been answered (FR-036).
+   *
+   * Two orderings carry the whole of it:
+   *
+   *   - **In an edit, the draft is started first**, exactly as a capture does it. `startEdit`
+   *     *replaces* the slot with the memory's own pieces, so there is nothing to remove from
+   *     until it has run -- and a removal that ran before it would be undone by it, putting
+   *     the piece back. A removal is a change like any other, and in an edit it is usually the
+   *     first one, which is what makes the edit unsaved (FR-013).
+   *   - **The row goes only once the draft no longer lists it.** A row that vanished from the
+   *     screen but not from the draft would be back on the next open, so a failure keeps the
+   *     row and says so (FR-017) -- and in an edit it leaves the draft `startEdit` had to make
+   *     exactly where it is, holding the memory's own pieces, because that draft is the one a
+   *     second attempt removes from and this screen does not delete on the way out of an error
+   *     (FR-012, SC-002).
+   *
+   * The piece is taken out of `pieces` **by its `localId`**, never by re-reading the slot: a
+   * capture still in flight is in the store's draft and not yet on screen, and replacing the
+   * list with what the store hands back would put it on screen a render early -- or, worse,
+   * take a piece off the screen that the list had and the store's answer did not.
+   *
+   * `draftsLeftAfterSave` needs nothing here, unlike a keystroke: a removal changes which
+   * pieces the slot lists, so the draft's identity no longer matches the saved one and
+   * `clearAfterSave` would refuse it anyway.
+   */
+  const handleRemoveConfirmed = useCallback(
+    async (piece) => {
+      try {
+        if (isEditMode) await startEditDraft();
+        await CaptureDraftStore.removePiece(slot, piece.localId);
+        if (!mountedRef.current) return;
+        setPieces((previous) =>
+          previous.filter((candidate) => candidate.localId !== piece.localId),
+        );
+      } catch (error) {
+        console.warn('[CaptureScreen] a piece could not be removed', error);
+        if (mountedRef.current) setCaptureError(REMOVE_FAILED_MESSAGE);
+      }
+    },
+    [isEditMode, slot, startEditDraft],
+  );
+
+  /**
+   * FR-036: removing asks first, because nothing brings a removed piece back -- the same shape
+   * as the discard confirmation below, down to the cancel and destructive buttons.
+   *
+   * The body is chosen from the **piece**, not from the mode: one edit holds pieces the memory
+   * already had and pieces captured into that same edit, and the two are true of different
+   * things. See `removalBodyFor`.
+   */
+  const handleRemovePress = useCallback(
+    (piece) => {
+      Alert.alert(
+        `Remove this ${kindLabel(piece?.kind)}?`,
+        removalBodyFor(slot, piece),
+        [
+          { text: 'Keep it', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => {
+              void handleRemoveConfirmed(piece);
+            },
+          },
+        ],
+      );
+    },
+    [handleRemoveConfirmed, slot],
+  );
+
   /** One clip per recording. `capturedAt` is when recording **started** (research R8). */
   const handleClip = useCallback(
     (clip) => {
@@ -1477,6 +1625,7 @@ export default function CaptureScreen({ route, navigation }) {
             pieces={pieces}
             onChangeText={handleChangeText}
             onBlurText={handleBlurText}
+            onRemove={handleRemovePress}
             focusRequest={focusRequest}
             // ⚠ FR-007. A saved clip's row carries a play control, and playing it would ask the
             // one shared audio session for `allowsRecording: false` -- which is how
