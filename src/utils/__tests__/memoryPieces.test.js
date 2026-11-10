@@ -360,6 +360,31 @@ describe('the ordering rule', () => {
     expect(orderOf(toNumberedPieces(entry, '2026-11-01T15:10:00.1234567Z'))).toEqual([0, 1]);
   });
 
+  it('reads a space-separated date and time as UTC, like any other zone-less value', () => {
+    // The same SC-007 trap as the test above, on the shape that has no `T` in it. A guard that
+    // asked "does it contain a `T`?" would send this one down the untouched path and read it in
+    // local time -- `Date.parse('2026-11-01 15:10:00')` is 21:10Z on a machine at offset 360 --
+    // so the guard asks "is it date-only?" instead. No producer emits this shape today; one
+    // character class keeps it from being a device-local reading if one ever does.
+    //
+    // ⚠ Same limit as the test above: on a device running in UTC the two readings coincide and
+    // nothing here can tell them apart. Mutation-checked on America/Chicago.
+    const spacedSave = '2026-11-01 15:10:00';          // 15:20:00.000Z once the tolerance is on
+
+    const inside = entryOf(
+      text('2026-11-01T15:19:00.000Z'),
+      text('2026-11-01T18:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+    const past = entryOf(
+      text('2026-11-01T18:00:00.000Z'),
+      text('2026-11-01T14:40:00.000Z'),
+    );
+
+    expect(orderOf(toNumberedPieces(inside, spacedSave))).toEqual([2, 0, 1]);
+    expect(orderOf(toNumberedPieces(past, spacedSave))).toEqual([0, 1]);
+  });
+
   it('reads a date with no time of day as UTC midnight', () => {
     // An ISO value with no `T` is already UTC by the ES Date Time String Format, so it must be
     // parsed as it stands. Appending a `Z` builds `'2026-11-01Z'`, which is *outside* that
@@ -513,14 +538,16 @@ describe('merging pins at practically the same spot', () => {
   it('returns the groups in number order, each carrying its own numbers', () => {
     // The route line is drawn through `groups` in array order (FR-024), so this is the order a
     // viewer sees. The fixture is built so that **three** wrong answers each give a different
-    // result from the right one:
+    // result from the right one, which is `[[1, 2], [3]]`:
     //
-    // - stored order would be [[3], [1, 2]] -- the far pin is stored first;
-    // - key order would be [[3], [1, 2]] too -- `far`'s key is '51.40000,-0.10000', which sorts
-    //   before the near pair's '51.50001,-0.14200'. An earlier version of this fixture used
-    //   51.52, whose key sorts *after* the pair, so key order and number order coincided and
-    //   the test could not tell them apart;
-    // - numbers pushed in stored order inside a group would give [[2, 1], [3]], because the
+    // - numbering the pieces in stored order gives [[1, 3], [2]] -- the far piece is stored
+    //   between the two near ones, so it would take the middle number and the near pair would
+    //   no longer be consecutive;
+    // - returning the groups in key order gives [[3], [1, 2]] -- `far`'s key is '51.4,-0.1',
+    //   which sorts before the near pair's '51.50001,-0.142'. An earlier version of this
+    //   fixture put `far` at 51.52, whose key sorts *after* the pair, so key order and number
+    //   order coincided and the test could not tell them apart;
+    // - pushing the numbers in stored order inside a group gives [[2, 1], [3]], because the
     //   near pair is stored in the reverse of its capture order.
     const far = { lat: 51.4, lng: -0.1 };
     const entry = entryOf(
