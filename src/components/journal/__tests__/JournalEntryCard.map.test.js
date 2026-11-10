@@ -1020,6 +1020,40 @@ describe('a grid that cannot show every tile still answers for every pin (FR-025
     expect(has(tree, 'piece-highlight-4')).toBe(false);
   });
 
+  it('answers for the hidden pieces without wearing their number, when it has none of its own', async () => {
+    // The fourth photograph has no place, so FR-023 gives it no badge -- and a badge belonging
+    // to a hidden photograph must not be drawn on it either, because the badge says "this is
+    // piece n" and on this tile that would be false. The tile still answers for the hidden
+    // pieces' pins, which is the half that matters for FR-025.
+    const onRequestScrollTo = jest.fn();
+    const fourthHasNoPlace = entryWith([
+      photos([
+        photo('p1', { at: '2026-11-01T08:40:00.000Z', location: SIX_PLACES[0] }),
+        photo('p2', { at: '2026-11-01T08:41:00.000Z', location: SIX_PLACES[1] }),
+        photo('p3', { at: '2026-11-01T08:42:00.000Z', location: SIX_PLACES[2] }),
+        photo('p4', { at: '2026-11-01T08:43:00.000Z' }),
+        photo('p5', { at: '2026-11-01T08:44:00.000Z', location: SIX_PLACES[4] }),
+        photo('p6', { at: '2026-11-01T08:45:00.000Z', location: SIX_PLACES[5] }),
+      ]),
+    ]);
+    const tree = await render(fourthHasNoPlace, { onRequestScrollTo });
+
+    // Five placed photographs, numbered 1 to 5 with no gaps; three badges on screen, because
+    // the fourth tile has no place and the fifth and sixth are behind the overlay.
+    expect(pins(tree).map((pin) => pin.label).sort()).toEqual(['1', '2', '3', '4', '5']);
+    expect(withTestId(tree, 'piece-badge-4')).toHaveLength(0);
+    expect(withTestId(tree, 'piece-badge-5')).toHaveLength(0);
+    expect(badgeNumbersInRenderOrder(tree)).toEqual([1, 2, 3, 4]);
+
+    await layout(withTestId(tree, 'memory-pieces')[0], 40);
+    await layout(withTestId(tree, 'memory-piece-block-0')[0], 0);
+    await layout(withTestId(tree, 'memory-piece-4')[0], 98);
+    await pressPin(tree, '5');
+
+    expect(onRequestScrollTo.mock.calls).toEqual([[138]]);
+    expect(has(tree, 'piece-highlight-4')).toBe(true);
+  });
+
   it('does the same for a video grid', async () => {
     const onRequestScrollTo = jest.fn();
     const sixVideos = entryWith([

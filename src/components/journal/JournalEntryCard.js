@@ -90,8 +90,10 @@ function slotNumbersFor(badges, index, total) {
   const mine = own ? [own, ...hidden] : hidden;
 
   return {
-    // The tile's own badge when it has one; otherwise the first hidden piece it answers for,
-    // so a pin still finds this tile when the fourth photograph happens to have no place.
+    // Only ever the tile's **own** badge. A tile whose photograph has no place of its own must
+    // not wear a hidden piece's number: the badge says "this is piece n", and on that tile it
+    // would be false (FR-023). Such a tile still answers for the hidden numbers below, so
+    // their pins find it even though it shows nothing.
     badge: own,
     numbers: mine.map((badge) => badge.number),
   };
