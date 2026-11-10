@@ -1,0 +1,108 @@
+/**
+ * useUpcomingEvents -- events for Home's "Coming up" card and the Timeline tab's Events pane
+ * (FR-031..034, research R11).
+ *
+ * Merges the user's own events ('my') and the ones they are invited to ('invites'),
+ * de-duplicated by `id`, published only, then splits them against the phone's local
+ * calendar date: `upcoming` (today or later) ascending, soonest first; `past` (strictly
+ * before today) descending, most recent first.
+ *
+ * The split is a **string comparison** of the civil `date` (`YYYY-MM-DD`) against the
+ * phone's local `YYYY-MM-DD` -- never a `Date` built from the civil value. FR-032 requires a
+ * same-day event to count as upcoming for the whole day; building a `Date` from a date-only
+ * string parses it as UTC midnight, and comparing that instant against "now" can misclassify
+ * today's own event once the device's time zone and the clock disagree about which side of
+ * UTC midnight they fall on (constitution: a civil date is a day, not an instant).
+ *
+ * Drafts are counted, not listed, from `getEvents('drafts')`.
+ *
+ * Any one of the three calls failing yields `error` and empty lists -- never a partial result
+ * (sharing/reads fail closed, CLAUDE.md).
+ */
+
+import { useState, useEffect, useRef } from 'react';
+import { EventsApi } from '../api';
+
+/** The phone's local calendar day, as `YYYY-MM-DD` -- never derived from a civil value. */
+function localToday() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function useUpcomingEvents() {
+  const [upcoming, setUpcoming] = useState([]);
+  const [past, setPast] = useState([]);
+  const [draftsCount, setDraftsCount] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const [mine, invited, drafts] = await Promise.all([
+          EventsApi.getEvents('my'),
+          EventsApi.getEvents('invites'),
+          EventsApi.getEvents('drafts'),
+        ]);
+        if (cancelled || !mountedRef.current) return;
+
+        const seen = new Set();
+        const published = [...(mine || []), ...(invited || [])].filter((event) => {
+          if (!event || event.status !== 'published' || seen.has(event.id)) return false;
+          seen.add(event.id);
+          return true;
+        });
+
+        const today = localToday();
+        const nextUpcoming = published
+          .filter((event) => event.date >= today)
+          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const nextPast = published
+          .filter((event) => event.date < today)
+          .sort((a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
+
+        setUpcoming(nextUpcoming);
+        setPast(nextPast);
+        setDraftsCount((drafts || []).length);
+      } catch (err) {
+        if (cancelled || !mountedRef.current) return;
+        // Fail closed: never leave a previous (or partial) list standing.
+        setUpcoming([]);
+        setPast([]);
+        setDraftsCount(0);
+        setError({
+          message: err?.message || 'Could not load events',
+          status: err?.status,
+          code: err?.code,
+        });
+      } finally {
+        if (!cancelled && mountedRef.current) setIsLoading(false);
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { upcoming, past, draftsCount, isLoading, error };
+}
+
+export default useUpcomingEvents;

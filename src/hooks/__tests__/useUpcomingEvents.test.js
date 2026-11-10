@@ -1,0 +1,215 @@
+/**
+ * 013 T061 -- `useUpcomingEvents` (research R11), the hook behind Home's "Coming up" card and
+ * the Timeline tab's Events pane (FR-031..034, SC-009).
+ *
+ * The one rule this file exists to pin: an event's `date` is a **civil date** (`YYYY-MM-DD`),
+ * never an instant. FR-032 says a split that builds a `Date` from the civil value and compares
+ * it against "now" can quietly misclassify a same-day event once the device's time zone and the
+ * clock disagree about which side of UTC midnight they are on -- exactly the bug the constitution's
+ * civil-date rule exists to rule out. `isUpcomingToday` below proves two of the cases that bug
+ * fails: 00:05 local under UTC-10 (local day has barely started; the UTC instant for "today" has
+ * already moved into tomorrow) and 23:55 local under UTC+13 (local day is nearly over; the UTC
+ * instant for "today" is still comfortably "in the past" by the time a wall-clock compare would
+ * run). Both are discriminating: an implementation that does
+ * `new Date(event.date) >= new Date()` puts the same-day event in `past` for both, because the
+ * UTC-midnight instant for "today" ends up earlier than the real current UTC instant. A correct
+ * string compare of `'YYYY-MM-DD' >= localToday` never does.
+ */
+
+jest.mock('../../api', () => ({ EventsApi: { getEvents: jest.fn() } }));
+
+import React from 'react';
+import renderer, { act } from 'react-test-renderer';
+import { EventsApi } from '../../api';
+import { useUpcomingEvents } from '../useUpcomingEvents';
+
+global.IS_REACT_ACT_ENVIRONMENT = true;
+
+const originalTZ = process.env.TZ;
+
+function setup() {
+  const out = { current: null };
+  function Probe() {
+    out.current = useUpcomingEvents();
+    return null;
+  }
+  return {
+    result: out,
+    mount: async () => {
+      await act(async () => {
+        renderer.create(<Probe />);
+      });
+      // A second flush: `load()`'s `Promise.all` resolves on a microtask the first `act` does
+      // not always drain in one pass (the same reason `ImportScreen.test.js` double-flushes).
+      await act(async () => {});
+    },
+  };
+}
+
+/** The three tabs `useUpcomingEvents` must read, each defaulting to an empty list. */
+function mockTabs({ my = [], invites = [], drafts = [] } = {}) {
+  EventsApi.getEvents.mockImplementation(async (tab) => {
+    if (tab === 'my') return my;
+    if (tab === 'invites') return invites;
+    if (tab === 'drafts') return drafts;
+    throw new Error(`unexpected tab: ${tab}`);
+  });
+}
+
+const event = (overrides) => ({
+  id: 'e1',
+  status: 'published',
+  date: '2099-01-01',
+  title: 'Untitled',
+  ...overrides,
+});
+
+beforeEach(() => {
+  jest.useFakeTimers();
+  EventsApi.getEvents.mockReset();
+  // A neutral instant, nowhere near a day boundary, so ordering/dedup/drafts cases are not
+  // accidentally sensitive to the civil-date split under test elsewhere in this file.
+  jest.setSystemTime(new Date(2026, 0, 1, 12, 0));
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+  if (originalTZ === undefined) delete process.env.TZ;
+  else process.env.TZ = originalTZ;
+});
+
+describe('useUpcomingEvents: sources', () => {
+  it("reads 'my', 'invites' and 'drafts'", async () => {
+    mockTabs({});
+    const { mount } = setup();
+    await mount();
+
+    expect(EventsApi.getEvents).toHaveBeenCalledWith('my');
+    expect(EventsApi.getEvents).toHaveBeenCalledWith('invites');
+    expect(EventsApi.getEvents).toHaveBeenCalledWith('drafts');
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
+  });
+
+  it('merges my + invites, de-duplicated by id, published only', async () => {
+    mockTabs({
+      my: [
+        event({ id: 'hosted', date: '2099-01-01' }),
+        event({ id: 'shared', date: '2099-01-02' }),
+      ],
+      invites: [
+        // Same id as a hosted event (e.g. co-hosted) -- counted once, not twice.
+        event({ id: 'shared', date: '2099-01-02' }),
+        event({ id: 'invited', date: '2099-01-03' }),
+        // An invite that is not published (still a draft on the host's side) never appears.
+        event({ id: 'unpublished-invite', date: '2099-01-04', status: 'draft' }),
+      ],
+      drafts: [],
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    const ids = [...result.current.upcoming, ...result.current.past].map((e) => e.id);
+    expect(ids.sort()).toEqual(['hosted', 'invited', 'shared']);
+  });
+
+  it('reports draftsCount from the drafts tab', async () => {
+    mockTabs({ drafts: [event({ id: 'd1' }), event({ id: 'd2' }), event({ id: 'd3' })] });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.draftsCount).toBe(3);
+  });
+});
+
+describe('useUpcomingEvents: ordering', () => {
+  it('orders upcoming ascending (soonest first)', async () => {
+    mockTabs({
+      my: [
+        event({ id: 'late', date: '2099-03-01' }),
+        event({ id: 'soon', date: '2099-01-10' }),
+        event({ id: 'mid', date: '2099-02-01' }),
+      ],
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['soon', 'mid', 'late']);
+  });
+
+  it('orders past descending (most recent first)', async () => {
+    mockTabs({
+      my: [
+        event({ id: 'oldest', date: '2020-01-01' }),
+        event({ id: 'mostRecent', date: '2025-12-31' }),
+        event({ id: 'middle', date: '2023-06-15' }),
+      ],
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.past.map((e) => e.id)).toEqual(['mostRecent', 'middle', 'oldest']);
+  });
+});
+
+describe('useUpcomingEvents: FR-032 civil-date split (no Date built from the civil value)', () => {
+  it('counts a same-day event as upcoming at 00:05 local under UTC-10', async () => {
+    // Local day has barely begun; the real UTC instant is already 10h into "today" in UTC
+    // terms (or past midnight into the next UTC day, depending on the date), so an
+    // instant-based compare puts a UTC-midnight-parsed "today" behind "now" and calls it past.
+    process.env.TZ = 'Etc/GMT+10'; // POSIX sign is inverted: this is UTC-10.
+    jest.setSystemTime(new Date(2026, 10, 10, 0, 5)); // 10 Nov 2026, 00:05 local.
+    mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+    expect(result.current.past).toEqual([]);
+  });
+
+  it('counts a same-day event as upcoming at 23:55 local under UTC+13', async () => {
+    // Local day is almost over; the real UTC instant for "now" is already well past the
+    // UTC-midnight instant a civil-date parse would assign to "today", so the same
+    // instant-based compare puts it in the past here too.
+    process.env.TZ = 'Etc/GMT-13'; // POSIX sign is inverted: this is UTC+13.
+    jest.setSystemTime(new Date(2026, 10, 10, 23, 55)); // 10 Nov 2026, 23:55 local.
+    mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+    expect(result.current.past).toEqual([]);
+  });
+});
+
+describe('useUpcomingEvents: failure is closed', () => {
+  it('any failed call gives an error and no partial lists', async () => {
+    mockTabs({ my: [event({ id: 'would-have-shown', date: '2099-01-01' })] });
+    EventsApi.getEvents.mockImplementation(async (tab) => {
+      if (tab === 'my') return [event({ id: 'would-have-shown', date: '2099-01-01' })];
+      if (tab === 'invites') throw Object.assign(new Error('network down'), { status: 503 });
+      return [];
+    });
+
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.error).toMatchObject({ message: 'network down', status: 503 });
+    expect(result.current.upcoming).toEqual([]);
+    expect(result.current.past).toEqual([]);
+    expect(result.current.draftsCount).toBe(0);
+  });
+
+  it('stops loading once the failure is reported', async () => {
+    EventsApi.getEvents.mockImplementation(async (tab) => {
+      if (tab === 'drafts') throw new Error('nope');
+      return [];
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.error).not.toBeNull();
+  });
+});

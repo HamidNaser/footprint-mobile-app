@@ -24,6 +24,7 @@ export {
 } from './useFeed';
 
 export { useEvents } from './useEvents';
+export { useUpcomingEvents } from './useUpcomingEvents';
 
 // Future hooks will be exported here:
 // export { useSync } from './useSync';
