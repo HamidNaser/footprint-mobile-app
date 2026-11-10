@@ -766,6 +766,20 @@ describe('block shapes that are stored but are not pieces', () => {
     expect(result.distinctPlaceCount).toBe(1);
   });
 
+  it('recognises the typeless shape on the equator and the prime meridian too', () => {
+    // The pair of coordinates is tested with `!= null` and not for truthiness, for the reason
+    // `hasPlace` gives: `lat: 0` is the equator and `lng: 0` is the prime meridian. A falsy test
+    // would read a memory stored on either line as not this shape and count it as a piece.
+    const stored = JSON.parse(JSON.stringify({ id: 0, type: undefined, lat: 0, lng: 0, order: 1 }));
+
+    const entry = entryOf(text(SAVED, HERE), stored);
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces).toHaveLength(1);
+    expect(result.withoutPlaceCount).toBe(0);
+  });
+
   it('still numbers a typeless block that carries no coordinate of its own', () => {
     // Why the rule above is "typeless **and** has top-level lat/lng" and not just "typeless".
     // `ContentBlock.image` carried the identical defect -- it referenced `ContentBlockType.IMAGE`,

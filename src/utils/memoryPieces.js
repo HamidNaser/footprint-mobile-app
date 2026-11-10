@@ -102,11 +102,39 @@ const MEDIA_BLOCK_KINDS = new Map([
  * numbered, which puts a pin on the map pointing at a piece the card never draws: a tap that
  * finds nothing (FR-023, FR-025).
  *
+ * There is a **third** shape, stored before this type constant existed and carrying no `type`
+ * at all, which a check on the type alone cannot see -- `isTypelessLocationBlock` below.
+ *
  * Deliberately one named type and not "anything the card does not render": a block of a kind
  * this app has never heard of is still a piece somebody captured, and dropping those would
  * lose part of a memory. `expand` keeps numbering those.
  */
 const NON_PIECE_BLOCK_TYPES = new Set(['location']);
+
+/**
+ * The same block, as it was stored before `ContentBlockType.LOCATION` existed (round-2 A).
+ *
+ * `ContentBlock.location` referenced a constant that did not exist and so emitted
+ * `type: undefined` -- `schema.js:308-312` and `JournalService.js:122` each record the fix.
+ * `JSON.stringify` drops an undefined key, so the row that reached SQLite and the server has
+ * **no** `type` property at all, and `NON_PIECE_BLOCK_TYPES.has(block.type)` cannot see it:
+ * `has(undefined)` is false, the block fell through to the non-media branch, and the map said
+ * "1 piece without a place" about a block the card draws nothing for (FR-026).
+ *
+ * Recognised by the absent type **and** the top-level `lat`/`lng` together, not by the absent
+ * type alone. `ContentBlock.location` is the only block builder in this repository that puts a
+ * coordinate at the top level of a block -- every other place sits under `location` -- so the
+ * pair identifies that one shape and nothing else. "Typeless" on its own would be too wide:
+ * `ContentBlock.image` carried the identical defect (`JournalService.js:44-47`), so a typeless
+ * block holding real photos is in history too, and dropping those would lose part of a memory,
+ * which is exactly what `NON_PIECE_BLOCK_TYPES` is kept to one named type to avoid.
+ *
+ * `!= null` and not a falsy test, for the reason `hasPlace` gives below: `lat: 0` is the equator
+ * and `lng: 0` is the prime meridian, and a memory stored on either line is still this shape.
+ */
+function isTypelessLocationBlock(block) {
+  return !block.type && block.lat != null && block.lng != null;
+}
 
 /**
  * An ISO-8601 instant as a number of milliseconds, read the same way on every device.
@@ -174,7 +202,7 @@ function expand(entry) {
 
   (entry?.contentBlocks || []).forEach((block, blockIndex) => {
     if (!block) return;
-    if (NON_PIECE_BLOCK_TYPES.has(block.type)) return;
+    if (NON_PIECE_BLOCK_TYPES.has(block.type) || isTypelessLocationBlock(block)) return;
 
     const mediaKind = MEDIA_BLOCK_KINDS.get(block.type);
 

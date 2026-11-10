@@ -24,8 +24,18 @@
  *    nothing to do with what it was testing.
  * 2. **Only the names this app imports are stubbed.** A stub that answered every name would
  *    turn a typo, or a module that moved, into a component that silently renders nothing. The
- *    list is checked against the imports in `src/`, so adding an import without adding it here
- *    fails in one obvious place rather than as `Element type is invalid` inside a screen.
+ *    list is checked against what `src/` actually asks for, so adding an import without adding
+ *    it here fails in one obvious place rather than as `Element type is invalid` inside a
+ *    screen.
+ *
+ *    What "what `src/` actually asks for" means is pinned by three cases of its own, because
+ *    until round 2 (finding B) it did not mean what this paragraph said: the scan read
+ *    `components/map` and the explorer sheet only, matched `import … { } from` only, and took
+ *    only the first match in a file -- so `EntryGalleryModal.js:61-62`, which requires the
+ *    module lazily in two statements, was outside all three. It is now every `.js` file under
+ *    `src` bar the test folders, both the `import` and the `require` form, every statement in
+ *    a file. A guard whose comment overstates its reach is worse than no guard: it is read as
+ *    cover that is not there.
  */
 
 import React from 'react';
@@ -40,24 +50,44 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const SRC = path.join(__dirname, '..', '..', '..');
 
 /**
- * The app source files this guard reads the import list out of.
+ * Every app source file this guard reads the import list out of: all of `src`, recursively.
  *
- * Extracted from the assertion below so the guard's own *reach* can be asserted too: the comment
- * at the top of this file promises that a new name imported from the module fails here, and a
- * list built inline inside the one assertion that consumes it can never be checked against that
- * promise.
+ * It scanned `components/map` and the explorer sheet alone until round 2 (finding B), which was
+ * narrower than the promise at the top of this file: `EntryGalleryModal.js:61-62` imports from
+ * the module and is in neither place, so a name added there would not have failed here.
+ *
+ * `__tests__` is skipped on purpose and is not an oversight. A suite that declares its own
+ * `jest.mock('react-native-maps', …)` is not served by the shared stub at all, so letting its
+ * imports drive the stub's contract would force a name into `jest.setup.js` that no app file
+ * ever asks for -- the opposite of what the "and no more" half of the check is for.
+ *
+ * Extracted from the assertion below so the guard's own *reach* can be asserted too: a list
+ * built inline inside the one assertion that consumes it can never be checked against the
+ * promise it is supposed to keep.
  */
-function appSourceFiles() {
-  return ['components/journal/MediaExplorerSheet.js', 'components/map'].flatMap((entry) => {
-    const target = path.join(SRC, entry);
-    return fs.statSync(target).isDirectory()
-      ? fs
-          .readdirSync(target)
-          .filter((name) => name.endsWith('.js'))
-          .map((name) => path.join(target, name))
-      : [target];
+function appSourceFiles(dir = SRC) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === '__tests__' ? [] : appSourceFiles(full);
+    return entry.name.endsWith('.js') ? [full] : [];
   });
 }
+
+/**
+ * The two forms this app pulls a name out of `react-native-maps` by.
+ *
+ * Both are global, because a file may use either more than once -- `EntryGalleryModal.js:61-62`
+ * is two statements in two lines -- and a single non-global match stops at the first and leaves
+ * the rest invisible.
+ */
+const NAMED_FORMS = [
+  // `import { Marker } from 'react-native-maps'`, with or without a default import beside it.
+  /import\s+(?:\w+\s*,\s*)?\{([^}]*)\}\s*from\s*['"]react-native-maps['"]/g,
+  // `const { Marker } = require('react-native-maps')`. The module is native-only, so a file
+  // with a web branch requires it lazily inside the native one rather than importing it at the
+  // top -- `EntryGalleryModal.js:62` does exactly that, and an import-only pattern misses it.
+  /\{([^}]*)\}\s*=\s*require\(\s*['"]react-native-maps['"]\s*\)/g,
+];
 
 /**
  * The names one source file pulls out of `react-native-maps` by name.
@@ -67,8 +97,19 @@ function appSourceFiles() {
  */
 function namesImportedFrom(source) {
   const names = new Set();
-  const match = source.match(/import\s+(?:\w+\s*,\s*)?\{([^}]*)\}\s+from\s+'react-native-maps'/);
-  if (match) match[1].split(',').map((name) => name.trim()).filter(Boolean).forEach((name) => names.add(name));
+
+  for (const pattern of NAMED_FORMS) {
+    for (const match of source.matchAll(pattern)) {
+      match[1]
+        .split(',')
+        // `{ Marker as Pin }` binds `Pin` locally but asks the module for `Marker`, and it is
+        // the module's name the stub has to carry.
+        .map((name) => name.trim().split(/\s+as\s+/)[0].trim())
+        .filter(Boolean)
+        .forEach((name) => names.add(name));
+    }
+  }
+
   return names;
 }
 
