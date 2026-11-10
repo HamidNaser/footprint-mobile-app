@@ -3714,10 +3714,12 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
  *     until Save -- so one wording cannot be true of both, and the contract fixes the precedence:
  *     **origin wins over kind**. A photograph the memory already holds must not be told it is
  *     about to be deleted from the phone, and a note must not be promised the deletion of
- *     media it does not have. The case is decided from the **piece's own fields** -- the real
- *     `CaptureDraftStore.ownsMedia` predicate, reproduced below -- and never from the row's
- *     index or the screen's mode: an edit holds both kinds of piece at once, which is the case
- *     that proves it;
+ *     media it does not have. Both are decided from the **piece's own fields** and never from
+ *     the row's index or the screen's mode -- an edit holds both kinds of piece at once, which
+ *     is what the two "both kinds in one edit" cases prove. The first body turns on the
+ *     `fromSavedMemory` mark the screen stamps on every piece it loads, because the fields that
+ *     were already there are media-only and a **note** the memory holds carries none of them;
+ *     the second turns on the store's own `ownsMedia`, reproduced below;
  *   - **what a confirmed removal does**: `removePiece(slot, localId)` once, that row gone, the
  *     rest in the order they were captured (FR-005), the unsaved memory no longer listing it
  *     (FR-012), the new-memory status line following the count, and in an edit the first
@@ -3754,9 +3756,9 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
    *     !!piece?.uri && !piece.remote && piece.uri.startsWith(slotDirectory(slot))
    *
    * It is the real predicate for "this store copied the file, so this store is the one to
-   * delete it", and so it is what the first body and the second turn on. Reproduced rather
-   * than restated, so the fixtures below are checked against the rule the production code
-   * uses and not against a paraphrase of it.
+   * delete it", which is what the **second** body turns on -- and what every fixture below is
+   * checked against, so the cases are judged by the rule the production code uses and not by a
+   * paraphrase of it. (The first body turns on `fromSavedMemory`; see the edit describe.)
    */
   const theStoreOwnsTheFile = (slot, piece) =>
     !!piece?.uri && !piece.remote && piece.uri.startsWith(CaptureDraftStore.slotDirectory(slot));
@@ -3866,6 +3868,9 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       expect(note.kind).toBe('text');
       expect(note.uri).toBeUndefined();
       expect(theStoreOwnsTheFile('new', note)).toBe(false);
+      // Nothing in a new memory was loaded out of a saved one, so the first body's mark is on
+      // nothing here -- this is the third body's own case, uncontested.
+      expect(note.fromSavedMemory).toBeUndefined();
 
       await tap(tree, 'piece-remove-0');
 
@@ -4061,13 +4066,24 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
     const piecesAsRead = () => CaptureDraftStore.startEdit.mock.calls[0][1];
 
     /**
-     * The fixture guard the first body depends on, and the reason it is a case of its own: this
-     * memory's pieces must really be pieces **the store owns no file of**. A fixture that
+     * What the first confirm body is allowed to turn on, pinned in one place.
+     *
+     * Half of it is a fixture guard, and the reason it is a case of its own: this memory's
+     * pieces must really be pieces **the store owns no file of**, because a fixture that
      * accidentally carried a `uri` inside the slot's folder would send the photograph down the
-     * second body's branch, and the case below would then pass or fail for a reason that has
-     * nothing to do with the screen.
+     * second body's branch and the cases below would pass or fail for a reason that has nothing
+     * to do with the screen.
+     *
+     * The other half is the mark itself. `remote`, `savedItem` and `sourceUri` are **media
+     * only**, so a note rebuilt from a stored text block carries none of them and is
+     * indistinguishable from one just typed -- and `blockId` is written only where the stored
+     * block had an id, so it is nearly but not quite the same predicate. So the screen stamps
+     * `fromSavedMemory: true` on everything its two piece builders build, unconditionally, and
+     * that is what the first body reads. It has to sit **on the piece**: the `edit` slot is
+     * persisted, and an unfinished edit reopened after a force-close is restored from the draft
+     * row with no entry to re-derive anything from.
      */
-    it('holds pieces the store owns no file of -- remote, with no store-owned uri', async () => {
+    it('stamps every piece it loads with fromSavedMemory, and owns no file of any of them', async () => {
       const tree = await openEdit();
 
       // Something changed, so there is a draft to look inside.
@@ -4083,9 +4099,29 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       expect(clip.uri).toBeUndefined();
       expect(theStoreOwnsTheFile('edit', clip)).toBe(false);
 
-      // The note is a piece of the memory too, and carries no media of any kind.
+      // The note is a piece of the memory too, and carries no media of any kind -- which is
+      // exactly why none of the three fields above can identify it.
       expect(note.kind).toBe('text');
       expect(note.uri).toBeUndefined();
+      expect(note.remote).toBeUndefined();
+      expect(note.sourceUri).toBeUndefined();
+
+      // So the mark the first confirm body turns on is `fromSavedMemory`, stamped by both of
+      // the screen's piece builders on everything they build -- the media pieces and the note
+      // alike (`contracts/ui-contract.md` case 1, `data-model.md`'s Piece table).
+      expect(photo.fromSavedMemory).toBe(true);
+      expect(note.fromSavedMemory).toBe(true);
+      expect(clip.fromSavedMemory).toBe(true);
+
+      // And it is a mark of origin, not of mode: a piece captured into this same edit does not
+      // carry it. Without this half the stamp could be true of everything and still pass.
+      await tap(tree, 'capture-camera-button');
+      await tap(tree, 'camera-photo-button');
+      await tap(tree, 'camera-done-button');
+      const captured = CaptureDraftStore.__slots().edit.pieces[3];
+      expect(captured.kind).toBe('photo');
+      expect(captured.fromSavedMemory).toBeUndefined();
+      expect(theStoreOwnsTheFile('edit', captured)).toBe(true);
     });
 
     it('asks before it removes anything, and a declined question starts no edit', async () => {
@@ -4114,6 +4150,9 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * on kind alone -- and they would be false. The memory itself is unchanged until Save, and
      * Discard changes would put the piece back, so "this cannot be undone" is not true of it,
      * and nothing of it is deleted from the phone.
+     *
+     * The note the memory holds is the third kind this applies to, and it is the hard one: it is
+     * pinned in the case below, with the note typed in the same edit beside it.
      */
     it('tells a piece the memory already holds that nothing is deleted, whatever its kind', async () => {
       const tree = await openEdit();
@@ -4130,6 +4169,51 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       expect(lastAsked()[0]).toBe('Remove this Voice clip?');
       expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
       expect(lastAsked()[1]).not.toMatch(/cannot be undone/i);
+    });
+
+    /**
+     * **"Whatever its kind, a note included"** -- the case that falls between two bodies if
+     * origin is not marked on the piece, and the strongest form of the whole precedence rule.
+     *
+     * Two notes, in one edit, side by side: one the memory already holds, one typed a tap ago.
+     * Same kind, same mode, same list, and neither has any media at all -- so **nothing but
+     * where the piece came from can tell them apart**, which is what `fromSavedMemory` is for.
+     * The memory's note is not deleted from anywhere and Discard changes would put it back, so
+     * "this cannot be undone" is false of it; of the note just typed it is true.
+     *
+     * A screen that decided on `isEditMode` would give both of them the first body. A screen
+     * that decided on kind would give both the third. Only the piece's own origin gets both
+     * right, and this case fails for either mistake.
+     */
+    it('tells a note the memory holds the same as its photographs, and a new note not', async () => {
+      const tree = await openEdit();
+
+      // A note typed in this edit, after the three pieces the memory came with.
+      await tap(tree, 'capture-type-button');
+      await type(tree, 'piece-note-input-3', 'And the carpet is new.');
+      expect(rows(tree).map((row) => row.split(' | ')[0])).toEqual([
+        'Photo',
+        'Note',
+        'Voice clip',
+        'Note',
+      ]);
+      const [held, typed] = [1, 3].map((index) => CaptureDraftStore.__slots().edit.pieces[index]);
+      expect([held.kind, typed.kind]).toEqual(['text', 'text']);
+      expect([held.uri, typed.uri]).toEqual([undefined, undefined]);
+
+      // The memory's own note: taken out when you save, and nothing deleted from this phone.
+      await tap(tree, 'piece-remove-1');
+      expect(lastAsked()[0]).toBe('Remove this Note?');
+      expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
+      expect(lastAsked()[1]).not.toMatch(/cannot be undone/i);
+      await keepIt();
+
+      // The note typed a moment ago: nothing brings those words back.
+      await tap(tree, 'piece-remove-3');
+      expect(lastAsked()[0]).toBe('Remove this Note?');
+      expect(lastAsked()[1]).toBe(A_NOTE);
+      // And still not the captured-media body: a note has no file to delete either way.
+      expect(lastAsked()[1]).not.toMatch(/deleted from this phone/i);
     });
 
     /**
