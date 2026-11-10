@@ -1,6 +1,6 @@
 /**
- * Tests for content-block construction, media persistence, and re-sharing a memory whose
- * audience the server would not apply (013 T035).
+ * Tests for content-block construction, media persistence, the save at the end of an edit
+ * (013 T055), and re-sharing a memory whose audience the server would not apply (013 T035).
  *
  * The first two guard production failures where an entry saved fine but rendered as
  * nothing (wrong block shape) or as a grey placeholder (media left in the OS
