@@ -79,7 +79,16 @@ jest.mock('react-native-maps', () => {
   const React = require('react');
   const { View } = require('react-native');
   const Stub = (props) => React.createElement(View, props, props.children);
-  return { __esModule: true, default: Stub, Marker: Stub, Callout: Stub, PROVIDER_GOOGLE: 'google' };
+  // `Polyline` since 013 T050: the card now renders `MemoryRouteMap`, which draws the dashed
+  // route between two or more places (FR-024), and an unexported name renders as undefined.
+  return {
+    __esModule: true,
+    default: Stub,
+    Marker: Stub,
+    Callout: Stub,
+    Polyline: Stub,
+    PROVIDER_GOOGLE: 'google',
+  };
 });
 
 jest.mock('expo-media-library', () => ({
@@ -273,7 +282,7 @@ jest.mock('../../services/CaptureLocation', () => {
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { Alert, Text, TextInput, TouchableOpacity } from 'react-native';
+import { Alert, FlatList, Text, TextInput, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import JournalScreen from '../JournalScreen';
@@ -942,5 +951,208 @@ describe('a typed note that takes a moment to keep says so', () => {
     expect(alert).toHaveBeenCalledTimes(1);
 
     alert.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-022, FR-025, research R10 — the list tells each card whether it is on screen, and
+// scrolls when a pin asks it to
+// ---------------------------------------------------------------------------
+
+/**
+ * T051 wires the Journal's own half of the map on a card. The card's half — the badges, the
+ * placeholder, the highlight and the measurement — is `JournalEntryCard.map.test.js`. What only
+ * the screen can do is the two things here.
+ *
+ * **Which cards are on screen.** `MemoryRouteMap` mounts a native map view, and the Journal is a
+ * list of cards; mounting one per card would cost a map for every memory in a day whether or not
+ * anybody can see it. So the list reports its viewable rows and each card is told, and a card
+ * that is not told anything shows its map as before (research R10 *Lazy rendering*, round-2 M10).
+ * The assertion is on the map view itself, not on the heading: a mounted-but-hidden map would
+ * still cost one.
+ *
+ * **Scrolling to a piece.** Only a list can scroll, and only the card knows where a piece sits
+ * inside itself, so the two halves meet here: the card reports the piece's offset from its own
+ * top and the list supplies the row (FR-025). `scrollToIndex` is spied on `FlatList`'s own
+ * prototype, so what is proven is that the real list was really asked to move — not that a
+ * handler of ours was called.
+ *
+ * Driven through a real card, a real map and a real pin in the real list, because the checkpoint
+ * for this story is that the map works in jest end to end. This file already mocks
+ * `react-native-maps` to views, so a marker's props — its coordinate and its press — are
+ * readable on the tree.
+ */
+describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => {
+  // Two spots on the same street, about 100 m apart, which the 5-decimal merging grid keeps as
+  // two places — so the first memory has two pins to tell apart.
+  const BUS = { lat: 51.5001, lng: -0.1401 };
+  const PLATFORM = { lat: 51.501, lng: -0.1401 };
+
+  const note = (content, location) => ({ type: 'text', content, location, capturedAt: null });
+
+  const memory = (localId, contentBlocks) => ({
+    localId,
+    id: localId,
+    userId: 'user-1',
+    journalId: 'journal-1',
+    date: toDateKey(new Date()),
+    createdAt: Date.now(),
+    visibility: 'private',
+    syncStatus: 'synced',
+    contentBlocks,
+  });
+
+  const WALK = memory('local-walk', [
+    note('on the 34 bus', BUS),
+    note('on the platform', PLATFORM),
+  ]);
+  const KIOSK = memory('local-kiosk', [note('the kiosk', BUS)]);
+
+  const CardComponent = JournalEntryCard.type ?? JournalEntryCard;
+
+  /** The cards the list rendered, in the order it rendered them — so index 1 is the second row. */
+  const cards = (tree) => tree.root.findAllByType(CardComponent);
+
+  /**
+   * React Native's `View` is itself a component that passes `testID` straight through to a host
+   * `View`, so a single test id matches two instances. Only the host element is taken.
+   */
+  const isHost = (node) => typeof node.type === 'string';
+
+  const hostsWithTestId = (node, testID) =>
+    node.findAll((candidate) => isHost(candidate) && candidate.props?.testID === testID);
+
+  /** The list, as the screen really renders it. */
+  const list = (tree) => tree.root.findByType(FlatList);
+
+  /** Tell the list which rows are on screen, as React Native's viewability checker would. */
+  const reportViewable = async (tree, entries) => {
+    await act(async () => {
+      list(tree).props.onViewableItemsChanged({
+        viewableItems: entries.map((entry, index) => ({ key: entry.localId, item: entry, index })),
+        changed: [],
+      });
+    });
+  };
+
+  /** Every marker on this card's map, with the digits on it and its press. */
+  const pins = (card) =>
+    card
+      .findAll((node) => node.props?.coordinate && typeof node.props?.onPress === 'function')
+      .map((marker) => ({
+        label: hostsWithTestId(marker, 'numbered-pin-label')[0]?.props?.children,
+        press: marker.props.onPress,
+      }));
+
+  /** Report a layout, as React Native would once the view is measured. */
+  const layout = async (node, y) => {
+    await act(async () => {
+      node.props.onLayout({ nativeEvent: { layout: { x: 0, y, width: 320, height: 100 } } });
+    });
+  };
+
+  let scrollToIndex;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+    scrollToIndex = jest.spyOn(FlatList.prototype, 'scrollToIndex').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    scrollToIndex.mockRestore();
+  });
+
+  it('renders both memories, so the cases below are about something', async () => {
+    const { tree } = await render();
+
+    expect(cards(tree).map((card) => card.props.entry.localId)).toEqual([
+      'local-walk',
+      'local-kiosk',
+    ]);
+  });
+
+  it('shows every card its map until the list has reported anything', async () => {
+    // `isVisible` defaults to true and the list has measured nothing yet, so nothing is held
+    // back before React Native has said what is on screen.
+    const { tree } = await render();
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, true]);
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(2);
+  });
+
+  it('passes isVisible from onViewableItemsChanged, card by card', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, false]);
+  });
+
+  it('mounts no map at all on the card that scrolled off, and holds its height open', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(1);
+    expect(hostsWithTestId(tree.root, 'memory-route-map-placeholder')).toHaveLength(1);
+    // The map view itself: `MemoryRouteMap` is the only thing on this screen that renders one,
+    // and it is the cost the placeholder exists to avoid.
+    expect(tree.root.findAll((node) => node.props?.scrollEnabled === false)).toHaveLength(1);
+  });
+
+  it('shows the map again when the card comes back into view', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+    await reportViewable(tree, [WALK, KIOSK]);
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, true]);
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(2);
+  });
+
+  it('scrolls the list to the offset a card asks for, on that card’s row', async () => {
+    // The narrow contract: the card reports an offset from its own top, and the row it is in
+    // supplies the rest. A positive offset moves the piece up to the top of the screen, so the
+    // row is placed that far above it.
+    const { tree } = await render();
+
+    await act(async () => {
+      cards(tree)[1].props.onRequestScrollTo(160);
+    });
+
+    expect(scrollToIndex).toHaveBeenCalledTimes(1);
+    expect(scrollToIndex).toHaveBeenCalledWith({ index: 1, viewOffset: -160, animated: true });
+  });
+
+  it('brings a piece into view when its pin is pressed, end to end (FR-025, SC-006)', async () => {
+    const { tree } = await render();
+    const walk = cards(tree)[0];
+
+    // The card as React Native would have measured it: the piece list 40 points down the card,
+    // the note on the platform 120 points down the list.
+    await layout(hostsWithTestId(walk, 'memory-pieces')[0], 40);
+    await layout(hostsWithTestId(walk, 'memory-piece-2')[0], 120);
+
+    const pin = pins(walk).find((candidate) => candidate.label === '2');
+    expect(pin).toBeDefined();
+    await act(async () => {
+      pin.press();
+    });
+
+    expect(scrollToIndex).toHaveBeenCalledWith({ index: 0, viewOffset: -160, animated: true });
+    // And the piece the pin points at is lit while the list moves.
+    expect(hostsWithTestId(walk, 'piece-highlight-2')).toHaveLength(1);
+  });
+
+  it('scrolls nowhere when a pin is pressed on a card nothing has measured', async () => {
+    // A guessed offset would move the memory away from the person who just pressed a pin on it.
+    const { tree } = await render();
+    const pin = pins(cards(tree)[0]).find((candidate) => candidate.label === '2');
+
+    await act(async () => {
+      pin.press();
+    });
+
+    expect(scrollToIndex).not.toHaveBeenCalled();
   });
 });
