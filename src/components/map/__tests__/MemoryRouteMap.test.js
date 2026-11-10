@@ -90,7 +90,20 @@ const renderWith = (Component, props) => {
 };
 
 const render = (props) => renderWith(MemoryRouteMap, props);
-const renderWeb = (props) => renderWith(MemoryRouteMapWeb, props);
+
+/**
+ * Awaited, for the web sibling and for the pair tests that cover it: `@expo/vector-icons`
+ * loads its font asynchronously and sets state when it resolves, which outside `act` would add
+ * a warning to this suite's output. `SaveAudienceSheet.test.js` renders this way for the same
+ * reason. The native component draws no icon and so needs no await.
+ */
+const mount = async (Component, props) => {
+  let tree;
+  await act(async () => {
+    tree = renderer.create(<Component entry={{ contentBlocks: [] }} {...props} />);
+  });
+  return tree;
+};
 
 const map = (tree) => tree.root.findByType('MapView');
 const maps = (tree) => tree.root.findAllByType('MapView');
@@ -505,43 +518,43 @@ describe('its web sibling', () => {
   };
 
   describe.each(bothPlatforms)('%s', (_platform, Component) => {
-    it('draws nothing at all for a memory with no places', () => {
-      const tree = renderWith(Component, {
+    it('draws nothing at all for a memory with no places', async () => {
+      const tree = await mount(Component, {
         entry: { contentBlocks: [text('got the bus'), photos([photo('m1')])] },
       });
 
       expect(tree.toJSON()).toBeNull();
     });
 
-    it('is headed "Where this happened"', () => {
-      const tree = renderWith(Component, { entry: placedAndUnplaced });
+    it('is headed "Where this happened"', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
 
       expect(textAt(tree, 'memory-route-map-title')).toBe('Where this happened');
     });
 
-    it('counts the pieces that have a place', () => {
-      const tree = renderWith(Component, { entry: placedAndUnplaced });
+    it('counts the pieces that have a place', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
 
       expect(textAt(tree, 'memory-route-map-subtitle')).toBe('2 pieces');
     });
 
-    it('counts the pieces that have none', () => {
-      const tree = renderWith(Component, { entry: placedAndUnplaced });
+    it('counts the pieces that have none', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
 
       expect(textAt(tree, 'memory-route-map-without-place')).toBe('1 piece without a place');
     });
   });
 
-  it('draws no map, no line and no pins, because there is no map on web', () => {
-    const tree = renderWeb({ entry: placedAndUnplaced });
+  it('draws no map, no line and no pins, because there is no map on web', async () => {
+    const tree = await mount(MemoryRouteMapWeb, { entry: placedAndUnplaced });
 
     expect(maps(tree)).toHaveLength(0);
     expect(markers(tree)).toHaveLength(0);
     expect(polylines(tree)).toHaveLength(0);
   });
 
-  it('says why there is no map, rather than leaving an empty frame', () => {
-    const tree = renderWeb({ entry: placedAndUnplaced });
+  it('says why there is no map, rather than leaving an empty frame', async () => {
+    const tree = await mount(MemoryRouteMapWeb, { entry: placedAndUnplaced });
 
     expect(textAt(tree, 'memory-route-map-unsupported')).toBe(
       'The map is only available on iOS and Android.',
