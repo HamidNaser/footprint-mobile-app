@@ -80,7 +80,15 @@ import renderer, { act } from 'react-test-renderer';
 import { JournalEntryCard } from '../JournalEntryCard';
 import { EngagementSection } from '../EngagementSection';
 import DerivativeImage from '../../media/DerivativeImage';
-import { MEMORY_ROUTE_MAP_HEIGHT } from '../../map/MemoryRouteMap';
+import {
+  MEMORY_ROUTE_MAP_HEIGHT,
+  MEMORY_ROUTE_MAP_GAP,
+  memoryRouteMapSlotHeight,
+} from '../../map/MemoryRouteMap';
+import {
+  MEMORY_ROUTE_MAP_GAP as WEB_MEMORY_ROUTE_MAP_GAP,
+  memoryRouteMapSlotHeight as webSlotHeight,
+} from '../../map/MemoryRouteMap.web';
 import { PIN_COLOURS } from '../../map/NumberedPin';
 import { toNumberedPieces } from '../../../utils/memoryPieces';
 import { adaptEntry } from '../../../services/SocialService';
@@ -244,14 +252,65 @@ const byTestId = (testID) => (node) => isHost(node) && node.props?.testID === te
 /** A `MapView` anywhere in the tree -- the native view the placeholder exists to avoid. */
 const mapViews = (tree) => tree.root.findAll((node) => node.type === 'MapView');
 
-/** Every marker the map drew, with the digits on it. */
+/** Every marker the map drew, with the digits on it and the coordinate it sits on. */
 const pins = (tree) =>
   tree.root
     .findAll((node) => node.type === 'Marker')
     .map((marker) => ({
       label: marker.findAll(byTestId('numbered-pin-label'))[0]?.props?.children,
+      coordinate: marker.props.coordinate,
       press: marker.props.onPress,
     }));
+
+/** The pin standing on a place, so a pin and a badge can be compared for the same piece. */
+const pinAt = (tree, place) =>
+  pins(tree).find(
+    (pin) => pin.coordinate?.latitude === place.lat && pin.coordinate?.longitude === place.lng,
+  );
+
+/**
+ * The parts of the mounted map that take vertical space. Every one of them carries an explicit
+ * `lineHeight` or `height`, which is what lets the card reserve exactly the same space while
+ * the map is not mounted; `partHeight` refuses a part that carries neither rather than quietly
+ * counting it as nothing.
+ */
+const SLOT_PARTS = [
+  'memory-route-map-title',
+  'memory-route-map-subtitle',
+  'memory-route-map-frame',
+  'memory-route-map-without-place',
+];
+
+const partHeight = (node) => {
+  const style = StyleSheet.flatten(node.props.style) || {};
+  const height = style.height ?? style.lineHeight;
+  if (height === undefined) {
+    throw new Error(
+      `"${node.props.testID}" has neither a height nor a lineHeight, so the card cannot reserve its space`,
+    );
+  }
+  return (style.marginTop || 0) + height;
+};
+
+/** The height the mounted map really occupies, added up the way React Native would lay it out. */
+const mountedSlotHeight = (tree) =>
+  SLOT_PARTS.flatMap((id) => withTestId(tree, id)).reduce(
+    (total, node) => total + partHeight(node),
+    0,
+  );
+
+/** The gap above the slot, which the placeholder has to repeat or the pieces above it move. */
+const slotGap = (tree) =>
+  StyleSheet.flatten(withTestId(tree, 'memory-route-map')[0].props.style).marginTop || 0;
+
+const placeholderStyle = (tree) =>
+  StyleSheet.flatten(withTestId(tree, 'memory-route-map-placeholder')[0].props.style);
+
+/** The badge array each media block was handed, for the identity check below. */
+const blockBadgeArrays = (tree) =>
+  tree.root
+    .findAll((node) => typeof node.type === 'function' && node.props?.badges !== undefined)
+    .map((node) => node.props.badges);
 
 const pressPin = async (tree, label) => {
   const pin = pins(tree).find((candidate) => candidate.label === label);
@@ -500,6 +559,27 @@ describe('the same memory is numbered identically whoever is looking (SC-007)', 
     expect(has(tree, 'memory-route-map')).toBe(true);
     expect(pins(tree).map((pin) => pin.label).sort()).toEqual(['1', '2', '3']);
   });
+
+  it('puts the number on the pin and the same number on its piece, place by place', async () => {
+    // Round-1 item 3, and the whole point of FR-023. Every other case here reads the pin
+    // labels as a *set*, which cannot tell 1-2-3 apart from 3-1-2: dropping `serverUpdatedAt`
+    // from the `<MemoryRouteMap>` call renumbers the map (the voice clip becomes pin 3) while
+    // the badges stay 3-1-2, and a set would not notice. This memory is the one to say it on,
+    // because its threshold is not inert: one of its moments cannot be true.
+    //
+    // Pieces render in stored order -- the note, the photograph, the voice clip -- so the
+    // badges beside each place are read off that order.
+    const tree = await render(adaptEntry(fromServer), { currentUserId: 'u1' });
+    const [note, photograph, voice] = numberedPieces(tree);
+
+    expect([note.number, photograph.number, voice.number]).toEqual([3, 1, 2]);
+    expect(pinAt(tree, BUS).label).toBe('3');
+    expect(badgeLabel(note.node, 3)).toBe('3');
+    expect(pinAt(tree, PLATFORM).label).toBe('1');
+    expect(badgeLabel(photograph.node, 1)).toBe('1');
+    expect(pinAt(tree, KIOSK).label).toBe('2');
+    expect(badgeLabel(voice.node, 2)).toBe('2');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -549,9 +629,54 @@ describe('the map sits under the pieces and above the reactions (FR-022)', () =>
 
     expect(mapViews(tree)).toHaveLength(0);
     expect(has(tree, 'memory-route-map')).toBe(false);
-    const placeholder = withTestId(tree, 'memory-route-map-placeholder');
-    expect(placeholder).toHaveLength(1);
-    expect(StyleSheet.flatten(placeholder[0].props.style).height).toBe(MEMORY_ROUTE_MAP_HEIGHT);
+    expect(withTestId(tree, 'memory-route-map-placeholder')).toHaveLength(1);
+  });
+
+  it('holds open exactly the height the mounted map takes, gap included', async () => {
+    // Round-1 item 1. The first version of this reserved the **frame's** height alone, 45 to 70
+    // points short of the slot, so a card changed height the instant the list stopped calling
+    // it viewable -- pulling everything below it up mid-scroll, which is the jump the
+    // placeholder exists to prevent. So the two rendered heights are compared with each other,
+    // not with the inner constant: reserving the frame alone fails here now.
+    const visible = await render(entry);
+    const hidden = await render(entry, { isVisible: false });
+    const placeholder = placeholderStyle(hidden);
+
+    expect(placeholder.height).toBe(mountedSlotHeight(visible));
+    expect(placeholder.marginTop).toBe(slotGap(visible));
+    // The heading alone is more than the frame, so this says the sum is really a sum.
+    expect(placeholder.height).toBeGreaterThan(MEMORY_ROUTE_MAP_HEIGHT);
+  });
+
+  it('holds open the taller height when the map will also count the pieces with no place', async () => {
+    // The slot's height is conditional: `MemoryRouteMap` adds a "k pieces without a place" line
+    // when there is one (FR-026), so the placeholder has to be conditional on the same thing.
+    const mixed = entryWith([
+      text('on the 34 bus', { location: BUS }),
+      text('on the platform', { location: PLATFORM }),
+      text('somewhere on the way'),
+    ]);
+    const visible = await render(mixed);
+    const hidden = await render(mixed, { isVisible: false });
+
+    expect(has(visible, 'memory-route-map-without-place')).toBe(true);
+    expect(placeholderStyle(hidden).height).toBe(mountedSlotHeight(visible));
+
+    // And it is genuinely taller than the same memory without that line.
+    const plainHidden = await render(entry, { isVisible: false });
+    expect(placeholderStyle(hidden).height).toBeGreaterThan(placeholderStyle(plainHidden).height);
+  });
+
+  it('reserves the same height in a browser, so the card lays out identically there', async () => {
+    // The card's import of the slot height resolves to `MemoryRouteMap.web.js` on web. If the
+    // two files disagreed, a card would be one height on a phone and another in a browser.
+    expect(webSlotHeight({ withoutPlace: false })).toBe(
+      memoryRouteMapSlotHeight({ withoutPlace: false }),
+    );
+    expect(webSlotHeight({ withoutPlace: true })).toBe(
+      memoryRouteMapSlotHeight({ withoutPlace: true }),
+    );
+    expect(WEB_MEMORY_ROUTE_MAP_GAP).toBe(MEMORY_ROUTE_MAP_GAP);
   });
 
   it('keeps the numbers on the pieces while the card is off screen', async () => {
@@ -760,5 +885,179 @@ describe('a memory saved before this feature (SC-008)', () => {
     const tree = await render(old, { isVisible: false });
 
     expect(has(tree, 'memory-route-map-placeholder')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-1 item 2 — a photo or video grid that cannot show every tile
+// ---------------------------------------------------------------------------
+
+/**
+ * `toNumberedPieces` numbers **every** media item with a place, but the card's grid has shown
+ * at most four tiles since long before this feature, the fourth carrying a `+N` overlay. So a
+ * six-photograph block at six places draws pins 1 to 6 while the card has four tiles — and the
+ * first version of this task left pins 5 and 6 pressing nothing at all: no badge, no
+ * `onLayout`, hence no offset, so `handlePinPress` found nothing to scroll to and nothing lit.
+ * A dead control.
+ *
+ * The ruling: the tile standing in for the rest **answers for their numbers too**, so a hidden
+ * piece's pin brings its block into view and lights that tile. It is the closest reading of
+ * FR-025 the pre-existing four-tile layout allows, and it beats a tap that looks broken. The
+ * layout itself is not changed.
+ *
+ * What it cannot do is show a hidden piece's badge, because the piece is not on screen to carry
+ * one — a limitation of the grid, not of the numbering, and the `+N` overlay is what says there
+ * is more behind it.
+ */
+describe('a grid that cannot show every tile still answers for every pin (FR-025)', () => {
+  // Six distinct places along one street: 0.0009 degrees apart is about 100 m, which the
+  // 5-decimal merging grid keeps as six separate markers.
+  const SIX_PLACES = [
+    { lat: 51.5001, lng: -0.1401 },
+    { lat: 51.501, lng: -0.1401 },
+    { lat: 51.5019, lng: -0.1401 },
+    { lat: 51.5028, lng: -0.1401 },
+    { lat: 51.5037, lng: -0.1401 },
+    { lat: 51.5046, lng: -0.1401 },
+  ];
+
+  const six = entryWith([
+    photos(
+      SIX_PLACES.map((location, index) =>
+        photo(`p${index + 1}`, { at: `2026-11-01T08:4${index}:00.000Z`, location }),
+      ),
+    ),
+  ]);
+
+  /** The card as React Native would measure it: the list, the block in it, the fourth tile. */
+  const measure = async (tree) => {
+    await layout(withTestId(tree, 'memory-pieces')[0], 40);
+    await layout(withTestId(tree, 'memory-piece-block-0')[0], 10);
+    await layout(withTestId(tree, 'memory-piece-4')[0], 98);
+  };
+
+  it('numbers all six pieces on the map, and badges the four tiles it can show', async () => {
+    const tree = await render(six);
+
+    expect(pins(tree).map((pin) => pin.label).sort()).toEqual(['1', '2', '3', '4', '5', '6']);
+    expect(badgeNumbersInRenderOrder(tree)).toEqual([1, 2, 3, 4]);
+    expect(texts(tree.root)).toContain('+2');
+  });
+
+  it('brings the block into view and lights the tile when a hidden piece’s pin is pressed', async () => {
+    const onRequestScrollTo = jest.fn();
+    const tree = await render(six, { onRequestScrollTo });
+    await measure(tree);
+
+    await pressPin(tree, '6');
+
+    // The fourth tile's own offset: the piece list 40 down the card, the block 10 down the
+    // list, the tile 98 down the block.
+    expect(onRequestScrollTo.mock.calls).toEqual([[148]]);
+    expect(has(tree, 'piece-highlight-4')).toBe(true);
+  });
+
+  it('answers for every hidden piece, not only the last one', async () => {
+    const onRequestScrollTo = jest.fn();
+    const tree = await render(six, { onRequestScrollTo });
+    await measure(tree);
+
+    await pressPin(tree, '5');
+
+    expect(onRequestScrollTo.mock.calls).toEqual([[148]]);
+    expect(has(tree, 'piece-highlight-4')).toBe(true);
+  });
+
+  it('sums the three levels of a photo tile’s offset, not the tile’s own alone', async () => {
+    // The visible tiles measure the same way, which is what makes the case above meaningful:
+    // the offset is the piece list's, plus the block's in it, plus the tile's in the block.
+    const onRequestScrollTo = jest.fn();
+    const tree = await render(six, { onRequestScrollTo });
+    await layout(withTestId(tree, 'memory-pieces')[0], 40);
+    await layout(withTestId(tree, 'memory-piece-block-0')[0], 10);
+    await layout(withTestId(tree, 'memory-piece-1')[0], 0);
+
+    await pressPin(tree, '1');
+
+    expect(onRequestScrollTo.mock.calls).toEqual([[50]]);
+  });
+
+  it('leaves a grid of four or fewer alone: each tile answers only for itself', async () => {
+    const onRequestScrollTo = jest.fn();
+    const four = entryWith([
+      photos(
+        SIX_PLACES.slice(0, 4).map((location, index) =>
+          photo(`p${index + 1}`, { at: `2026-11-01T08:4${index}:00.000Z`, location }),
+        ),
+      ),
+    ]);
+    const tree = await render(four, { onRequestScrollTo });
+    await layout(withTestId(tree, 'memory-pieces')[0], 40);
+    await layout(withTestId(tree, 'memory-piece-block-0')[0], 0);
+    await layout(withTestId(tree, 'memory-piece-4')[0], 98);
+    await layout(withTestId(tree, 'memory-piece-3')[0], 0);
+
+    await pressPin(tree, '3');
+
+    expect(texts(tree.root)).not.toContain('+0');
+    expect(onRequestScrollTo.mock.calls).toEqual([[40]]);
+    expect(has(tree, 'piece-highlight-3')).toBe(true);
+    expect(has(tree, 'piece-highlight-4')).toBe(false);
+  });
+
+  it('does the same for a video grid', async () => {
+    const onRequestScrollTo = jest.fn();
+    const sixVideos = entryWith([
+      {
+        type: 'video',
+        location: null,
+        media: SIX_PLACES.map((location, index) => ({
+          id: `v${index + 1}`,
+          localId: `v${index + 1}`,
+          url: `https://cdn/v${index + 1}.mp4`,
+          capturedAt: `2026-11-01T08:4${index}:00.000Z`,
+          location,
+          duration: 8,
+        })),
+      },
+    ]);
+    const tree = await render(sixVideos, { onRequestScrollTo });
+    await layout(withTestId(tree, 'memory-pieces')[0], 40);
+    await layout(withTestId(tree, 'memory-piece-block-0')[0], 0);
+    await layout(withTestId(tree, 'memory-piece-4')[0], 104);
+
+    await pressPin(tree, '6');
+
+    expect(badgeNumbersInRenderOrder(tree)).toEqual([1, 2, 3, 4]);
+    expect(onRequestScrollTo.mock.calls).toEqual([[144]]);
+    expect(has(tree, 'piece-highlight-4')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-1 item 7 — the badge arrays a media block is handed
+// ---------------------------------------------------------------------------
+
+describe('the badges handed to a media block (round-1 item 7)', () => {
+  it('are the same array across a re-render, so the block’s memo still holds', async () => {
+    // A fresh array per render made `PhotoBlock`'s `memo` useless, so lighting one piece
+    // re-rendered every photo grid in the card. Built once, with the numbering.
+    const tree = await render(
+      entryWith([
+        photos([
+          photo('p1', { at: '2026-11-01T08:41:00.000Z', location: BUS }),
+          photo('p2', { at: '2026-11-01T08:45:00.000Z', location: PLATFORM }),
+        ]),
+      ]),
+      { onRequestScrollTo: jest.fn() },
+    );
+
+    const before = blockBadgeArrays(tree);
+    expect(before).toHaveLength(1);
+    expect(before[0].map((badge) => badge?.number)).toEqual([1, 2]);
+
+    await pressPin(tree, '1');
+
+    expect(blockBadgeArrays(tree)[0]).toBe(before[0]);
   });
 });

@@ -638,3 +638,101 @@ describe('merging pins at practically the same spot', () => {
     expect(withoutPlaceCount).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round-1 items 4 and 8 — two block shapes that are stored but never rendered as pieces
+// ---------------------------------------------------------------------------
+
+/**
+ * Two shapes this rule has to survive rather than interpret.
+ *
+ * **A `media` that is not an array (item 4).** No producer in this repository emits one --
+ * every `media:` assignment outside tests is an array literal or a `.map` result, and
+ * `SocialService.adaptBlock` would itself throw on one, so the server route cannot deliver it.
+ * But `DatabaseService._normalizeContentBlocks` (`:406`) passes a non-array `media` **through
+ * untouched**, `ConflictResolver` (`:268`) merges server blocks into `content_blocks` with no
+ * media normalisation, and three live components still *tolerate* a single object
+ * (`EntryGalleryModal.js:174`, `.web.js:138`, `JournalEntryCard.js`'s audio case) -- so a
+ * historical SQLite row of that shape cannot be ruled out by reading code. There is no error
+ * boundary anywhere in `src`, and since 013 T050 this function runs for every memory a Journal
+ * card renders, so a throw here takes the Journal down for **every** memory including every
+ * pre-013 one. That is SC-008 with the widest blast radius available, and the fix is to read
+ * such a block as carrying no media.
+ *
+ * **A `location` block (item 8).** `ContentBlock.location` (`JournalService.js:117-127`) stores
+ * the entry's own place as a block with top-level `lat`/`lng`, and `JournalEntryCard`'s
+ * `renderContentBlock` has no case for it, so the card renders nothing for it. Left in
+ * `pieces` it is a piece with no place, and the map then says "1 piece without a place" about
+ * something invisible (FR-026). Worse, the shape `EntryGalleryModal.js:175` and
+ * `JournalEntryDetail.js:239` expect -- `{ type: 'location', location: {…} }` -- would be read
+ * as a piece **with** a place and numbered, which would put a pin on the map pointing at a
+ * piece the card does not draw at all. Neither is a piece of the memory: it is the entry's
+ * single place, duplicated as a block, and `entry.location` is where that is read from.
+ */
+describe('block shapes that are stored but are not pieces', () => {
+  it('reads a block whose media is a single object as carrying no media, rather than throwing', () => {
+    const entry = entryOf(
+      text(SAVED, HERE),
+      { type: 'audio', location: HERE, media: { id: 'a1', capturedAt: SAVED, location: HERE } },
+    );
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.map((p) => p.kind)).toEqual(['text']);
+    expect(result.pieces[0].number).toBe(1);
+    expect(result.withoutPlaceCount).toBe(0);
+  });
+
+  it('reads a null or missing media the same way, and numbers everything around it', () => {
+    const entry = entryOf(
+      { type: 'photos', location: HERE, media: null },
+      text(SAVED, HERE),
+      { type: 'video', location: HERE },
+    );
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.map((p) => p.kind)).toEqual(['text']);
+    expect(result.pieces[0].number).toBe(1);
+  });
+
+  it('leaves a location block out of the pieces, so nothing counts it as placeless', () => {
+    // The shape `ContentBlock.location` really stores: top-level `lat`/`lng`, no `location`.
+    const entry = entryOf(
+      text(SAVED, HERE),
+      { id: 'b2', type: 'location', lat: HERE.lat, lng: HERE.lng, name: 'Gare du Nord', order: 1 },
+    );
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.map((p) => p.kind)).toEqual(['text']);
+    expect(result.withoutPlaceCount).toBe(0);
+    expect(result.distinctPlaceCount).toBe(1);
+  });
+
+  it('leaves it out even when it carries a place, so no pin points at nothing', () => {
+    // The shape `EntryGalleryModal` and `JournalEntryDetail` read. Numbered, it would be pin 1
+    // or 2 on the map with no piece in the card to find (FR-023, FR-025).
+    const entry = entryOf(
+      { id: 'b1', type: 'location', location: HERE },
+      text(SAVED, HERE),
+    );
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.map((p) => p.kind)).toEqual(['text']);
+    expect(result.pieces[0].number).toBe(1);
+    expect(result.distinctPlaceCount).toBe(1);
+    expect(result.groups[0].numbers).toEqual([1]);
+  });
+
+  it('still numbers a block of a kind it does not know, which is not the same thing', () => {
+    // Dropping `location` is about one named shape the card never renders as a piece. A kind
+    // nobody has heard of is still a piece in a place, and dropping those would lose a memory.
+    const entry = entryOf({ type: 'something-new', capturedAt: SAVED, location: HERE, media: [] });
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces.map((p) => [p.kind, p.number])).toEqual([['something-new', 1]]);
+  });
+});

@@ -1152,6 +1152,18 @@ describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => 
     expect(hostsWithTestId(walk, 'piece-highlight-2')).toHaveLength(1);
   });
 
+  it('gives the list a scroll-to-index fallback, so a missed row is not a crash', async () => {
+    // Round-1 item 5. `VirtualizedList.scrollToIndex` fires an invariant when the index is
+    // past the cells it has laid out and neither `getItemLayout` nor `onScrollToIndexFailed`
+    // is given. A pin can only be pressed on a mounted map, so the row is laid out -- but
+    // there is no error boundary anywhere in `src`, so being wrong about that would take the
+    // Journal down rather than miss a scroll. A no-op handler removes the cliff.
+    const { tree } = await render();
+
+    expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
+    expect(() => list(tree).props.onScrollToIndexFailed({ index: 99, highestMeasuredFrameIndex: 1, averageItemLength: 100 })).not.toThrow();
+  });
+
   it('scrolls nowhere when a pin is pressed on a card nothing has measured', async () => {
     // A guessed offset would move the memory away from the person who just pressed a pin on it.
     const { tree } = await render();
