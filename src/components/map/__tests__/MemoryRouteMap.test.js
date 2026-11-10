@@ -24,7 +24,7 @@
  */
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 
 jest.mock('react-native-maps', () => ({
   __esModule: true,
@@ -88,10 +88,16 @@ const map = (tree) => tree.root.findByType('MapView');
 const maps = (tree) => tree.root.findAllByType('MapView');
 const markers = (tree) => tree.root.findAllByType('Marker');
 const polylines = (tree) => tree.root.findAllByType('Polyline');
-const labels = (tree) =>
-  tree.root.findAllByProps({ testID: 'numbered-pin-label' }).map((node) => node.props.children);
+
+// `{ deep: false }` matters: a `<Text testID="x">` is both a composite instance and the host
+// instance it renders to, and the default deep search returns both, so a tree with one pin
+// would read as two. This stops at the outermost match, as `findByProps` itself does.
+const allWith = (tree, testID) =>
+  tree.root.findAll((node) => node.props.testID === testID, { deep: false });
+
+const labels = (tree) => allWith(tree, 'numbered-pin-label').map((node) => node.props.children);
 const textAt = (tree, testID) => {
-  const found = tree.root.findAllByProps({ testID });
+  const found = allWith(tree, testID);
   return found.length === 0 ? null : found[0].props.children;
 };
 const press = (marker) => act(() => marker.props.onPress());
@@ -176,10 +182,12 @@ describe('the map it draws on', () => {
     // map rather than built on that one.
     render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
 
-    [
-      ...Object.values(LocationService),
-      ...Object.values(ExpoLocation),
-    ].forEach((fn) => expect(fn).not.toHaveBeenCalled());
+    expect(LocationService.checkPermissions).not.toHaveBeenCalled();
+    expect(LocationService.requestPermissions).not.toHaveBeenCalled();
+    expect(LocationService.getCurrentLocation).not.toHaveBeenCalled();
+    expect(ExpoLocation.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+    expect(ExpoLocation.getForegroundPermissionsAsync).not.toHaveBeenCalled();
+    expect(ExpoLocation.getCurrentPositionAsync).not.toHaveBeenCalled();
   });
 
   it('shows nothing of the viewer on the map', () => {
@@ -429,9 +437,7 @@ describe('pressing a pin', () => {
 
 describe('a pin keeps its kind colour', () => {
   const bubbleColour = (tree, index) =>
-    tree.root.findAllByProps({ testID: 'numbered-pin' })[index].props.style
-      .find((part) => part && part.backgroundColor)
-      .backgroundColor;
+    StyleSheet.flatten(allWith(tree, 'numbered-pin')[index].props.style).backgroundColor;
 
   it('so a lone pin is the colour of its piece', () => {
     const tree = render({
