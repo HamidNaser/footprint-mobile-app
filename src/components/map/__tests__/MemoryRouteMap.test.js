@@ -49,10 +49,15 @@ jest.mock('expo-location', () => ({
   getCurrentPositionAsync: jest.fn(),
 }));
 
+import fs from 'fs';
+import path from 'path';
 import * as ExpoLocation from 'expo-location';
 import LocationService from '../../../services/LocationService';
 import { PIN_COLOURS } from '../NumberedPin';
-import MemoryRouteMap from '../MemoryRouteMap';
+import MemoryRouteMap, { MEMORY_ROUTE_MAP_HEIGHT } from '../MemoryRouteMap';
+import MemoryRouteMapWeb, {
+  MEMORY_ROUTE_MAP_HEIGHT as WEB_HEIGHT,
+} from '../MemoryRouteMap.web';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,13 +81,16 @@ const photos = (media) => ({ type: 'photos', media });
 
 const photo = (id, { at = null, location = null } = {}) => ({ id, capturedAt: at, location });
 
-const render = (props) => {
+const renderWith = (Component, props) => {
   let tree;
   act(() => {
-    tree = renderer.create(<MemoryRouteMap entry={{ contentBlocks: [] }} {...props} />);
+    tree = renderer.create(<Component entry={{ contentBlocks: [] }} {...props} />);
   });
   return tree;
 };
+
+const render = (props) => renderWith(MemoryRouteMap, props);
+const renderWeb = (props) => renderWith(MemoryRouteMapWeb, props);
 
 const map = (tree) => tree.root.findByType('MapView');
 const maps = (tree) => tree.root.findAllByType('MapView');
@@ -466,5 +474,91 @@ describe('a pin keeps its kind colour', () => {
     expect(markers(tree)).toHaveLength(1);
     expect(labels(tree)).toEqual(['2']);
     expect(bubbleColour(tree, 0)).toBe(PIN_COLOURS.photo);
+  });
+});
+
+/**
+ * `react-native-maps` is native-only, and every one of the seven files in this app that import
+ * it has a `.web.js` sibling -- `MediaExplorerSheet`, `EntryGalleryModal`, `EntryMarker`,
+ * `JournalMapView`, `LocationPicker`, `PlaceMapPreview` and now these two. Without one, the
+ * card that mounts this component (T050) would pull a native module into the web bundle.
+ *
+ * What the sibling owes the card is the part of this component that is not the map: the
+ * heading, the count of what would be on it, the line counting the pieces with no place, the
+ * height the card reserves, and -- above all -- drawing **nothing at all** for a memory with no
+ * places, so FR-022 holds on web too. Those are asserted against **both** files at once, in the
+ * `.each` style `hostSiblingActions.test.js` and `VideoThumbnail.test.js` use for a native and
+ * web pair, so neither can drift from the other without a failure here.
+ */
+describe('its web sibling', () => {
+  const bothPlatforms = [
+    ['native', MemoryRouteMap],
+    ['web', MemoryRouteMapWeb],
+  ];
+
+  const placedAndUnplaced = {
+    contentBlocks: [
+      text('a', { location: BUS }),
+      text('b', { location: PLATFORM }),
+      text('no place here'),
+    ],
+  };
+
+  describe.each(bothPlatforms)('%s', (_platform, Component) => {
+    it('draws nothing at all for a memory with no places', () => {
+      const tree = renderWith(Component, {
+        entry: { contentBlocks: [text('got the bus'), photos([photo('m1')])] },
+      });
+
+      expect(tree.toJSON()).toBeNull();
+    });
+
+    it('is headed "Where this happened"', () => {
+      const tree = renderWith(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-title')).toBe('Where this happened');
+    });
+
+    it('counts the pieces that have a place', () => {
+      const tree = renderWith(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-subtitle')).toBe('2 pieces');
+    });
+
+    it('counts the pieces that have none', () => {
+      const tree = renderWith(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-without-place')).toBe('1 piece without a place');
+    });
+  });
+
+  it('draws no map, no line and no pins, because there is no map on web', () => {
+    const tree = renderWeb({ entry: placedAndUnplaced });
+
+    expect(maps(tree)).toHaveLength(0);
+    expect(markers(tree)).toHaveLength(0);
+    expect(polylines(tree)).toHaveLength(0);
+  });
+
+  it('says why there is no map, rather than leaving an empty frame', () => {
+    const tree = renderWeb({ entry: placedAndUnplaced });
+
+    expect(textAt(tree, 'memory-route-map-unsupported')).toBe(
+      'The map is only available on iOS and Android.',
+    );
+  });
+
+  it('reserves the height the native one does, so a card lays out the same either way', () => {
+    expect(WEB_HEIGHT).toBe(MEMORY_ROUTE_MAP_HEIGHT);
+  });
+
+  it('does not import the native-only module', () => {
+    // The point of the sibling. Asserted on the file itself rather than on a mock, because a
+    // mocked `react-native-maps` loads perfectly well under jest and would hide exactly the
+    // import that breaks the web bundle. The doc comments in both files name the module in
+    // prose, as the existing stubs do, so it is the import that is forbidden, not the word.
+    const source = fs.readFileSync(path.join(__dirname, '..', 'MemoryRouteMap.web.js'), 'utf8');
+
+    expect(source).not.toMatch(/(?:from|require\()\s*['"]react-native-maps['"]/);
   });
 });
