@@ -41,8 +41,13 @@
  *      the whole-branch review, Important 2. FR-011 is untouched by that: a memory is still saved
  *      only on an explicit tap in the sheet, and this screen still saves nothing itself. The
  *      navigation parameters are still asserted with `toEqual`, so nothing *else* can be
- *      smuggled alongside, and the camera and microphone controls — which hand up no audience at
- *      all — still send exactly `{ mode: 'new' }`.
+ *      smuggled alongside.
+ *
+ *      **All three of the bar's controls carry it**, not only Send — fix round 2, item 3. The
+ *      camera and the microphone were left out of the first fix, which was the same defect
+ *      through another door: the picker sits on the same bar as them, so somebody who set it to
+ *      "Only me" and then tapped the camera still had their choice replaced by the sheet's wider
+ *      default. The "+" over every tab carries nothing, because there is no picker beside it.
  *
  * `JournalComposeModal` is **not** removed by T032 and is not expected to be gone here. plan.md's
  * Structure Decision keeps it "only for any remaining non-capture callers"; its one remaining
@@ -499,20 +504,28 @@ const NOTE = 'on the 34 bus, 8:41';
 // ---------------------------------------------------------------------------
 
 describe('the Journal quick bar opens the capture screen in one tap (FR-001)', () => {
-  it('opens Capture with { mode: "new" } when the camera control is tapped', async () => {
+  /**
+   * `'private'` is where `QuickCaptureBar` starts (`defaultVisibility`), and it is the lock icon
+   * the bar is showing when any of its three controls is tapped. Carrying it means the save
+   * sheet offers what the bar showed; it is also the narrower of the two, so a person who never
+   * touched the picker is never offered a wider audience than the one in front of them.
+   */
+  const BAR_DEFAULT = { mode: 'new', audience: 'private' };
+
+  it('opens Capture when the camera control is tapped, carrying the audience the bar is showing', async () => {
     const { tree, navigate } = await render();
 
     await tapCamera(tree);
 
-    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new' });
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
   });
 
-  it('opens Capture with { mode: "new" } when the mic control is tapped', async () => {
+  it('opens Capture when the mic control is tapped, carrying the audience the bar is showing', async () => {
     const { tree, navigate } = await render();
 
     await tapMic(tree);
 
-    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new' });
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
   });
 
   it('opens Capture when a typed note is sent, carrying the audience the bar is showing', async () => {
@@ -520,22 +533,18 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
 
     await tapSend(tree, NOTE);
 
-    // 'private' is where `QuickCaptureBar` starts (`defaultVisibility`), and it is the lock icon
-    // the bar is showing while the note is typed. Carrying it means the save sheet offers what
-    // the bar showed; it is also the narrower of the two, so a person who never touched the
-    // picker is never offered a wider audience than the one in front of them.
-    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
   });
 
   it('costs one tap and goes nowhere else — the same route and parameters as the + (FR-001)', async () => {
-    // `toEqual`, not `objectContaining`: nothing may be smuggled alongside. The camera and the
-    // microphone hand up no audience at all (`QuickCaptureBar` passes it only with the text), so
-    // they send exactly `{ mode: 'new' }` — the same parameters `CaptureFab` sends; the text
-    // carries the bar's picker as the save sheet's pre-selection and nothing more.
-    for (const [name, action, params] of [
-      ['camera', tapCamera, { mode: 'new' }],
-      ['mic', tapMic, { mode: 'new' }],
-      ['text', (tree) => tapSend(tree, NOTE), { mode: 'new', audience: 'private' }],
+    // `toEqual`, not `objectContaining`: nothing may be smuggled alongside. All three controls
+    // now carry the bar's audience as the save sheet's pre-selection and nothing more — the
+    // camera and the microphone were added in fix round 2, because the picker sits on the same
+    // bar as them and a tap on either used to replace the choice with a wider one.
+    for (const [name, action] of [
+      ['camera', tapCamera],
+      ['mic', tapMic],
+      ['text', (tree) => tapSend(tree, NOTE)],
     ]) {
       const { tree, navigate } = await render();
 
@@ -546,7 +555,7 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
       // fails here.
       expect({ action: name, navigated: navigate.mock.calls }).toEqual({
         action: name,
-        navigated: [['Capture', params]],
+        navigated: [['Capture', BAR_DEFAULT]],
       });
     }
   });
@@ -593,6 +602,60 @@ describe('the quick bar audience picker travels with the note (review fix, Impor
         label,
         navigated: [['Capture', { mode: 'new', audience }]],
       });
+    }
+  });
+
+  /**
+   * Fix round 2, item 3 -- ruled: carry it on the camera and the microphone too.
+   *
+   * It is the same defect through another door. The picker sits on the same bar as those two
+   * controls, so somebody who set it to **Only me** and then tapped the camera had their choice
+   * silently replaced by **Family** on the save sheet, and silently widening an audience is the
+   * unsafe way to be wrong. `QuickCaptureBar` now hands its current visibility up on all three
+   * of its controls, not only with the text.
+   */
+  it('carries the picked audience on the camera control too', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Only Me');
+    await tapCamera(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+  });
+
+  it('carries the picked audience on the mic control too', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapMic(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'friends' });
+  });
+
+  it('never widens on any of the three controls: every audience, every way in', async () => {
+    // The whole grid, so one control cannot be fixed while another still widens, and so a
+    // single hard-coded value cannot satisfy it.
+    for (const [label, audience] of [
+      ['Only Me', 'private'],
+      ['Friends', 'friends'],
+      ['Family & Friends', 'family_friends'],
+    ]) {
+      for (const [name, action] of [
+        ['camera', tapCamera],
+        ['mic', tapMic],
+        ['text', (tree) => tapSend(tree, NOTE)],
+      ]) {
+        const { tree, navigate } = await render();
+
+        await pickAudienceInBar(tree, label);
+        await action(tree);
+
+        expect({ label, action: name, navigated: navigate.mock.calls }).toEqual({
+          label,
+          action: name,
+          navigated: [['Capture', { mode: 'new', audience }]],
+        });
+      }
     }
   });
 

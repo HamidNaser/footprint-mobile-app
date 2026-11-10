@@ -614,28 +614,28 @@ export default function JournalScreen({ navigation }) {
   }, []);
 
   /**
-   * The quick bar's camera and microphone: one tap into the capture screen (FR-001).
+   * One tap from the quick bar into the capture screen, carrying the audience the bar's own
+   * picker was left on (FR-001).
    *
-   * The same route and the same parameters `CaptureFab` sends from the "+" over every tab, so
-   * there is one capture screen and not two. Nothing is carried here: these two controls do not
-   * hand the bar's audience up at all (`QuickCaptureBar` sends it only with the text), and a
-   * memory is still saved only on an explicit choice in the capture screen's save sheet
-   * (FR-011).
-   */
-  const openCapture = useCallback(() => {
-    navigation.navigate('Capture', { mode: 'new' });
-  }, [navigation]);
-
-  /**
-   * The same one tap, carrying an audience the person has already chosen on the bar.
+   * The same route `CaptureFab` sends from the "+" over every tab, so there is one capture
+   * screen and not two. The "+" carries no audience, because there is no picker beside it; all
+   * **three** of the bar's controls do, because the picker sits on the bar with them (fix round
+   * 2, item 3 -- it was Send alone, and a camera or microphone tap replaced the person's choice
+   * with the sheet's wider default).
    *
-   * Separate from `openCapture` rather than a parameter on it, because `openCapture` is handed
-   * straight to `onCameraPress`/`onMicPress` and a `TouchableOpacity` calls those with a press
-   * *event* -- which, spread into the route parameters, would send the whole event object to the
-   * capture screen.
+   * It is a pre-selection for the save sheet and nothing more: a memory is still saved only on
+   * an explicit choice there (FR-011).
+   *
+   * `typeof visibility === 'string'`, so a caller that hands this straight to a `TouchableOpacity`
+   * -- which calls its handler with a press **event** -- cannot send that object to the capture
+   * screen as a route parameter. `QuickCaptureBar` wraps all three of its controls so that does
+   * not happen today; this is what stops it mattering if one is ever unwrapped.
    */
-  const openCaptureFor = useCallback((visibility) => {
-    navigation.navigate('Capture', { mode: 'new', audience: visibility });
+  const openCapture = useCallback((visibility) => {
+    navigation.navigate('Capture', {
+      mode: 'new',
+      ...(typeof visibility === 'string' ? { audience: visibility } : null),
+    });
   }, [navigation]);
 
   /**
@@ -659,7 +659,8 @@ export default function JournalScreen({ navigation }) {
    * to hiding the picker, which would take away something people have today.
    *
    * It stays a pre-selection: the save sheet still has to be tapped, and nothing about this
-   * value reaches the server unless it is.
+   * value reaches the server unless it is. The bar's camera and microphone controls carry it
+   * too, for the same reason (fix round 2, item 3) -- see `openCapture`.
    *
    * A note that cannot be recorded is said back to the person, with the words in it, rather than
    * logged to a console nobody is reading (FR-017).
@@ -698,8 +699,8 @@ export default function JournalScreen({ navigation }) {
       setKeepingNote(false);
     }
 
-    openCaptureFor(visibility);
-  }, [openCaptureFor]);
+    openCapture(visibility);
+  }, [openCapture]);
 
   /**
    * Handle entry press

@@ -41,6 +41,12 @@ const dirs = new Set();
 /** Set to an Error to make a delete fail, the way a wipe can on a real device. */
 let deleteFails = null;
 
+/** Set to an Error to make the drafts row delete fail -- a locked database, say. */
+let rowDeleteFails = null;
+
+/** The two steps of a draft wipe, in the order they happened: `'row'` then `'media'`. */
+const trail = [];
+
 const mockFileSystem = {
   documentDirectory: DOCS,
   getInfoAsync: jest.fn(async (uri) => ({
@@ -56,6 +62,7 @@ const mockFileSystem = {
     files.add(to);
   }),
   deleteAsync: jest.fn(async (uri) => {
+    if (uri === DRAFTS_ROOT) trail.push('media');
     if (deleteFails) throw deleteFails;
     for (const path of [...dirs]) if (path.startsWith(uri)) dirs.delete(path);
     for (const path of [...files]) if (path.startsWith(uri)) files.delete(path);
@@ -119,7 +126,13 @@ function adapter(raw) {
   const conn = {
     raw,
     execAsync: async (sql) => raw.exec(sql),
-    runAsync: async (sql, params = []) => raw.prepare(sql).run(...params),
+    runAsync: async (sql, params = []) => {
+      if (/DELETE FROM capture_drafts/i.test(sql)) {
+        trail.push('row');
+        if (rowDeleteFails) throw rowDeleteFails;
+      }
+      return raw.prepare(sql).run(...params);
+    },
     getAllAsync: async (sql, params = []) => raw.prepare(sql).all(...params),
     getFirstAsync: async (sql, params = []) => raw.prepare(sql).get(...params) ?? null,
     // A no-op: the phone's storage outlives a sign-out, and so must this database.
@@ -187,6 +200,8 @@ beforeEach(async () => {
   files.clear();
   dirs.clear();
   deleteFails = null;
+  rowDeleteFails = null;
+  trail.length = 0;
   settings.userId = null;
 
   raw = new DatabaseSync(':memory:');
@@ -251,6 +266,49 @@ describe('teardownLocalData: signing out takes the unsaved memory with it (FR-01
   it('a phone that has never captured anything is not an error: no directory, no throw', async () => {
     await expect(bootstrap.teardownLocalData()).resolves.toBeUndefined();
     expect(draftRows()).toEqual([]);
+  });
+
+  /**
+   * Fix round 2, item 1. The two halves of a draft are the row and the media, and neither may be
+   * skipped because the other failed. The row delete used to come first with the media delete
+   * after it, so a `DELETE` that rejected -- a locked database, or a store whose tables were
+   * never created -- took the media delete with it: `clearLocalDrafts` warned, and the previous
+   * account's photographs and voice clips stayed on disk.
+   *
+   * It does not reinstate the Critical's privacy hole -- the table drop in
+   * `DatabaseService.clearLocalData` removes the rows regardless, so nothing in the app can
+   * reach those files again -- but it leaves one person's media bytes at rest on a phone handed
+   * to the next, which is the same concern one step down.
+   */
+  it('deletes the draft media even when the row delete fails (fix round 2)', async () => {
+    await captureAsPersonA();
+    rowDeleteFails = new Error('database is locked');
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await bootstrap.teardownLocalData();
+
+    // Read off the filesystem: the bytes are gone, not merely unreferenced.
+    expect([...files].filter((path) => path.startsWith(DRAFTS_ROOT))).toEqual([]);
+    expect((await mockFileSystem.getInfoAsync(DRAFTS_ROOT)).exists).toBe(false);
+    // And the failure is still reported rather than swallowed -- the wipe was incomplete.
+    expect(warn.mock.calls.flat().join(' ')).toContain('clearAllDrafts failed');
+    warn.mockRestore();
+
+    // The rows go anyway, because the table drop that follows does not depend on this at all.
+    expect(draftRows()).toEqual([]);
+  });
+
+  it('deletes the row before the media, so no draft is ever listed with its media already gone', async () => {
+    // The order still matters and is unchanged: `removeHeld` and `removePiece` both record the
+    // removal before the file goes, because a draft that lists a piece whose media has been
+    // deleted reads as present and plays as missing -- which rule 1 of `CaptureDraftStore`'s
+    // header calls worse than no piece. Only the *unconditionality* changed.
+    await captureAsPersonA();
+    trail.length = 0;
+
+    await bootstrap.teardownLocalData();
+
+    expect(trail.filter((step) => step === 'row' || step === 'media')).toEqual(['row', 'media']);
   });
 
   it('a failed media delete does not stop the sign-out, and says so', async () => {

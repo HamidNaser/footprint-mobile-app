@@ -638,6 +638,20 @@ export function clearAfterSave(slot, options = {}) {
  *    the way past for no reason.
  * 2. **The media.** One delete of the drafts root takes every slot's folder with it. Idempotent,
  *    so a phone that has never captured anything (no root at all) is not an error.
+ *
+ *    ⚠ **Attempted whether or not the rows went** (fix round 2). It used to sit after the row
+ *    delete and depend on it, so a `DELETE` that rejected -- a locked database, or a store whose
+ *    tables were never created -- took the media delete with it, and the previous account's
+ *    photographs and voice clips stayed on disk. The table drop in
+ *    `DatabaseService.clearLocalData` removes the rows regardless, so nothing in the app could
+ *    still *read* those files; but a person's media bytes were left at rest on a phone handed to
+ *    the next, which is the same concern one step down. Both halves are now attempted and the
+ *    first failure is the one reported.
+ *
+ *    The **order** is unchanged and still deliberate: the row goes first, as it does in
+ *    `removeHeld` and `removePiece`, because a draft that lists a piece whose media has already
+ *    been deleted reads as present and plays as missing -- rule 1 above calls that worse than no
+ *    piece. Only the row delete's veto over the media delete is gone.
  * 3. **The copies in memory.** `cache` and `unwritten` are module state and outlive a sign-out:
  *    the bundle is not reloaded, so the next account runs with the same module instance. A slot
  *    that was still unwritten (a debounced keystroke, or a write that failed) is handed back by
@@ -665,10 +679,25 @@ export function clearAllDrafts() {
       );
       slots.forEach((slot) => writeChains.delete(slot));
 
-      const db = await getDatabase();
-      await db.runAsync('DELETE FROM capture_drafts');
+      // Both halves are attempted, whichever fails. The first failure is what the caller is
+      // told about, so a row delete that failed is not masked by a media delete that failed
+      // after it.
+      let failure = null;
 
-      await FileSystem.deleteAsync(DRAFTS_ROOT, { idempotent: true });
+      try {
+        const db = await getDatabase();
+        await db.runAsync('DELETE FROM capture_drafts');
+      } catch (error) {
+        failure = error;
+      }
+
+      try {
+        await FileSystem.deleteAsync(DRAFTS_ROOT, { idempotent: true });
+      } catch (error) {
+        if (!failure) failure = error;
+      }
+
+      if (failure) throw failure;
     })
   );
 }

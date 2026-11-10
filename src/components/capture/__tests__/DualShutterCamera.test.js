@@ -1247,6 +1247,19 @@ describe('DualShutterCamera: Video is unavailable while a voice clip is recordin
     expect(textAt(tree, 'camera-video-blocked-message')).toMatch(/voice/i);
   });
 
+  it('sends the person somewhere they can actually go: close the camera first (fix round 2)', async () => {
+    // This overlay fills the screen (`CaptureScreen`'s `cameraOverlay` -- an opaque
+    // `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but covered and its
+    // Stop control cannot be reached from here. The first wording read "stop the voice note to
+    // record a video", which is a control the person cannot get at while this is open.
+    const tree = await render({ voiceRecording: true });
+
+    const message = textAt(tree, 'camera-video-blocked-message');
+    expect(message).toMatch(/close the camera/i);
+    // And it must not be the instruction that cannot be followed from here.
+    expect(message).not.toMatch(/stop the voice note to record/i);
+  });
+
   it('gives Video back the moment the clip is finished', async () => {
     const tree = await render({ voiceRecording: true });
     expect(pressable(tree, 'camera-video-button').props.disabled).toBe(true);

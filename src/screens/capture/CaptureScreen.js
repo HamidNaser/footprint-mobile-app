@@ -457,12 +457,13 @@ export default function CaptureScreen({ route, navigation }) {
   /**
    * An audience the person has **already** chosen somewhere else, for the save sheet to open on.
    *
-   * The Journal's quick bar carries its own "Who can see this?" picker, and it sends what the
-   * picker was left on with the note (`JournalScreen.handleSendMessage`). Without this, somebody
-   * who picked **Only me** there and tapped Send reached a sheet pre-selecting **Family**: their
-   * choice discarded, and the replacement *wider* than what they asked for -- the unsafe
-   * direction of this project's "sharing fails closed" rule (fix round 1 after the whole-branch
-   * review, Important 2).
+   * The Journal's quick bar carries its own "Who can see this?" picker, and every one of its
+   * three controls sends what the picker was left on (`JournalScreen.openCapture`). Without
+   * this, somebody who picked **Only me** there and then tapped Send -- or the camera, or the
+   * microphone -- reached a sheet pre-selecting **Family**: their choice discarded, and the
+   * replacement *wider* than what they asked for, which is the unsafe direction of this
+   * project's "sharing fails closed" rule (fix round 1 after the whole-branch review,
+   * Important 2; the camera and microphone in round 2, item 3).
    *
    * `undefined` when nothing carried one -- the + over every tab, for instance -- and then the
    * sheet uses FR-010's own Family. Deliberately not defaulted to `'family'` here: the

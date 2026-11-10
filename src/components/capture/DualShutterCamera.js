@@ -573,14 +573,20 @@ export default function DualShutterCamera({
 
             {/* Why Video is dim. A disabled control with no explanation reads as a broken
                 camera, and the person is a tap away from the thing that actually truncates
-                their clip. It names the voice note, so what to do about it is obvious: stop
-                the clip, then record the video (FR-007, review Important 5). */}
+                their clip (FR-007, review Important 5).
+
+                ⚠ It says **close the camera** rather than "stop the voice note", because this
+                overlay fills the screen (`CaptureScreen`'s `cameraOverlay`: an opaque
+                `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but
+                covered and its Stop control cannot be reached from here. The first wording sent
+                somebody to a control they could not get at (fix round 2, item 2). The sequence
+                it names is the one that works: Done, then Stop, then back in for the video. */}
             {voiceRecording && (
               <View testID="camera-video-blocked" style={styles.notice}>
                 <Ionicons name="mic-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-video-blocked-message" style={styles.noticeText}>
                   You’re recording a voice note, so a video would cut it short. Photos still
-                  work; stop the voice note to record a video.
+                  work; to record a video, close the camera, stop the voice note, and come back.
                 </Text>
               </View>
             )}
