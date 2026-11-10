@@ -27,6 +27,7 @@ const path = require('path');
 
 const APP_JSON_PATH = path.join(__dirname, '..', '..', 'app.json');
 const APP_CONFIG_PATH = path.join(__dirname, '..', '..', 'app.config.js');
+const EAS_JSON_PATH = path.join(__dirname, '..', '..', 'eas.json');
 
 /** A real Google Maps key's own shape (`AIza` + 35 more base64url characters) -- the string a
  * leaked key would actually look like, as opposed to the env var's *name*, which legitimately
@@ -103,5 +104,16 @@ describe('app.config.js: the react-native-maps Android key (T067, research R6)',
     // The static file never names react-native-maps either -- that plugin entry lives only in
     // app.config.js, sourced from the env var, never from app.json.
     expect(raw).not.toMatch(/react-native-maps/);
+  });
+
+  // Minor 5 (fix round 1): the two cases above catch a hardcoded fallback in `app.config.js`
+  // and a key written into `app.json`, but neither reads `eas.json` -- which already carries
+  // plain `build.<profile>.env` blocks (`APP_ENV`), and is committed. The natural wrong move
+  // for whoever wires up a real key is adding it there (`"GOOGLE_MAPS_ANDROID_API_KEY":
+  // "AIza…"` in `preview.env`) instead of an EAS secret, and nothing above would notice.
+  it('eas.json contains no key', () => {
+    const raw = fs.readFileSync(EAS_JSON_PATH, 'utf8');
+
+    expect(raw).not.toMatch(LOOKS_LIKE_A_REAL_KEY);
   });
 });

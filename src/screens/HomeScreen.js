@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { useUpcomingEvents } from '../hooks/useUpcomingEvents';
@@ -13,7 +14,22 @@ export default function HomeScreen({ navigation }) {
   const { user } = useAuth();
   // Home's "Coming up" card (FR-034, research R11) -- the hook's own behaviour (civil-date
   // split, fail-closed error) is covered by its own test; here it only feeds the card.
-  const { upcoming, error: upcomingError } = useUpcomingEvents();
+  const { upcoming, error: upcomingError, refresh: refreshUpcomingEvents } = useUpcomingEvents();
+
+  // Home is a bottom-tab screen that never unmounts, so the one load on mount would otherwise
+  // be the only load for the rest of the app session -- the same hazard `useUpcomingEvents`
+  // gained `refresh()` for, one task ago, on the Timeline pane; its own doc comment gives this
+  // exact scenario as the reason. A transient failure would strand the card on "Couldn't load
+  // upcoming events" indefinitely, and an event created afterwards would never appear.
+  //
+  // Retried quietly on focus, not with a button: FR-034 asks for a *quiet* line, and a visible
+  // "Try again" is a control the contract does not ask for. Only retried when there is an
+  // error to recover from -- an ordinary tab switch must not refetch on every visit.
+  useFocusEffect(
+    useCallback(() => {
+      if (upcomingError) refreshUpcomingEvents();
+    }, [upcomingError, refreshUpcomingEvents])
+  );
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>

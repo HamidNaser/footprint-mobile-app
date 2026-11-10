@@ -9,16 +9,47 @@
  * The phase checkpoint -- "the six tabs are unchanged (T012)" -- is not re-pinned here:
  * `HomeScreen` renders no tab chrome of its own, so there is nothing about the tab list for this
  * file to check; that checkpoint belongs where the tabs are defined (`AppNavigator.js`).
+ *
+ * Fix round 1: `HomeScreen` is a bottom-tab screen that never unmounts, so the one load on
+ * mount was the only one for the rest of the app session -- a transient failure stranded the
+ * card on its error line indefinitely. `@react-navigation/native` is mocked the same way
+ * `JournalScreen.capture.test.js` and `PlacesScreen` already establish: `useFocusEffect` runs
+ * its effect on mount (React Navigation treats the first mount as a focus) and `__refocus()`
+ * runs it again for every mounted screen, standing in for the person switching back to Home
+ * from another tab -- the moment this fix is actually for.
  */
 
 jest.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ user: { name: 'Sam', avatarUrl: null } }),
 }));
 jest.mock('../../hooks/useUpcomingEvents', () => ({ useUpcomingEvents: jest.fn() }));
+jest.mock('@react-navigation/native', () => {
+  const ReactForMock = require('react');
+  const focused = new Map();
+  return {
+    useFocusEffect: (effect) => {
+      ReactForMock.useEffect(() => {
+        focused.set(effect, effect());
+        return () => {
+          const cleanup = focused.get(effect);
+          focused.delete(effect);
+          if (typeof cleanup === 'function') cleanup();
+        };
+      }, [effect]);
+    },
+    __refocus: () => {
+      focused.forEach((cleanup, effect) => {
+        if (typeof cleanup === 'function') cleanup();
+        focused.set(effect, effect());
+      });
+    },
+  };
+});
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { TouchableOpacity, Text } from 'react-native';
+import { __refocus } from '@react-navigation/native';
 import { useUpcomingEvents } from '../../hooks/useUpcomingEvents';
 import HomeScreen from '../HomeScreen';
 
@@ -74,6 +105,8 @@ function pressableByText(tree, matcher) {
  * `TimelineScreen.events.test.js`) -- skipping it does not fail the assertions below, it fails
  * the *next* test instead, once Jest tears the environment down mid-update.
  */
+const mounted = [];
+
 async function mount(props) {
   let tree;
   await act(async () => {
@@ -82,12 +115,26 @@ async function mount(props) {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+  mounted.push(tree);
   return tree;
 }
 
 beforeEach(() => {
   useUpcomingEvents.mockReset();
   mockUpcoming({});
+});
+
+// Unmount every tree this file created -- the `@react-navigation/native` mock's `focused` map
+// is module-scoped (one real instance for the whole file, same as `useFocusEffect`'s own real
+// listener registry), so an unmounted test's entry must be cleaned up before the next test
+// calls `__refocus()`, or a later test would also re-run an earlier test's stale effect.
+afterEach(() => {
+  while (mounted.length) {
+    const tree = mounted.pop();
+    act(() => {
+      tree.unmount();
+    });
+  }
 });
 
 describe('HomeScreen (T066 -- Coming up card)', () => {
@@ -129,6 +176,39 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
     expect(navigate).toHaveBeenCalledWith('Timeline', { view: 'events' });
   });
 
+  // Minor 1 (fix round 1): `pressableByText` finds the first pressable whose subtree contains
+  // the matching text -- for "See all", that is the *outer card* `TouchableOpacity` (it wraps
+  // the nested "See all" button, so the text is in its subtree too), not the nested button
+  // itself. The test above alone cannot tell the two apart, and a nested-touchable bug that
+  // swallows the tap on the real "See all" button would still pass it. Every pressable the
+  // card exposes is checked here, one at a time, each cleared before the next is pressed, so a
+  // broken nested button cannot hide behind the outer card's own onPress.
+  it('every pressable on the card -- the card body and the nested "See all" -- independently navigates to Timeline', async () => {
+    mockUpcoming({ upcoming: [event()] });
+    const navigate = jest.fn();
+    const tree = await mount({ navigation: { navigate } });
+
+    const pressables = tree.root.findAll(
+      (node) => node.type === TouchableOpacity && typeof node.props.onPress === 'function'
+    );
+    // The whole card plus the nested "See all" -- not the Events quick action, which is its own
+    // separate pressable elsewhere in the tree and would not reach this filter by coincidence
+    // (different onPress, asserted against a different call below).
+    const cardPressables = pressables.filter((node) =>
+      node.findAllByType(Text).some((t) => {
+        const children = Array.isArray(t.props.children) ? t.props.children.flat(3) : [t.props.children];
+        return /^(Coming up|See all)/.test(children.filter((c) => typeof c === 'string').join(''));
+      })
+    );
+    expect(cardPressables.length).toBeGreaterThanOrEqual(2);
+
+    cardPressables.forEach((node) => {
+      navigate.mockClear();
+      node.props.onPress();
+      expect(navigate).toHaveBeenCalledWith('Timeline', { view: 'events' });
+    });
+  });
+
   it('still navigates the Events quick action to the Events screen, unchanged', async () => {
     mockUpcoming({});
     const navigate = jest.fn();
@@ -136,5 +216,57 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
 
     pressableByText(tree, /^Events$/).props.onPress();
     expect(navigate).toHaveBeenCalledWith('Events');
+  });
+
+  // Fix round 1, Important 1: Home never unmounts, so without a retry a transient failure would
+  // strand the card on its error line for the rest of the app session. Retried quietly on
+  // focus -- no visible "Try again" (FR-034 asks for a *quiet* line) -- and only when there is
+  // an error to recover from, so an ordinary tab switch does not refetch on every visit.
+  describe('retries on focus when the card has an error, quietly (fix round 1)', () => {
+    it('with an error, coming back into focus calls refresh', async () => {
+      const refresh = jest.fn();
+      mockUpcoming({ error: { message: 'Network request failed' }, refresh });
+      await mount();
+
+      // The mount itself is already a focus event (React Navigation treats first mount as
+      // one); `__refocus()` stands in for a *later* focus -- the person actually switching
+      // back to Home from another tab, which is the moment this fix exists for.
+      refresh.mockClear();
+      act(() => {
+        __refocus();
+      });
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('with no error, coming back into focus does not call refresh', async () => {
+      const refresh = jest.fn();
+      mockUpcoming({ upcoming: [event()], refresh });
+      await mount();
+
+      refresh.mockClear();
+      act(() => {
+        __refocus();
+      });
+
+      expect(refresh).not.toHaveBeenCalled();
+    });
+  });
+
+  // Minor 2 (fix round 1): `shows()` is order-blind, so a card that silently reversed its two
+  // rows would still pass every other test in this file. The hook is responsible for the
+  // ascending order itself (pinned by `useUpcomingEvents.test.js`); this only pins that the
+  // card renders whatever order it is given, rather than re-deriving or reversing it.
+  it('renders the two events in the order given, soonest first', async () => {
+    mockUpcoming({
+      upcoming: [
+        event({ id: 'e1', title: 'Garden Party', date: '2026-11-08' }),
+        event({ id: 'e2', title: 'Book Club', date: '2026-11-15' }),
+      ],
+    });
+    const tree = await mount();
+
+    const all = texts(tree);
+    expect(all.indexOf('Garden Party')).toBeLessThan(all.indexOf('Book Club'));
   });
 });

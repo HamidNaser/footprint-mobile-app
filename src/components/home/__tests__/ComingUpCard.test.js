@@ -121,7 +121,13 @@ describe('ComingUpCard (T066)', () => {
     expect(shows(tree, /Should not appear/)).toBe(false);
   });
 
-  it('tapping the card, or "See all ›", calls onPress', async () => {
+  // Fix round 1, Minor 1: the original version of this test called every pressable in one
+  // `forEach` behind a single aggregate `expect(onPress).toHaveBeenCalled()`, which cannot
+  // tell which one fired -- `onPress={() => {}}` on the nested "See all" button (:89) would
+  // still pass, as long as the outer card's own `onPress` fired. Each pressable is now pressed
+  // and asserted, then cleared, before the next one -- a broken nested button cannot hide
+  // behind the outer card.
+  it('tapping the card, and tapping "See all ›", each independently call onPress', async () => {
     const onPress = jest.fn();
     const tree = await mount(<ComingUpCard upcoming={[event()]} error={null} onPress={onPress} />);
 
@@ -129,9 +135,70 @@ describe('ComingUpCard (T066)', () => {
       (node) => node.type === TouchableOpacity && typeof node.props.onPress === 'function'
     );
     expect(pressables.length).toBeGreaterThanOrEqual(2); // the whole card, and "See all ›"
-    await act(async () => {
-      pressables.forEach((node) => node.props.onPress());
-    });
-    expect(onPress).toHaveBeenCalled();
+
+    for (const node of pressables) {
+      onPress.mockClear();
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => {
+        node.props.onPress();
+      });
+      expect(onPress).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  // Minor 4 (fix round 1): `useUpcomingEvents` deliberately sorts a malformed-dated event last
+  // but still returns it (constitution: fail open rather than silently drop it) -- so a person
+  // with exactly one well-formed upcoming event sees a malformed-dated one in the card's
+  // *second* slot. Handled (the tile goes blank, nothing throws) but was untested.
+  it('renders a blank date tile, not a crash, for a malformed second-slot date', async () => {
+    const tree = await mount(
+      <ComingUpCard
+        upcoming={[
+          event({ id: 'e1', title: 'Garden Party', date: '2026-11-08' }),
+          event({ id: 'e2', title: 'Mystery Meetup', date: 'not-a-date' }),
+        ]}
+        error={null}
+        onPress={() => {}}
+      />
+    );
+
+    expect(shows(tree, /^Mystery Meetup$/)).toBe(true);
+    // No month/day rendered for the malformed one -- not a throw, not a fabricated date.
+    expect(shows(tree, /not-a-date/)).toBe(false);
+  });
+
+  // Minor 4 continued: the other two handled-but-untested edge cases the reviewer named,
+  // one assertion each.
+  it('omits the place line when an event has no location', async () => {
+    const tree = await mount(
+      <ComingUpCard
+        upcoming={[event({ title: 'No Place Party', location: null })]}
+        error={null}
+        onPress={() => {}}
+      />
+    );
+
+    expect(shows(tree, /^No Place Party$/)).toBe(true);
+    expect(shows(tree, /^The Loft$/)).toBe(false);
+  });
+
+  it('renders a very long title without crashing', async () => {
+    const longTitle = 'A'.repeat(200);
+    const tree = await mount(
+      <ComingUpCard upcoming={[event({ title: longTitle })]} error={null} onPress={() => {}} />
+    );
+
+    expect(shows(tree, new RegExp(`^${longTitle}$`))).toBe(true);
+  });
+
+  // Minor 3 (fix round 1, ruled): keep the `'Untitled event'` fallback and pin it -- a blank
+  // title is worse than a fallback a person would actually read, and it was unrequested,
+  // user-visible and untested.
+  it("falls back to 'Untitled event' when an event has no title", async () => {
+    const tree = await mount(
+      <ComingUpCard upcoming={[event({ title: '' })]} error={null} onPress={() => {}} />
+    );
+
+    expect(shows(tree, /^Untitled event$/)).toBe(true);
   });
 });
