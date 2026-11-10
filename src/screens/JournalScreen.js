@@ -32,7 +32,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
 // Components
-import { JournalEntryCard } from '../components/journal/JournalEntryCard';
+// `isOwnMemory` is the card's own rule for whose memory a card shows, shared rather than
+// written out a second time here: it decides both whether Edit is offered on a card and
+// whether `openEdit` will open one, and those two must agree (round-1 Minor 3).
+import { JournalEntryCard, isOwnMemory } from '../components/journal/JournalEntryCard';
 import { ViewportFlatList } from '../components/media/ViewportLists';
 // The same viewability helper the media tiles use (007 FR-027), for the same reason: a card
 // off screen should not mount a native map view (013 research R10 *Lazy rendering*). Until the
@@ -764,6 +767,24 @@ export default function JournalScreen({ navigation }) {
       return;
     }
 
+    // Whose memory it is, tested **here** and not only where Edit is offered (round-1
+    // Important 1). This handler has three callers and the menu below is one of them: the
+    // card's "Unfinished edit — continue" is wired to every card, and the detail view's Edit
+    // comes from `JournalEntryDetail`'s own menu, which has no ownership test at all. Opening
+    // a memory that is not the reader's as an edit would take them through a whole edit and
+    // lose it at the far end, where `updateEntry` refuses the write -- so it is refused at the
+    // near end, where nothing has been done yet. The menu's gate stays what it is: the
+    // suppression of the *offer*, so a stranger's card shows no Edit rather than one that
+    // refuses.
+    if (!isOwnMemory(entry, authUser?.id)) {
+      Alert.alert(
+        'Could not open that edit',
+        'This memory was written by somebody else, so it cannot be edited here. Nothing has ' +
+          'been changed.',
+      );
+      return;
+    }
+
     const open = () => {
       // The detail view, if that is where Edit was chosen: the capture screen opens over the
       // Journal, and coming back from it should land on the list the memory is in.
@@ -826,7 +847,7 @@ export default function JournalScreen({ navigation }) {
         },
       ],
     );
-  }, [navigation]);
+  }, [authUser?.id, navigation]);
 
   /**
    * The ⋯ on a card, which was wired to nothing at all before this: Edit, on the author's own
@@ -834,9 +855,9 @@ export default function JournalScreen({ navigation }) {
    *
    * **Nothing at all on anybody else's.** There is nothing in another person's memory for the
    * reader to edit -- an edit saves through `updateEntry`, which is their memory's to accept --
-   * so a menu here would be a menu of one thing that cannot work. Whose memory it is, is the
-   * same question and the same answer as `JournalEntryCard`'s own `isOwnEntry`, and the two
-   * have to agree: the card shows the ⋯ and this decides what it offers.
+   * so a menu here would be a menu of one thing that cannot work. This is the suppression of
+   * the *offer* only: `openEdit` applies the same rule itself, by the same `isOwnMemory`, so
+   * the two cannot disagree and the handler holds even for a caller that offers no menu.
    *
    * The cost of that rule, named: a memory saved while nobody was signed in carries
    * `local_user` as its author and is not matched, so Edit is not offered on it. It is the same
@@ -845,9 +866,7 @@ export default function JournalScreen({ navigation }) {
    * would refuse is worse than not offering one.
    */
   const handleMenuPress = useCallback((entry) => {
-    const isOwnEntry =
-      !!authUser?.id && (entry?.userId === authUser.id || entry?.authorId === authUser.id);
-    if (!isOwnEntry) return;
+    if (!isOwnMemory(entry, authUser?.id)) return;
 
     Alert.alert('Memory options', null, [
       { text: 'Edit', onPress: () => openEdit(entry) },

@@ -188,27 +188,36 @@ jest.mock('../../hooks/useJournalRealtime', () => ({
  *
  * The mock runs the effect on mount, as React Navigation does on focus, and `__refocus()`
  * runs it again for every mounted screen — the journey a test cannot otherwise reach: close
- * the capture screen, come back, and find the Journal saying something new. Any cleanup the
- * effect returns is run on unmount, and discarded by `__refocus` (a fresh effect follows it
- * immediately, and running the old one's cleanup would cancel the new one's read).
+ * the capture screen, come back, and find the Journal saying something new.
+ *
+ * **Each effect's latest cleanup is the one that is kept** (round-1 Minor 4). `__refocus` runs
+ * the previous cleanup before running the effect again, which is blur-then-focus as React
+ * Navigation does it, and then holds the new effect's cleanup for the unmount. Running the old
+ * cleanup *after* the new effect would cancel the new read; dropping both would leave a read
+ * in flight that no unmount can cancel, free to resolve onto a tree the harness has already
+ * taken down.
  */
 jest.mock('@react-navigation/native', () => {
   const React = require('react');
-  const focused = new Set();
+  /** The cleanup each mounted focus effect last returned, by effect. */
+  const focused = new Map();
   return {
     useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
     useFocusEffect: (effect) => {
       React.useEffect(() => {
-        focused.add(effect);
-        const cleanup = effect();
+        focused.set(effect, effect());
         return () => {
+          const cleanup = focused.get(effect);
           focused.delete(effect);
           if (typeof cleanup === 'function') cleanup();
         };
       }, [effect]);
     },
     __refocus: () => {
-      focused.forEach((effect) => effect());
+      focused.forEach((cleanup, effect) => {
+        if (typeof cleanup === 'function') cleanup();
+        focused.set(effect, effect());
+      });
     },
   };
 });
@@ -1451,6 +1460,41 @@ describe('Edit opens the capture screen on the memory itself (FR-018)', () => {
     }
 
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an edit of somebody else’s memory however it is asked for (FR-018)', async () => {
+    // Round-1 Important 1. The case above is the ⋯ *not offering* Edit; this is the handler
+    // itself refusing. They are different things, and the second is the one that matters,
+    // because `openEdit` has three callers and only one of them is that menu: the card's
+    // "Unfinished edit — continue" (wired to every card, driven here) and the detail view's
+    // Edit, which `JournalEntryDetail` offers from its own menu with no ownership test of its
+    // own. Opening a stranger's memory as an edit loses the person's work at the far end,
+    // where `updateEntry` refuses the write -- which is the loss Edit is withheld to prevent,
+    // arriving by the one route the withholding does not cover.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-theirs').props.onContinueEdit(THEIRS);
+    });
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+  });
+
+  it('still opens an edit of a memory the reader wrote, through the same caller', async () => {
+    // The other half of that gate: refusing somebody else's memory must not have refused
+    // everybody's. The same prop, on the reader's own card, opens the edit.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-walk').props.onContinueEdit(WALK);
+    });
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+    expect(alert).not.toHaveBeenCalled();
   });
 
   it('says so when a memory arrives with no local id, rather than opening nothing', async () => {

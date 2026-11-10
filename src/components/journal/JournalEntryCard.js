@@ -52,6 +52,23 @@ const CONTENT_WIDTH = SCREEN_WIDTH - (CARD_PADDING * 2);
 const PIECE_HIGHLIGHT_MS = 1500;
 
 /**
+ * Whether this memory is the reader's own — one expression, for the card and for the screen
+ * that renders it (013 T059/T060, round-1 Minor 3).
+ *
+ * It decides what a person is offered over a memory: the audience choice on a share the server
+ * refused, below, and **Edit**, which `JournalScreen` both offers from the ⋯ and refuses inside
+ * `openEdit`. Those two had the same comparison written out twice, which is one copy too many
+ * for a rule whose two halves must agree: a menu that offers an Edit the handler then refuses,
+ * or worse the reverse, is the shape of this going wrong.
+ *
+ * `authorId` as well as `userId` because the two routes into a card spell it differently
+ * (`DatabaseService._mapEntryRow` and `SocialService.adaptEntry`). Falsy `currentUserId` is
+ * **not** own: a card rendered without an account cannot claim a memory belongs to it.
+ */
+export const isOwnMemory = (entry, currentUserId) =>
+  !!currentUserId && (entry?.userId === currentUserId || entry?.authorId === currentUserId);
+
+/**
  * What the card says over a memory with an edit that was never saved (FR-013, US2-7).
  *
  * The one way back into that edit from the Journal, and the reason it is a line on the card
@@ -604,8 +621,9 @@ export const JournalEntryCard = memo(({
   onRequestScrollTo,
   style,
 }) => {
-  // Determine if this is the current user's entry
-  const isOwnEntry = currentUserId && (entry.userId === currentUserId || entry.authorId === currentUserId);
+  // Determine if this is the current user's entry — the same rule `JournalScreen` applies to
+  // decide whether Edit is offered and whether it is allowed (`isOwnMemory`, above).
+  const isOwnEntry = isOwnMemory(entry, currentUserId);
   // Check if entry has any media (photos, videos) for gallery button
   const hasMedia = entry.contentBlocks?.some(b => 
     b.type === 'photos' || b.type === 'video'
