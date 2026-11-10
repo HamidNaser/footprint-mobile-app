@@ -44,7 +44,10 @@ export const AUDIENCE_OPTIONS = [
   { value: 'family_friends', label: 'Family & Friends', icon: 'globe-outline' },
 ];
 
-/** FR-010: Family is pre-selected. A hint only -- it is never sent without a tap. */
+/**
+ * FR-010: Family is pre-selected, for a caller that carries no choice of its own. A hint only --
+ * it is never sent without a tap.
+ */
 export const PRE_SELECTED_AUDIENCE = 'family';
 
 /**
@@ -53,8 +56,28 @@ export const PRE_SELECTED_AUDIENCE = 'family';
  * @param {(visibility: 'private'|'family'|'friends'|'family_friends') => void} props.onChoose
  *   The explicit choice FR-011 requires. Called with the visibility and nothing else.
  * @param {() => void} props.onDismiss Left without choosing. Nothing is saved (FR-011).
+ * @param {'private'|'family'|'friends'|'family_friends'} [props.preSelected]
+ *   Which option opens ticked. Defaults to Family (FR-010).
+ *
+ *   **It exists so that a choice the person has already made somewhere else is not silently
+ *   replaced by a wider one** (fix round 1 after the whole-branch review, Important 2). The
+ *   Journal's quick bar carries its own "Who can see this?" picker; somebody who set it to
+ *   **Only me** and tapped Send used to land on this sheet pre-selecting **Family**, with their
+ *   own choice discarded and the replacement wider than what they asked for -- the one direction
+ *   this project's "sharing fails closed" rule rules out. `CaptureScreen` now passes the
+ *   audience the bar was left on straight through to here.
+ *
+ *   A value this sheet does not offer ticks **nothing**, rather than falling back to Family: an
+ *   unrecognised audience is a caller's bug, and the safe shape of that bug is a sheet that
+ *   makes the person say what they mean, not one quietly suggesting an audience that may be
+ *   wider than they wanted. Either way nothing is ever sent without a tap.
  */
-export default function SaveAudienceSheet({ visible, onChoose, onDismiss }) {
+export default function SaveAudienceSheet({
+  visible,
+  onChoose,
+  onDismiss,
+  preSelected = PRE_SELECTED_AUDIENCE,
+}) {
   // Closed means nothing of it exists -- not a hidden `Modal` still holding its subtree, and
   // so nothing that could be reached while it is not on screen.
   if (!visible) return null;
@@ -88,20 +111,20 @@ export default function SaveAudienceSheet({ visible, onChoose, onDismiss }) {
             <Text style={styles.subtitle}>One tap saves. You can change it later.</Text>
 
             {AUDIENCE_OPTIONS.map(({ value, label, icon }) => {
-              const preSelected = value === PRE_SELECTED_AUDIENCE;
+              const isPreSelected = value === preSelected;
               return (
                 <TouchableOpacity
                   key={value}
                   testID={`audience-option-${value}`}
                   accessibilityRole="button"
                   accessibilityLabel={label}
-                  accessibilityState={{ selected: preSelected }}
-                  style={[styles.option, preSelected && styles.optionSelected]}
+                  accessibilityState={{ selected: isPreSelected }}
+                  style={[styles.option, isPreSelected && styles.optionSelected]}
                   onPress={() => onChoose?.(value)}
                 >
                   <Ionicons name={icon} size={20} color="#1C1C1E" />
                   <Text style={styles.optionLabel}>{label}</Text>
-                  {preSelected && (
+                  {isPreSelected && (
                     <Ionicons
                       testID={`audience-option-${value}-selected`}
                       name="checkmark"

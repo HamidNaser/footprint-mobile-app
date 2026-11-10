@@ -218,6 +218,16 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
   });
 
   describe('the Events pane renders EventsList from useUpcomingEvents', () => {
+    it('asks for the drafts tab, because this pane is the one that shows "Drafts (n)" (Minor 6)', async () => {
+      // The hook no longer fetches drafts unless asked. This pane shows the count, so it asks;
+      // Home's card does not and must not (`HomeScreen.comingUp.test.js` pins that side).
+      mockUpcomingEvents({ draftsCount: 2 });
+      const tree = await mount({ route: { params: { view: 'events' } } });
+
+      expect(useUpcomingEvents).toHaveBeenCalledWith({ includeDrafts: true });
+      expect(shows(tree, /^Drafts \(2\)$/)).toBe(true);
+    });
+
     it('shows "Coming up" and "Past" sections from the hook\'s lists', async () => {
       mockUpcomingEvents({
         upcoming: [makeEvent({ id: 'u1', title: 'Garden Party' })],

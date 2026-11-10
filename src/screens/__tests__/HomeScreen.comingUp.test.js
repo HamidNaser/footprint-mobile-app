@@ -138,6 +138,19 @@ afterEach(() => {
 });
 
 describe('HomeScreen (T066 -- Coming up card)', () => {
+  it('does not ask for the drafts tab, so the landing screen makes two requests and not three (Minor 6)', async () => {
+    // The card reads `upcoming` and `error` and nothing else, so the drafts request bought
+    // nothing -- a third call on the screen the app opens on. The Timeline pane, which does
+    // show "Drafts (n)", asks for it (`TimelineScreen.events.test.js` pins that side).
+    mockUpcoming({ upcoming: [event()] });
+    await mount();
+
+    expect(useUpcomingEvents).toHaveBeenCalled();
+    useUpcomingEvents.mock.calls.forEach(([options]) => {
+      expect(options?.includeDrafts).not.toBe(true);
+    });
+  });
+
   it('renders the Events quick action, then the Coming up card, in that order', async () => {
     mockUpcoming({ upcoming: [event()] });
     const tree = await mount();

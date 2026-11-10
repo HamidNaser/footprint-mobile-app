@@ -73,6 +73,17 @@ export function buildContentBlocks(input = {}) {
 // ============================================================
 
 /**
+ * The block a piece came out of, or null for anything captured here.
+ *
+ * Only the pieces form sets it (`pieceFromMediaItem` in `CaptureScreen`); the legacy composer's
+ * captures have no such field, so every answer there is null and nothing about that form
+ * changes.
+ */
+function sourceBlockIdOf(item) {
+  return item?.blockId ?? null;
+}
+
+/**
  * Walk captures in order, collapsing each consecutive run of photos into one block.
  *
  * The run is what makes a grid of photos read as a grid rather than as five separate rows, and
@@ -80,7 +91,18 @@ export function buildContentBlocks(input = {}) {
  * sits between. Both forms need exactly this walk; only the block payloads differ, so they are
  * passed in.
  *
- * A kind with no builder throws, and never silently emits nothing -- see `builderFor`.
+ * ⚠ **A run also breaks where the stored block changes** (review fix, Important 4). A memory
+ * that stored two adjacent single-item `photos` blocks -- which the web client, an importer, or
+ * history can produce -- used to come back from an edit as *one* block: its grouping silently
+ * changed, against FR-021's "today's photo groupings", and worse, the second block's `id` was
+ * dropped. That id is exactly the key `ConflictResolver._mergeContentBlocks` uses
+ * (`block.id || JSON.stringify(block)`), so a MERGE resolution could then hold both copies and
+ * duplicate the memory's blocks. It is the same rule `blocksForSave`'s segmenting already
+ * applies around a *carried* block, one level down.
+ *
+ * A piece with **no** source block -- anything captured here -- joins whichever run it is in
+ * rather than breaking it, so a run of new captures is one block exactly as before (the common
+ * case), and a photograph added to a memory's grid in an edit is still part of that grid.
  *
  * @param {Array<{kind: string, item: object}>} captures - in the order they are to be emitted
  * @param {object} build - one builder per kind; `photos` takes the whole run. A builder may
@@ -96,8 +118,14 @@ function assembleInOrder(captures, build) {
 
     if (kind === 'photo') {
       const run = [];
+      // The stored block this run belongs to: the first one any piece in it names. Given the
+      // break below, it is also the only one.
+      let runBlockId = null;
       while (i < captures.length && captures[i].kind === 'photo') {
+        const blockId = sourceBlockIdOf(captures[i].item);
+        if (runBlockId !== null && blockId !== null && blockId !== runBlockId) break;
         run.push(captures[i].item);
+        if (runBlockId === null) runBlockId = blockId;
         i += 1;
       }
       // Guarded like the branch below, because the contract above says a builder may return
@@ -190,7 +218,11 @@ function blocksFromPieces(pieces) {
 
   return assembleInOrder(captures, {
     photos: (run) => ({
-      ...blockIdOf(run[0]),
+      // Whichever piece in the run names a stored block, not `run[0]`: `assembleInOrder` lets a
+      // newly captured photo join a stored run, so `run[0]` can be the new one -- and taking
+      // the id off it would drop the stored block's id, which is the duplicate-blocks hazard
+      // `blockIdOf` exists to prevent, in the other order (review fix, Important 4).
+      ...blockIdOf(run.find((piece) => piece?.blockId) ?? run[0]),
       type: 'photos',
       location: run[0].location,
       media: run.map(mediaItemFor),

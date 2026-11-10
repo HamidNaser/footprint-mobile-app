@@ -617,12 +617,25 @@ export default function JournalScreen({ navigation }) {
    * The quick bar's camera and microphone: one tap into the capture screen (FR-001).
    *
    * The same route and the same parameters `CaptureFab` sends from the "+" over every tab, so
-   * there is one capture screen and not two. Nothing is carried here -- not the bar's own
-   * audience picker above all, because a memory is saved only on an explicit choice in the
-   * capture screen's save sheet (FR-011).
+   * there is one capture screen and not two. Nothing is carried here: these two controls do not
+   * hand the bar's audience up at all (`QuickCaptureBar` sends it only with the text), and a
+   * memory is still saved only on an explicit choice in the capture screen's save sheet
+   * (FR-011).
    */
   const openCapture = useCallback(() => {
     navigation.navigate('Capture', { mode: 'new' });
+  }, [navigation]);
+
+  /**
+   * The same one tap, carrying an audience the person has already chosen on the bar.
+   *
+   * Separate from `openCapture` rather than a parameter on it, because `openCapture` is handed
+   * straight to `onCameraPress`/`onMicPress` and a `TouchableOpacity` calls those with a press
+   * *event* -- which, spread into the route parameters, would send the whole event object to the
+   * capture screen.
+   */
+  const openCaptureFor = useCallback((visibility) => {
+    navigation.navigate('Capture', { mode: 'new', audience: visibility });
   }, [navigation]);
 
   /**
@@ -635,10 +648,21 @@ export default function JournalScreen({ navigation }) {
    * piece on the capture screen goes through (FR-004), so the capture screen's own mount reads
    * it back, and so it survives the app being closed on the way (FR-012).
    *
-   * Nothing is saved, and the audience the bar's own picker was left on is deliberately not
-   * carried: a memory is saved only on an explicit choice in the capture screen's save sheet
-   * (FR-011). A note that cannot be recorded is said back to the person, with the words in it,
-   * rather than logged to a console nobody is reading (FR-017).
+   * Nothing is saved: a memory is saved only on an explicit choice in the capture screen's save
+   * sheet (FR-011). But the audience the bar's own picker was left on **is** carried, as the
+   * sheet's pre-selection (fix round 1 after the whole-branch review, Important 2). It used to be
+   * dropped here, which made that picker a dead control -- and worse than dead: somebody who
+   * opened it, picked **Only me**, and tapped Send reached a sheet pre-selecting **Family**, so
+   * the replacement for their discarded choice was *wider* than what they asked for. Of the two
+   * ways to be wrong about an audience, silently widening one is the unsafe one, which is this
+   * project's "sharing fails closed" rule in spirit. Carrying the choice is also the alternative
+   * to hiding the picker, which would take away something people have today.
+   *
+   * It stays a pre-selection: the save sheet still has to be tapped, and nothing about this
+   * value reaches the server unless it is.
+   *
+   * A note that cannot be recorded is said back to the person, with the words in it, rather than
+   * logged to a console nobody is reading (FR-017).
    *
    * While that is happening the screen says so (`KEEPING_NOTE`). The stamping is the slow part
    * -- a cold GPS fix, up to a few seconds, though `stampLocation` caches one for two minutes
@@ -647,7 +671,7 @@ export default function JournalScreen({ navigation }) {
    * attempt either way: a failure says what happened, and a spinner left under it would say
    * the opposite.
    */
-  const handleSendMessage = useCallback(async (text) => {
+  const handleSendMessage = useCallback(async (text, visibility) => {
     const note = text?.trim();
     if (!note) return;
 
@@ -674,8 +698,8 @@ export default function JournalScreen({ navigation }) {
       setKeepingNote(false);
     }
 
-    openCapture();
-  }, [openCapture]);
+    openCaptureFor(visibility);
+  }, [openCaptureFor]);
 
   /**
    * Handle entry press

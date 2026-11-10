@@ -37,6 +37,13 @@ const C = {
 // How many year-nodes are visible on the axis at once.
 const WINDOW = 5;
 
+/**
+ * What the Events pane asks `useUpcomingEvents` for. A module constant, not an inline literal:
+ * the hook reads `includeDrafts` off as a primitive, but a stable object makes it plain at the
+ * call site that nothing here changes between renders.
+ */
+const EVENTS_PANE_OPTIONS = { includeDrafts: true };
+
 const ordinal = (n) => {
   const s = ['th', 'st', 'nd', 'rd'];
   const v = n % 100;
@@ -250,7 +257,9 @@ export default function TimelineScreen({ navigation, route }) {
     isLoading: eventsLoading,
     error: eventsError,
     refresh: refreshEvents,
-  } = useUpcomingEvents();
+    // This pane shows "Drafts (n)", so it is the caller that asks for the drafts tab. Home's
+    // card reads `upcoming` and `error` only, and asks for neither (review fix, Minor 6).
+  } = useUpcomingEvents(EVENTS_PANE_OPTIONS);
   // Pull-to-refresh's own flag, kept apart from `eventsLoading` the same way `EventsScreen`'s
   // `refreshing` is kept apart from `isLoading`: while this is true, `EventsList` keeps the list
   // on screen with the native pull spinner instead of swapping in the full-screen one.

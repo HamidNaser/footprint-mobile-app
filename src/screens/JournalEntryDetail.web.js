@@ -188,9 +188,14 @@ export const JournalEntryDetail = ({
   const videos = entry.contentBlocks
     ?.filter(b => b.type === 'video')
     .flatMap(b => b.media) || [];
+  // The waveform sits on the **block**, not on the media item (`journalBlocks.js` writes
+  // `waveform` onto the audio block), so it is carried down here -- `AudioPlayer` takes it per
+  // player. Read off the item alone, as this used to be, every clip in the detail view drew a
+  // flat placeholder bar instead of its own levels (review fix, Minor 10). The item's own value
+  // wins where it has one, so a shape that ever carries it there is not overwritten.
   const audioItems = entry.contentBlocks
     ?.filter(b => b.type === 'audio')
-    .flatMap(b => b.media) || [];
+    .flatMap(b => (b.media || []).map(m => ({ ...m, waveform: m.waveform ?? b.waveform }))) || [];
   const location = entry.location || entry.contentBlocks?.find(b => b.type === 'location')?.location;
 
   const syncConfig = getSyncStatusConfig(entry.syncStatus);

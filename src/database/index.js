@@ -150,25 +150,42 @@ export const closeDatabase = async () => {
 };
 
 /**
- * Reset the database (for development/testing only)
+ * Wipe the local store: every table the schema defines, dropped and rebuilt empty.
+ *
+ * ⚠ **The table list is derived from `CREATE_TABLES`, and it must stay derived.** This used to
+ * be seven table names written out by hand, and `CREATE_TABLES` outgrew it twice with nothing
+ * to say so: `photo_metadata` was never cleared, and neither was `capture_drafts` -- the
+ * unsaved-memory table (013 FR-013), whose rows point at media under
+ * `documentDirectory/capture-drafts/`. Since this function is what `SyncBootstrap`'s sign-out
+ * (`teardownLocalData`) and account switch (`ensureFreshLocalStore`) use so that no data bleeds
+ * across sessions, a table missing from the list is a privacy hole and not an untidiness: one
+ * person's unsaved note, photographs and voice clip stayed on the phone, and the next person to
+ * sign in and tap **+** had them restored on screen, with Save enabled, ready to be saved into
+ * *their* journal (FR-014: an unsaved memory stays private to the phone). Deriving the list is
+ * what makes the next table added safe by default; `localStoreWipe.test.js` asserts emptiness
+ * over `CREATE_TABLES` rather than over a list of its own, so it cannot drift either.
+ *
+ * `capture_drafts` rows are only half of a draft -- its media sits on the filesystem, which this
+ * layer knows nothing about. `CaptureDraftStore.clearAllDrafts()` is the other half, and
+ * `SyncBootstrap` calls it alongside this.
+ *
+ * `schema_version` is dropped with the rest and then re-stamped, exactly as before: callers
+ * (`DatabaseService.clearLocalData`, and `initializeDatabase` on the next open) expect a wiped
+ * store to report the current version, not version 0, so that no migration re-runs over
+ * freshly-created tables.
+ *
  * WARNING: This deletes all data!
  */
 export const resetDatabase = async () => {
   console.warn('[Database] RESETTING DATABASE - All data will be lost!');
-  
+
   const db = await getDatabase();
-  
-  // Drop all tables in reverse order (due to foreign keys)
-  const tables = [
-    'sync_queue',
-    'cached_comments',
-    'cached_users',
-    'sync_metadata',
-    'media_queue',
-    'journal_entries',
-    'schema_version',
-  ];
-  
+
+  // Every table the schema defines, in reverse declaration order: a child table is dropped
+  // before the table it references, so foreign keys (media_queue, cached_comments and
+  // photo_metadata all reference journal_entries) cannot refuse the drop.
+  const tables = Object.keys(CREATE_TABLES).reverse();
+
   for (const table of tables) {
     try {
       await db.execAsync(`DROP TABLE IF EXISTS ${table};`);

@@ -110,17 +110,28 @@ function localInstant(offsetMinutes, year, month, day, hour, minute) {
   return Date.UTC(year, month, day, hour, minute) + offsetMinutes * 60000;
 }
 
-function setup() {
+/**
+ * @param {{includeDrafts?: boolean}} [options] passed straight to the hook. Most cases pass
+ *   nothing, which is Home's shape (two requests); the drafts cases ask for the third.
+ */
+function setup(options) {
   const out = { current: null };
+  let tree = null;
   function Probe() {
-    out.current = useUpcomingEvents();
+    out.current = useUpcomingEvents(options);
     return null;
   }
   return {
     result: out,
+    /** Re-render the probe without reloading -- what any parent re-render does. */
+    rerender: async () => {
+      await act(async () => {
+        tree.update(<Probe />);
+      });
+    },
     mount: async () => {
       await act(async () => {
-        renderer.create(<Probe />);
+        tree = renderer.create(<Probe />);
       });
       // A second flush: `load()`'s `Promise.all` resolves on a microtask the first `act` does
       // not always drain in one pass (the same reason `ImportScreen.test.js` double-flushes).
@@ -162,15 +173,37 @@ afterEach(() => {
 });
 
 describe('useUpcomingEvents: sources', () => {
-  it("reads 'my', 'invites' and 'drafts'", async () => {
+  it("reads 'my' and 'invites', and nothing else, when drafts were not asked for", async () => {
+    // Home's shape (review fix, Minor 6). The "Coming up" card reads `upcoming` and `error`
+    // and nothing else, so a third request on the app's landing screen bought nothing.
     mockTabs({});
     const { mount } = setup();
     await mount();
 
     expect(EventsApi.getEvents).toHaveBeenCalledWith('my');
     expect(EventsApi.getEvents).toHaveBeenCalledWith('invites');
+    expect(EventsApi.getEvents).not.toHaveBeenCalledWith('drafts');
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads 'my', 'invites' and 'drafts' when drafts were asked for", async () => {
+    // The Timeline tab's Events pane shows "Drafts (n)", so it asks.
+    mockTabs({});
+    const { mount } = setup({ includeDrafts: true });
+    await mount();
+
+    expect(EventsApi.getEvents).toHaveBeenCalledWith('my');
+    expect(EventsApi.getEvents).toHaveBeenCalledWith('invites');
     expect(EventsApi.getEvents).toHaveBeenCalledWith('drafts');
     expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports no drafts, rather than a stale or invented count, when they were not asked for', async () => {
+    mockTabs({ drafts: [event({ id: 'd1' }), event({ id: 'd2' })] });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.draftsCount).toBe(0);
   });
 
   it('merges my + invites, de-duplicated by id, published only, host copy wins but its RSVP is carried over when it has none', async () => {
@@ -214,10 +247,26 @@ describe('useUpcomingEvents: sources', () => {
 
   it('reports draftsCount from the drafts tab', async () => {
     mockTabs({ drafts: [event({ id: 'd1' }), event({ id: 'd2' }), event({ id: 'd3' })] });
-    const { result, mount } = setup();
+    const { result, mount } = setup({ includeDrafts: true });
     await mount();
 
     expect(result.current.draftsCount).toBe(3);
+  });
+
+  it('still fails closed with drafts left out: a failing tab empties the lists (Minor 6)', async () => {
+    // The fail-closed rule is not a property of the three-call shape. Asserted for the
+    // two-call one as well, because that is now the shape the landing screen runs.
+    EventsApi.getEvents.mockImplementation(async (tab) => {
+      if (tab === 'invites') throw new Error('invites is down');
+      return [event({ id: 'mine', date: '2099-01-01' })];
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.error).toMatchObject({ message: 'invites is down' });
+    expect(result.current.upcoming).toEqual([]);
+    expect(result.current.past).toEqual([]);
+    expect(result.current.draftsCount).toBe(0);
   });
 });
 
@@ -298,6 +347,60 @@ describe('useUpcomingEvents: FR-032 civil-date split (no Date built from the civ
     } finally {
       restoreNow();
     }
+  });
+});
+
+/**
+ * Minor 7 of the whole-branch review -- the split is computed where it is read.
+ *
+ * `localToday()` used to be read once inside the loader, with `upcoming` and `past` kept in
+ * state, so an app left open across midnight went on showing yesterday's split until something
+ * called `refresh()`. It errs the safe way -- an event stays *upcoming* a day too long rather
+ * than disappearing -- but yesterday's event lingers in the "Coming up" card, which is
+ * precisely the card's one job.
+ *
+ * The case moves the clock past midnight **without** reloading: `rerender()` re-renders the
+ * probe and nothing else, so the only thing that can have changed the answer is where the split
+ * is computed. A `refresh()` here would pass either way and prove nothing.
+ */
+describe('useUpcomingEvents: midnight moves the split without a reload (Minor 7)', () => {
+  it('moves yesterday out of upcoming on the first render after midnight, with no new request', async () => {
+    jest.setSystemTime(new Date(2026, 10, 10, 23, 55)); // 10 Nov 2026, 23:55 local
+    mockTabs({
+      my: [
+        event({ id: 'today', date: '2026-11-10' }),
+        event({ id: 'tomorrow', date: '2026-11-11' }),
+      ],
+    });
+    const { result, mount, rerender } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today', 'tomorrow']);
+    expect(result.current.past).toEqual([]);
+    const callsSoFar = EventsApi.getEvents.mock.calls.length;
+
+    jest.setSystemTime(new Date(2026, 10, 11, 0, 5)); // 11 Nov 2026, 00:05 local
+    await rerender();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['tomorrow']);
+    expect(result.current.past.map((e) => e.id)).toEqual(['today']);
+    // Nothing was refetched: the split alone moved.
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(callsSoFar);
+  });
+
+  it('leaves the split alone when the day has not changed', async () => {
+    // The converse, so the case above cannot be satisfied by re-splitting against something
+    // that moves on every render.
+    jest.setSystemTime(new Date(2026, 10, 10, 9, 0));
+    mockTabs({ my: [event({ id: 'today', date: '2026-11-10' })] });
+    const { result, mount, rerender } = setup();
+    await mount();
+
+    jest.setSystemTime(new Date(2026, 10, 10, 23, 59));
+    await rerender();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['today']);
+    expect(result.current.past).toEqual([]);
   });
 });
 
@@ -390,7 +493,7 @@ describe('useUpcomingEvents: failure is closed', () => {
       if (tab === 'drafts') throw new Error('nope');
       return [];
     });
-    const { result, mount } = setup();
+    const { result, mount } = setup({ includeDrafts: true });
     await mount();
 
     expect(result.current.isLoading).toBe(false);
@@ -439,7 +542,8 @@ describe('useUpcomingEvents: refresh', () => {
     EventsApi.getEvents.mockImplementation(async () => {
       throw new Error(attempt === 0 ? 'network down' : 'still down after retry');
     });
-    const { result, mount } = setup();
+    // Drafts asked for, so the call counts below are the full three-tab shape.
+    const { result, mount } = setup({ includeDrafts: true });
     await mount();
 
     expect(result.current.error).toMatchObject({ message: 'network down' });
@@ -495,7 +599,7 @@ describe('useUpcomingEvents: refresh', () => {
 
   it('a signed-out refresh still short-circuits with NOT_AUTHENTICATED and issues no network call', async () => {
     mockTabs({});
-    const { result, mount } = setup();
+    const { result, mount } = setup({ includeDrafts: true });
     await mount();
     expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
 

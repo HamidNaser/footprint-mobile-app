@@ -135,6 +135,55 @@ describe('SaveAudienceSheet: the four audiences, Family pre-selected (FR-010)', 
     });
   });
 
+  /**
+   * Fix round 1 after the whole-branch review, Important 2. The Journal's quick bar carries its
+   * own "Who can see this?" picker, and what the person leaves it on now travels with the note
+   * into this sheet. Without that, somebody who picked **Only me** on the bar and tapped Send
+   * arrived at a sheet pre-selecting **Family** -- their choice discarded, and the replacement
+   * *wider* than what they asked for, which is the one direction this project's "sharing fails
+   * closed" rule forbids.
+   *
+   * It is still only a pre-selection: nothing is ever sent without a tap (the dismissal block
+   * below is unchanged and still the load-bearing one).
+   */
+  it('pre-selects the audience it is given instead of Family, when the caller carries one', async () => {
+    const tree = await render({ preSelected: 'private' });
+
+    EXPECTED_OPTIONS.forEach(({ testID, value }) => {
+      const selected = value === 'private';
+      expect(pressable(tree, testID).props.accessibilityState).toEqual(
+        expect.objectContaining({ selected }),
+      );
+      expect(has(tree, `${testID}-selected`)).toBe(selected);
+    });
+  });
+
+  it('honours each of the four, so the carried value is not special-cased to one of them', async () => {
+    for (const { value } of EXPECTED_OPTIONS) {
+      const tree = await render({ preSelected: value });
+      const ticked = EXPECTED_OPTIONS.filter(({ testID }) => has(tree, `${testID}-selected`));
+      expect(ticked.map((option) => option.value)).toEqual([value]);
+    }
+  });
+
+  it('falls back to Family when it is given nothing, which is every caller that carries no choice', async () => {
+    const tree = await render({ preSelected: undefined });
+
+    expect(
+      EXPECTED_OPTIONS.filter(({ testID }) => has(tree, `${testID}-selected`)).map((o) => o.value),
+    ).toEqual(['family']);
+  });
+
+  it('ticks nothing at all for a value it does not offer, rather than falling back to a wider one', async () => {
+    // Fail closed: an unrecognised audience is a caller bug, and the safe shape of that bug is
+    // a sheet with no tick -- where the person has to say what they mean -- not a sheet quietly
+    // suggesting Family, which may be wider than they wanted.
+    const tree = await render({ preSelected: 'everyone' });
+
+    expect(EXPECTED_OPTIONS.filter(({ testID }) => has(tree, `${testID}-selected`))).toEqual([]);
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
   it('asks for no title and no other field (FR-010)', async () => {
     const tree = await render();
 

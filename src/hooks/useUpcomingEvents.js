@@ -25,14 +25,28 @@
  * carries over `rsvp` from the `invites` copy when the base has none, so it does not lose its
  * RSVP in the merge.
  *
- * Drafts are counted, not listed, from `getEvents('drafts')`.
+ * Drafts are counted, not listed, from `getEvents('drafts')` -- and **only when asked for**
+ * (`{ includeDrafts: true }`). The Timeline tab's Events pane shows "Drafts (n)" and so needs
+ * them; Home's "Coming up" card reads `upcoming` and `error` and nothing else, so three requests
+ * on the app's landing screen to feed one card was two more than it needed. Off by default,
+ * because the caller that needs the count is the one that knows it does.
  *
  * Signed out: mirrors `useEvents` -- no network call, `error.code === 'NOT_AUTHENTICATED'`,
- * empty lists, so the three tabs are never asked unauthenticated and the card can show the
+ * empty lists, so the tabs are never asked unauthenticated and the card can show the
  * right message rather than a generic failure.
  *
- * Any one of the three calls failing yields `error` and empty lists -- never a partial result
- * (sharing/reads fail closed, CLAUDE.md).
+ * Any one of the calls it makes failing yields `error` and empty lists -- never a partial result
+ * (sharing/reads fail closed, CLAUDE.md). That holds for both shapes: three calls with drafts
+ * asked for, two without, and in either case one failure empties everything rather than leaving
+ * a list standing.
+ *
+ * The **split against today is computed where the split is read, not once per load.** It used to
+ * be one `localToday()` inside the loader with `upcoming` and `past` kept in state, so an app
+ * left open across midnight went on showing yesterday's split until something called `refresh()`.
+ * The error fell the safe way -- an event stayed *upcoming* a day too long rather than
+ * disappearing -- but yesterday's event lingered in the "Coming up" card. What is held in state
+ * now is the merged, published list; the two orders are derived from it on every render, so the
+ * first render after midnight is already right.
  *
  * `refresh()` re-runs the same load (same `reloadKey` bump `useEvents` uses). Added once this
  * hook gained a second consumer beyond Home's card: the Timeline tab's Events pane, which
@@ -62,9 +76,20 @@ function isCivilDate(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
-export function useUpcomingEvents() {
-  const [upcoming, setUpcoming] = useState([]);
-  const [past, setPast] = useState([]);
+/**
+ * @param {{includeDrafts?: boolean}} [options] - `includeDrafts` asks for `getEvents('drafts')`,
+ *   and so for a real `draftsCount`; without it that request is never made and the count stays
+ *   0. Read off as a primitive rather than kept as an object, so an options literal written
+ *   inline at the call site cannot restart the load on every render.
+ */
+export function useUpcomingEvents(options) {
+  const includeDrafts = options?.includeDrafts === true;
+
+  /**
+   * The merged, published events. Held instead of the two split lists, so that what "today"
+   * means is read at the moment the split is read -- see the header.
+   */
+  const [published, setPublished] = useState([]);
   const [draftsCount, setDraftsCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -86,11 +111,10 @@ export function useUpcomingEvents() {
       setError(null);
 
       // Not signed in: no network call, same shape useEvents uses for the same case --
-      // otherwise all three tabs go out unauthenticated and come back 401s.
+      // otherwise the tabs go out unauthenticated and come back 401s.
       if (!EventsApi.isAuthenticated()) {
         if (!cancelled && mountedRef.current) {
-          setUpcoming([]);
-          setPast([]);
+          setPublished([]);
           setDraftsCount(0);
           setError({ message: 'Sign in to see your events.', code: 'NOT_AUTHENTICATED' });
           setIsLoading(false);
@@ -99,10 +123,13 @@ export function useUpcomingEvents() {
       }
 
       try {
+        // Three calls, or two when drafts were not asked for. `Promise.all` either way, so one
+        // failure still empties everything: a partial list is the outcome the fail-closed rule
+        // exists to rule out, and that does not change with the shape.
         const [mine, invited, drafts] = await Promise.all([
           EventsApi.getEvents('my'),
           EventsApi.getEvents('invites'),
-          EventsApi.getEvents('drafts'),
+          includeDrafts ? EventsApi.getEvents('drafts') : Promise.resolve(null),
         ]);
         if (cancelled || !mountedRef.current) return;
 
@@ -112,46 +139,27 @@ export function useUpcomingEvents() {
         // still the caller's real RSVP on the same event, not a different, unpublished event.
         const invitedById = new Map((invited || []).filter(Boolean).map((e) => [e.id, e]));
         const seen = new Set();
-        const published = [];
+        const merged = [];
         (mine || []).forEach((event) => {
           if (!event || event.status !== 'published' || seen.has(event.id)) return;
           seen.add(event.id);
           const invite = invitedById.get(event.id);
           // Keep the host's own copy as the base; carry the RSVP over from the invite copy
           // only when the host copy has none, so a co-hosted event never loses it.
-          published.push(event.rsvp != null || !invite ? event : { ...event, rsvp: invite.rsvp });
+          merged.push(event.rsvp != null || !invite ? event : { ...event, rsvp: invite.rsvp });
         });
         (invited || []).forEach((event) => {
           if (!event || event.status !== 'published' || seen.has(event.id)) return;
           seen.add(event.id);
-          published.push(event);
+          merged.push(event);
         });
 
-        const today = localToday();
-        const nextUpcoming = published
-          .filter((event) => !isCivilDate(event.date) || event.date >= today)
-          .sort((a, b) => {
-            const aValid = isCivilDate(a.date);
-            const bValid = isCivilDate(b.date);
-            // A malformed date is visible but never soonest: sorts after every well-formed
-            // date, and stays in its original relative order against other malformed dates
-            // (Array#sort is stable, so returning 0 here is enough).
-            if (aValid !== bValid) return aValid ? -1 : 1;
-            if (!aValid) return 0;
-            return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
-          });
-        const nextPast = published
-          .filter((event) => isCivilDate(event.date) && event.date < today)
-          .sort((a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
-
-        setUpcoming(nextUpcoming);
-        setPast(nextPast);
+        setPublished(merged);
         setDraftsCount(Array.isArray(drafts) ? drafts.length : 0);
       } catch (err) {
         if (cancelled || !mountedRef.current) return;
         // Fail closed: never leave a previous (or partial) list standing.
-        setUpcoming([]);
-        setPast([]);
+        setPublished([]);
         setDraftsCount(0);
         setError({
           message: err?.message || 'Could not load events',
@@ -167,9 +175,37 @@ export function useUpcomingEvents() {
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, [reloadKey, includeDrafts]);
 
+  /**
+   * No dependency, deliberately, and there is a test pinning it. `HomeScreen`'s focus-retry
+   * callback depends on `refresh` alone precisely so its own identity never changes: React
+   * Navigation's `useFocusEffect` re-invokes a callback whose identity changed while the screen
+   * is already focused, so an identity that moved on every failed load was an unbounded retry
+   * storm. Anything added here reopens that.
+   */
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  // Derived here rather than stored, so `today` is read at the moment the split is read and the
+  // first render after midnight is already right (see the header). Cheap -- one filter and one
+  // sort over one household's events -- and deliberately **not** memoised on `published`, which
+  // would freeze the split at the last load all over again.
+  const today = localToday();
+  const upcoming = published
+    .filter((event) => !isCivilDate(event.date) || event.date >= today)
+    .sort((a, b) => {
+      const aValid = isCivilDate(a.date);
+      const bValid = isCivilDate(b.date);
+      // A malformed date is visible but never soonest: sorts after every well-formed date, and
+      // stays in its original relative order against other malformed dates (Array#sort is
+      // stable, so returning 0 here is enough).
+      if (aValid !== bValid) return aValid ? -1 : 1;
+      if (!aValid) return 0;
+      return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+    });
+  const past = published
+    .filter((event) => isCivilDate(event.date) && event.date < today)
+    .sort((a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
 
   return { upcoming, past, draftsCount, isLoading, error, refresh };
 }

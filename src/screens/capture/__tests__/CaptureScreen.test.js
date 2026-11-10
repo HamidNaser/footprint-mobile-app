@@ -474,11 +474,18 @@ jest.mock('../../../components/capture/SaveAudienceSheet', () => {
     { value: 'family_friends', label: 'Family & Friends' },
   ];
 
-  /** `{visible, onChoose, onDismiss}` and nothing else; one tap on an option saves. */
-  const Mock = ({ visible, onChoose, onDismiss }) => {
+  /**
+   * `{visible, onChoose, onDismiss, preSelected}`; one tap on an option saves.
+   *
+   * `preSelected` is surfaced as a testID rather than ignored, because which option opens
+   * ticked is now a property of the route this screen was opened on: the Journal quick bar's
+   * audience picker travels here (fix round 1 after the whole-branch review, Important 2).
+   */
+  const Mock = ({ visible, onChoose, onDismiss, preSelected }) => {
     if (!visible) return null;
     return (
       <View testID="audience-sheet">
+        <View testID={`audience-sheet-preselected-${preSelected ?? 'none'}`} />
         {AUDIENCE_OPTIONS.map(({ value }) => (
           <TouchableOpacity
             key={value}
@@ -912,6 +919,53 @@ describe('CaptureScreen: switching between typing, voice and camera loses nothin
     expect(has(tree, 'dual-shutter-camera')).toBe(false);
     expect(has(tree, 'capture-dock')).toBe(true);
   });
+
+  /**
+   * Important 5 of the whole-branch review. `PieceList` is told about a running recording so a
+   * playback tap cannot steal the one audio session; opening the camera and tapping **Video**
+   * does the same thing one level out, because `recordAsync` asks for the microphone. The clip
+   * is finalised with the part already recorded (US2-2), so nothing is lost -- but it is a
+   * silent truncation caused by a tap in our own interface.
+   *
+   * The screen's job is to tell the camera. What "told" means on screen -- the dim shutter, the
+   * refusal to record if it is reached anyway, and the line saying why -- is
+   * `DualShutterCamera.test.js`'s.
+   */
+  it('tells the camera a voice clip is recording, so Video cannot cut it short (FR-007)', async () => {
+    const tree = await render();
+
+    // A clip already kept, so the row-level guard can be seen too: both are live at once, not
+    // one instead of the other.
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+    await tap(tree, 'voice-record-button');
+
+    await tap(tree, 'capture-camera-button');
+
+    expect(has(tree, 'dual-shutter-camera')).toBe(true);
+    expect(dualCamera.__props().voiceRecording).toBe(true);
+    expect(pressable(tree, 'piece-player-0-toggle').props.disabled).toBe(true);
+  });
+
+  it('gives Video back once the clip is finished, with the camera still open', async () => {
+    const tree = await render();
+
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'capture-camera-button');
+    expect(dualCamera.__props().voiceRecording).toBe(true);
+
+    await tap(tree, 'voice-stop-button');
+
+    expect(dualCamera.__props().voiceRecording).toBe(false);
+  });
+
+  it('says nothing about a recording when there is none', async () => {
+    const tree = await render();
+
+    await tap(tree, 'capture-camera-button');
+
+    expect(dualCamera.__props().voiceRecording).toBe(false);
+  });
 });
 
 // ============================================================
@@ -1223,6 +1277,68 @@ describe('CaptureScreen: the header (UI contract)', () => {
 // ============================================================
 
 describe('CaptureScreen: Save asks only who can see it (FR-010)', () => {
+  /**
+   * Fix round 1 after the whole-branch review, Important 2 -- the audience the person chose
+   * somewhere else is not silently replaced by a wider one.
+   *
+   * The Journal's quick bar has its own "Who can see this?" picker. Somebody who opened it,
+   * picked **Only me**, and tapped Send used to arrive here at a sheet pre-selecting **Family**:
+   * their choice discarded, and the replacement wider than what they asked for, which is the
+   * unsafe direction of this project's "sharing fails closed" rule. The bar now sends the
+   * audience as a route parameter and this screen hands it to the sheet.
+   *
+   * Still a pre-selection and nothing more: no audience is sent without a tap, which the
+   * dismissal cases further down this file keep pinned.
+   */
+  it('pre-selects the audience the route carried, not Family (the quick bar picker)', async () => {
+    const tree = await render({ mode: 'new', audience: 'private' });
+
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    await tap(tree, 'capture-save-button');
+
+    expect(has(tree, 'audience-sheet')).toBe(true);
+    expect(has(tree, 'audience-sheet-preselected-private')).toBe(true);
+    expect(has(tree, 'audience-sheet-preselected-family')).toBe(false);
+  });
+
+  it('carries each of the four, so one value is not special-cased', async () => {
+    for (const audience of ['private', 'family', 'friends', 'family_friends']) {
+      const tree = await render({ mode: 'new', audience });
+      await tap(tree, 'capture-type-button');
+      await type(tree, 'piece-note-input-0', 'note');
+      await tap(tree, 'capture-save-button');
+
+      expect({ audience, ticked: has(tree, `audience-sheet-preselected-${audience}`) }).toEqual({
+        audience,
+        ticked: true,
+      });
+    }
+  });
+
+  it('leaves the sheet to its own default when the route carried no audience (the + over every tab)', async () => {
+    const tree = await render({ mode: 'new' });
+
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    await tap(tree, 'capture-save-button');
+
+    // Nothing is passed, rather than 'family' passed from here: FR-010's pre-selection is the
+    // sheet's own rule, and saying it twice is how the two drift apart.
+    expect(has(tree, 'audience-sheet-preselected-none')).toBe(true);
+  });
+
+  it('a carried audience still saves nothing until an option is tapped (FR-011)', async () => {
+    const tree = await render({ mode: 'new', audience: 'private' });
+
+    await tap(tree, 'capture-type-button');
+    await type(tree, 'piece-note-input-0', 'On the 34 bus');
+    await tap(tree, 'capture-save-button');
+    await tap(tree, 'audience-sheet-cancel-button');
+
+    expect(createEntry).not.toHaveBeenCalled();
+  });
+
   it('opens the sheet, and Family saves with the Family audience and no title', async () => {
     const tree = await render();
 
@@ -3454,6 +3570,54 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
       type: 'something-this-app-has-never-heard-of',
       note: 'kept, not dropped',
     });
+  });
+
+  /**
+   * Important 4 of the whole-branch review, end to end through this screen.
+   *
+   * A memory that stored **two adjacent single-item `photos` blocks** -- which the web client,
+   * an importer, or history can produce -- came back from an edit as *one* block carrying only
+   * the first block's id. Two consequences: the grouping changed in a way nobody asked for
+   * (FR-021's "today's photo groupings"), and the dropped id is the key
+   * `ConflictResolver._mergeContentBlocks` uses, so a MERGE resolution could hold both copies
+   * and duplicate the memory's blocks. `journalBlocks.test.js` pins the rule; this pins that an
+   * edit of a real memory of that shape goes out unchanged.
+   */
+  it('does not merge two adjacent stored photo blocks into one, or drop the second id', async () => {
+    const secondPhoto = { ...REMOTE_PHOTO, localId: 'm-photo-2', id: 'media-9', mediaId: 'media-9' };
+    const tree = await openEdit({
+      contentBlocks: [
+        { id: 'b1', type: 'photos', media: [REMOTE_PHOTO], location: ARCADE },
+        { id: 'b7', type: 'photos', media: [secondPhoto], location: ARCADE },
+      ],
+    });
+
+    await tap(tree, 'capture-save-button');
+
+    const sent = blocksSent();
+    expect(sent.map((block) => block.type)).toEqual(['photos', 'photos']);
+    expect(sent.map((block) => block.id)).toEqual(['b1', 'b7']);
+    expect(sent.map((block) => block.media.map((item) => item.localId))).toEqual([
+      ['m-photo'],
+      ['m-photo-2'],
+    ]);
+  });
+
+  it('keeps a grid the memory stored as one grid as one block', async () => {
+    // The converse, so the split above cannot be satisfied by splitting every photograph apart.
+    const secondPhoto = { ...REMOTE_PHOTO, localId: 'm-photo-2', id: 'media-9', mediaId: 'media-9' };
+    const tree = await openEdit({
+      contentBlocks: [
+        { id: 'b1', type: 'photos', media: [REMOTE_PHOTO, secondPhoto], location: ARCADE },
+      ],
+    });
+
+    await tap(tree, 'capture-save-button');
+
+    const sent = blocksSent();
+    expect(sent.map((block) => block.type)).toEqual(['photos']);
+    expect(sent[0].id).toBe('b1');
+    expect(sent[0].media.map((item) => item.localId)).toEqual(['m-photo', 'm-photo-2']);
   });
 
   /**

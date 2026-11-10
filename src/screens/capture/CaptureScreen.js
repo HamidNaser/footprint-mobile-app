@@ -454,6 +454,25 @@ export default function CaptureScreen({ route, navigation }) {
   const isEditMode = route?.params?.mode === 'edit';
   const entryLocalId = route?.params?.entryLocalId ?? null;
   const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
+  /**
+   * An audience the person has **already** chosen somewhere else, for the save sheet to open on.
+   *
+   * The Journal's quick bar carries its own "Who can see this?" picker, and it sends what the
+   * picker was left on with the note (`JournalScreen.handleSendMessage`). Without this, somebody
+   * who picked **Only me** there and tapped Send reached a sheet pre-selecting **Family**: their
+   * choice discarded, and the replacement *wider* than what they asked for -- the unsafe
+   * direction of this project's "sharing fails closed" rule (fix round 1 after the whole-branch
+   * review, Important 2).
+   *
+   * `undefined` when nothing carried one -- the + over every tab, for instance -- and then the
+   * sheet uses FR-010's own Family. Deliberately not defaulted to `'family'` here: the
+   * pre-selection is the sheet's rule, and stating it in two places is how the two drift apart.
+   *
+   * It is a pre-selection and nothing more. FR-011 still holds: nothing is saved without a tap,
+   * and this value is never sent anywhere by itself -- `performSave` is only ever reached from
+   * `handleAudienceChosen` (or, on an edit, from the memory's own audience).
+   */
+  const carriedAudience = route?.params?.audience;
 
   const { user } = useAuth();
   const [journalId, setJournalId] = useState(null);
@@ -1493,6 +1512,14 @@ export default function CaptureScreen({ route, navigation }) {
             onDone={closeCamera}
             onClose={closeCamera}
             onCaptureFailed={handleCaptureFailed}
+            // ⚠ FR-007, the same hazard as `PieceList`'s `isRecording` one level out. Video
+            // asks `recordAsync` for the microphone, and the one audio session is already held
+            // by the bar below, so a Video tap over a running clip interrupts it: the clip is
+            // finalised with the part already recorded (US2-2), so nothing is lost -- but it is
+            // a silent truncation caused by a tap in our own interface. Only Video is taken
+            // away; Photo needs no microphone, and FR-008 makes two quick taps of it the
+            // designed use of this camera (review fix, Important 5).
+            voiceRecording={isRecording}
           />
         </View>
       )}
@@ -1501,6 +1528,9 @@ export default function CaptureScreen({ route, navigation }) {
         visible={isAudienceSheetOpen}
         onChoose={handleAudienceChosen}
         onDismiss={handleAudienceDismissed}
+        // What the person already chose on the Journal quick bar, if they came that way. See
+        // `carriedAudience`.
+        preSelected={carriedAudience}
       />
     </View>
   );

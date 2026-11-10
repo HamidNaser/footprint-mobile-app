@@ -45,7 +45,20 @@ export function useViewableKeys(keyExtractor = (item) => item?.key ?? item?.id, 
       // The index passed is the item's index in the data (row * numColumns + column), as FlatList's
       // own keyExtractor call gets it, so index-based fallback keys line up.
       if (Array.isArray(v.item)) v.item.forEach((it, i) => next.add(extractRef.current(it, (v.index ?? 0) * columnsRef.current + i)));
-      else next.add(v.key ?? extractRef.current(v.item, v.index));
+      else {
+        // Both the list's own key for the row AND the key the caller's extractor makes of the
+        // item, because in a SectionList they are not the same string: VirtualizedSectionList
+        // builds a row's key as `<section>:<itemKey>` (its `_subExtractor`), so a caller asking
+        // `isViewable(keyExtractor(item))` -- which is what `wrapRender` below and every screen
+        // does -- would never match and every row would read as off screen the moment the list
+        // reported anything. Recording both is additive: the set only grows, so nothing that was
+        // viewable stops being so. The cost is that two items in different sections sharing an
+        // extractor key are viewable together; with entry ids as keys that means a duplicate
+        // entry, which is not a case this distinguishes anyway.
+        if (v.key != null) next.add(v.key);
+        const own = extractRef.current(v.item, v.index);
+        if (own != null) next.add(own);
+      }
     }
     setKeys(next);
   }, []);

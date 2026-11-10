@@ -498,3 +498,125 @@ describe('ordered pieces (FR-005, FR-027)', () => {
     expect(blocks[0].content).toBe('Left Gare du Nord');
   });
 });
+
+/**
+ * A photo run never collapses across two *stored* blocks (review fix, Important 4).
+ *
+ * The run collapse took `blockIdOf(run[0])`, so a memory that stored two adjacent single-item
+ * `photos` blocks -- which the web client, an importer, or history can produce -- came back from
+ * an edit as **one** block carrying only the first block's id. Two consequences, and the second
+ * is the serious one:
+ *
+ *   - the memory's photo grouping changed in a way nobody asked for, against FR-021's "today's
+ *     photo groupings";
+ *   - and the dropped id is exactly the key `ConflictResolver._mergeContentBlocks` uses
+ *     (`block.id || JSON.stringify(block)`), so a MERGE resolution could hold **both** copies --
+ *     the memory's blocks duplicated.
+ *
+ * `blocksForSave`'s segmenting already stopped a run merging *across* a carried block; this is
+ * the same idea per source block id. A newly captured photo has no source block, so a run of
+ * new captures is one block exactly as before -- that is the common case and the cases below
+ * pin it from both directions.
+ */
+describe('a photo run never merges two stored blocks into one (FR-021, review Important 4)', () => {
+  const stored = (localId, blockId) => ({
+    localId,
+    kind: 'photo',
+    blockId,
+    remote: { id: `srv-${localId}`, url: `https://cdn/${localId}.jpg` },
+    capturedAt: '2019-06-01T12:00:00.000Z',
+  });
+
+  const captured = (localId) => ({
+    localId,
+    kind: 'photo',
+    uri: `file:///cache/${localId}.jpg`,
+    capturedAt: '2026-11-10T09:00:00.000Z',
+  });
+
+  const ids = (blocks) => blocks.map((block) => block.id);
+  const mediaIds = (blocks) => blocks.map((block) => block.media.map((item) => item.localId));
+
+  it('keeps two adjacent single-photo blocks as two, each with its own id', () => {
+    const blocks = buildContentBlocks([stored('m1', 'b1'), stored('m2', 'b2')]);
+
+    expect(kinds(blocks)).toEqual(['photos', 'photos']);
+    expect(ids(blocks)).toEqual(['b1', 'b2']);
+    expect(mediaIds(blocks)).toEqual([['m1'], ['m2']]);
+  });
+
+  it('keeps two photos of the SAME stored block as one block, with that id', () => {
+    // The converse, so the split cannot be satisfied by splitting everything: a grid the memory
+    // stored as one grid must come back as one grid.
+    const blocks = buildContentBlocks([stored('m1', 'b1'), stored('m2', 'b1')]);
+
+    expect(kinds(blocks)).toEqual(['photos']);
+    expect(ids(blocks)).toEqual(['b1']);
+    expect(mediaIds(blocks)).toEqual([['m1', 'm2']]);
+  });
+
+  it('still collapses a run of new captures into one block with no id (the common case)', () => {
+    const blocks = buildContentBlocks([captured('p1'), captured('p2'), captured('p3')]);
+
+    expect(kinds(blocks)).toEqual(['photos']);
+    expect(blocks[0]).not.toHaveProperty('id');
+    expect(mediaIds(blocks)).toEqual([['p1', 'p2', 'p3']]);
+  });
+
+  it('lets a new capture join the stored block it was taken next to, id intact', () => {
+    // A piece with no source block adopts the run's, rather than breaking it: adding a
+    // photograph to a memory's grid in an edit should still be that grid.
+    const blocks = buildContentBlocks([stored('m1', 'b1'), captured('p2')]);
+
+    expect(kinds(blocks)).toEqual(['photos']);
+    expect(ids(blocks)).toEqual(['b1']);
+    expect(mediaIds(blocks)).toEqual([['m1', 'p2']]);
+  });
+
+  it('keeps the stored id when the new capture comes first in the run', () => {
+    // The id must come from whichever piece in the run has one, not from `run[0]`: dropping it
+    // here is the same duplicate-blocks hazard in the other order.
+    const blocks = buildContentBlocks([captured('p1'), stored('m2', 'b2')]);
+
+    expect(kinds(blocks)).toEqual(['photos']);
+    expect(ids(blocks)).toEqual(['b2']);
+    expect(mediaIds(blocks)).toEqual([['p1', 'm2']]);
+  });
+
+  it('splits only where the stored block changes, over a longer run', () => {
+    const blocks = buildContentBlocks([
+      stored('m1', 'b1'),
+      stored('m2', 'b1'),
+      stored('m3', 'b2'),
+      captured('p4'),
+      stored('m5', 'b3'),
+    ]);
+
+    expect(kinds(blocks)).toEqual(['photos', 'photos', 'photos']);
+    expect(ids(blocks)).toEqual(['b1', 'b2', 'b3']);
+    expect(mediaIds(blocks)).toEqual([['m1', 'm2'], ['m3', 'p4'], ['m5']]);
+  });
+
+  it('still breaks a run on anything that is not a photo, as it always did (FR-005)', () => {
+    const blocks = buildContentBlocks([
+      stored('m1', 'b1'),
+      { localId: 'c1', kind: 'audio', uri: 'c1.m4a', duration: 12, blockId: 'b1' },
+      stored('m2', 'b1'),
+    ]);
+
+    // Same stored block on both sides, and they still do not rejoin across the clip: capture
+    // order is the memory's order.
+    expect(kinds(blocks)).toEqual(['photos', 'audio', 'photos']);
+    expect(ids(blocks)).toEqual(['b1', 'b1', 'b1']);
+  });
+
+  it('leaves the legacy composer form exactly as it was: its captures carry no block id', () => {
+    const blocks = buildContentBlocks({
+      text: '',
+      attachedMedia: [photo(1), photo(2), photo(3)],
+    });
+
+    expect(kinds(blocks)).toEqual(['photos']);
+    expect(blocks[0].media).toHaveLength(3);
+  });
+});

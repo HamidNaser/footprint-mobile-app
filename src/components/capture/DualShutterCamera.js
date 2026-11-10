@@ -115,6 +115,22 @@ export const formatSeconds = (seconds) => {
  *   `'capture-failed'` is this component's equivalent of that one's `'stop-failed'`: the
  *   camera call itself rejected.
  * @param {number} [props.maxVideoSeconds] The cap; defaults to 60 (FR-008).
+ * @param {boolean} [props.voiceRecording] A voice clip is recording on the screen below, so
+ *   **Video is unavailable** -- not Photo, which needs no microphone.
+ *
+ *   FR-007 is that switching between the three controls loses nothing. `recordAsync` asks for
+ *   the microphone, and the one audio session is already held by `VoiceRecorderBar`, so a Video
+ *   tap over a running clip interrupts it. `VoiceRecorderBar`'s interruption path finalises the
+ *   clip and keeps the part already recorded (US2-2), so nothing is lost -- but it is a silent
+ *   truncation caused by a tap in our own interface, which is worse than either case FR-007
+ *   names. `PieceList` was given the same signal for the same reason one level in: a playback
+ *   tap must not steal the session either.
+ *
+ *   Video only, deliberately. FR-008 makes two quick taps of Photo the designed use of this
+ *   camera, and a photograph cannot touch the recording, so disabling Photo would take away the
+ *   thing somebody opened the camera to do in order to protect something it cannot harm.
+ *
+ *   Defaults to false, so a caller that says nothing keeps today's camera exactly.
  */
 export default function DualShutterCamera({
   onShot,
@@ -123,6 +139,7 @@ export default function DualShutterCamera({
   onCaptureFailed,
   maxVideoSeconds = MAX_VIDEO_SECONDS,
   videoQuality = '720p',
+  voiceRecording = false,
   style,
 }) {
   const [permission, requestPermission] = useCameraPermissions();
@@ -153,6 +170,14 @@ export default function DualShutterCamera({
   const capturedAtRef = useRef(null);
   /** takePictureAsync must not overlap itself; a ref, because a tap cannot wait for a render. */
   const photoInFlightRef = useRef(false);
+  /** The `voiceRecording` prop as a tap can read it, for the guard in `beginRecording`. */
+  const voiceRecordingRef = useRef(voiceRecording);
+  voiceRecordingRef.current = voiceRecording;
+  /**
+   * Whether the Video shutter is unavailable: a still capture in flight, or a voice clip
+   * recording below. Both are something already holding a resource a recording needs.
+   */
+  const videoBlocked = photoInFlight || voiceRecording;
   const mountedRef = useRef(true);
 
   /**
@@ -284,7 +309,13 @@ export default function DualShutterCamera({
     // `recordAsync`) while a still capture is in flight loses the photo, the recording, or
     // both. On a device `takePictureAsync` takes hundreds of milliseconds, so a fast
     // double-tap reaches it.
+    //
+    // `voiceRecordingRef` is the same shape of guard for the one audio session: the shutter is
+    // disabled while a voice clip is recording, and this is what makes "disabled" mean recording
+    // nothing rather than only looking dim (see `voiceRecording`). A ref, not the prop, so it
+    // holds for a tap that lands between the clip starting and this callback being rebuilt.
     if (isRecording || pendingRecordRef.current || photoInFlightRef.current) return;
+    if (voiceRecordingRef.current) return;
     // Set **before** the permission await, not after it: the state has not changed yet, so
     // a second tap while the OS dialog is up would otherwise pass this same guard. Only a
     // flag written synchronously can stop it.
@@ -518,7 +549,7 @@ export default function DualShutterCamera({
 
         {/* One wrapper, so the overlay keeps its three rows whether or not there is a
             notice to show -- `space-between` over four children lays out differently. */}
-        {(micRefused || lostCapture) && (
+        {(micRefused || lostCapture || voiceRecording) && (
           <View pointerEvents="box-none">
             {/* A refused microphone costs the video, never the photos (UI contract). */}
             {micRefused && (
@@ -537,6 +568,20 @@ export default function DualShutterCamera({
                 >
                   <Text style={styles.noticeButtonText}>Open Settings</Text>
                 </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Why Video is dim. A disabled control with no explanation reads as a broken
+                camera, and the person is a tap away from the thing that actually truncates
+                their clip. It names the voice note, so what to do about it is obvious: stop
+                the clip, then record the video (FR-007, review Important 5). */}
+            {voiceRecording && (
+              <View testID="camera-video-blocked" style={styles.notice}>
+                <Ionicons name="mic-outline" size={20} color="#FFFFFF" />
+                <Text testID="camera-video-blocked-message" style={styles.noticeText}>
+                  You’re recording a voice note, so a video would cut it short. Photos still
+                  work; stop the voice note to record a video.
+                </Text>
               </View>
             )}
 
@@ -612,12 +657,15 @@ export default function DualShutterCamera({
                 testID="camera-video-button"
                 accessibilityRole="button"
                 accessibilityLabel={isRecording ? 'Stop recording' : 'Record a video'}
-                accessibilityState={{ disabled: photoInFlight }}
-                // The mirror of Photo being unavailable while recording: starting a
-                // recording flips the preview out of picture output, which must not happen
-                // while a still capture is in flight.
-                disabled={photoInFlight}
-                style={[styles.videoShutter, photoInFlight && styles.shutterDisabled]}
+                accessibilityState={{ disabled: videoBlocked }}
+                // Two reasons it can be unavailable, and both are about something already
+                // using a resource a recording needs: a still capture in flight (the mirror
+                // of Photo being unavailable while recording -- starting a recording flips
+                // the preview out of picture output), and a voice clip recording on the
+                // screen below, whose audio session `recordAsync` would take (see
+                // `voiceRecording`).
+                disabled={videoBlocked}
+                style={[styles.videoShutter, videoBlocked && styles.shutterDisabled]}
                 onPress={handleVideoPress}
               >
                 <View style={isRecording ? styles.videoShutterStop : styles.videoShutterInner} />

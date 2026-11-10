@@ -31,10 +31,18 @@
  *      unsaved memory, through the same `CaptureDraftStore.addPiece` + `CaptureLocation`
  *      stamping every piece on `CaptureScreen` goes through (FR-004, FR-012), and a note that
  *      *cannot* be kept has to be said rather than logged.
- *   3. **The bar's audience is not carried.** `onSend` hands up the audience its little picker
- *      was left on, and FR-011 forbids a memory being saved on anything but an explicit choice
- *      from the save sheet. So the navigation parameters are asserted with `toEqual` — exactly
- *      `{ mode: 'new' }`, nothing smuggled alongside it.
+ *   3. **The bar's audience is carried, and it is still only a pre-selection.** `onSend` hands up
+ *      the audience its little picker was left on. That used to be dropped here, which made the
+ *      picker a dead control — and worse than dead: somebody who opened it, picked **Only me**,
+ *      and tapped Send reached a save sheet pre-selecting **Family**, so the replacement for
+ *      their discarded choice was *wider* than what they asked for. Of the two ways to be wrong
+ *      about an audience, silently widening one is the unsafe one (this project's "sharing fails
+ *      closed" rule in spirit), so it is carried as the sheet's pre-selection — fix round 1 after
+ *      the whole-branch review, Important 2. FR-011 is untouched by that: a memory is still saved
+ *      only on an explicit tap in the sheet, and this screen still saves nothing itself. The
+ *      navigation parameters are still asserted with `toEqual`, so nothing *else* can be
+ *      smuggled alongside, and the camera and microphone controls — which hand up no audience at
+ *      all — still send exactly `{ mode: 'new' }`.
  *
  * `JournalComposeModal` is **not** removed by T032 and is not expected to be gone here. plan.md's
  * Structure Decision keeps it "only for any remaining non-capture callers"; its one remaining
@@ -452,6 +460,38 @@ const tapSend = async (tree, note) => {
   await tap(barControl(tree, 'send'));
 };
 
+/** Every string rendered under a node, so an option can be found by the label a thumb reads. */
+const labelsIn = (node) =>
+  node
+    .findAllByType(Text)
+    .flatMap((n) => (Array.isArray(n.props.children) ? n.props.children : [n.props.children]))
+    .filter((child) => typeof child === 'string');
+
+/**
+ * Choose an audience on the bar's own "Who can see this?" picker, the way a person does: open
+ * the menu, then tap the option by its label. Driven through the controls rather than by calling
+ * `onSend` with a second argument, so what is proven is that the picker a thumb can reach is
+ * what travels — which is the whole of Important 2.
+ */
+const pickAudienceInBar = async (tree, label) => {
+  const bar = quickBar(tree);
+  // The picker is the bar's first control; its icon follows the current choice, so it cannot be
+  // found by a fixed icon name.
+  await tap(bar.findAllByType(TouchableOpacity)[0]);
+
+  // The *innermost* control carrying the label, as `barControl` does. The menu's dismiss
+  // backdrop is a `TouchableOpacity` wrapping every option, so it contains all four labels and
+  // comes first in tree order: taking the first match taps the backdrop, closes the menu and
+  // changes nothing — which passes by coincidence for whichever audience the bar already shows.
+  const matches = quickBar(tree)
+    .findAllByType(TouchableOpacity)
+    .filter((node) => labelsIn(node).includes(label));
+  if (matches.length === 0) {
+    throw new Error(`The quick bar audience menu offers no option labelled "${label}"`);
+  }
+  await tap(matches[matches.length - 1]);
+};
+
 const NOTE = 'on the 34 bus, 8:41';
 
 // ---------------------------------------------------------------------------
@@ -475,23 +515,27 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
     expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new' });
   });
 
-  it('opens Capture with { mode: "new" } when a typed note is sent', async () => {
+  it('opens Capture when a typed note is sent, carrying the audience the bar is showing', async () => {
     const { tree, navigate } = await render();
 
     await tapSend(tree, NOTE);
 
-    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new' });
+    // 'private' is where `QuickCaptureBar` starts (`defaultVisibility`), and it is the lock icon
+    // the bar is showing while the note is typed. Carrying it means the save sheet offers what
+    // the bar showed; it is also the narrower of the two, so a person who never touched the
+    // picker is never offered a wider audience than the one in front of them.
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
   });
 
   it('costs one tap and goes nowhere else — the same route and parameters as the + (FR-001)', async () => {
-    // `toEqual`, not `objectContaining`: the bar's own audience picker hands its value up with
-    // the text, and FR-011 forbids a memory being saved on anything but an explicit choice in
-    // the save sheet. Carrying it here as a parameter would pre-empt that sheet, so exactly
-    // `{ mode: 'new' }` must arrive — the same parameters `CaptureFab` sends.
-    for (const [name, action] of [
-      ['camera', tapCamera],
-      ['mic', tapMic],
-      ['text', (tree) => tapSend(tree, NOTE)],
+    // `toEqual`, not `objectContaining`: nothing may be smuggled alongside. The camera and the
+    // microphone hand up no audience at all (`QuickCaptureBar` passes it only with the text), so
+    // they send exactly `{ mode: 'new' }` — the same parameters `CaptureFab` sends; the text
+    // carries the bar's picker as the save sheet's pre-selection and nothing more.
+    for (const [name, action, params] of [
+      ['camera', tapCamera, { mode: 'new' }],
+      ['mic', tapMic, { mode: 'new' }],
+      ['text', (tree) => tapSend(tree, NOTE), { mode: 'new', audience: 'private' }],
     ]) {
       const { tree, navigate } = await render();
 
@@ -502,9 +546,74 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
       // fails here.
       expect({ action: name, navigated: navigate.mock.calls }).toEqual({
         action: name,
-        navigated: [['Capture', { mode: 'new' }]],
+        navigated: [['Capture', params]],
       });
     }
+  });
+});
+
+/**
+ * Important 2 of the whole-branch review: the bar's audience picker was a dead control, and it
+ * failed **wider** than the person chose.
+ *
+ * `QuickCaptureBar` renders a "Who can see this?" menu and hands the choice up as `onSend`'s
+ * second argument. `handleSendMessage` took one argument and ignored it, so somebody who opened
+ * that menu, picked **Only me**, and tapped Send was taken to a capture screen whose save sheet
+ * pre-selected **Family** — their choice discarded and the replacement wider than what they
+ * asked for. Ruled: carry the choice rather than hide the control.
+ *
+ * These cases drive the picker through its own controls, so they fail if the bar's menu stops
+ * reaching `onSend` just as surely as if this screen stops reading it.
+ */
+describe('the quick bar audience picker travels with the note (review fix, Important 2)', () => {
+  it('sends Only me as the audience when Only me is what the person picked', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Only Me');
+    await tapSend(tree, NOTE);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+  });
+
+  it('never replaces the choice with a wider one: each of the four arrives as itself', async () => {
+    // One label per audience, read off `VISIBILITY_CONFIG`. The discriminating case is Friends
+    // and Family & Friends as much as Only me: before the fix every one of them became Family.
+    for (const [label, audience] of [
+      ['Only Me', 'private'],
+      ['Family', 'family'],
+      ['Friends', 'friends'],
+      ['Family & Friends', 'family_friends'],
+    ]) {
+      const { tree, navigate } = await render();
+
+      await pickAudienceInBar(tree, label);
+      await tapSend(tree, NOTE);
+
+      expect({ label, navigated: navigate.mock.calls }).toEqual({
+        label,
+        navigated: [['Capture', { mode: 'new', audience }]],
+      });
+    }
+  });
+
+  it('still saves nothing itself — the choice is a pre-selection, not a save (FR-011)', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapSend(tree, NOTE);
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries no audience when the note could not be kept, because nothing is opened at all', async () => {
+    CaptureDraftStore.addPiece.mockRejectedValueOnce(new Error('disk full'));
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapSend(tree, NOTE);
+
+    expect(navigate).not.toHaveBeenCalled();
   });
 });
 

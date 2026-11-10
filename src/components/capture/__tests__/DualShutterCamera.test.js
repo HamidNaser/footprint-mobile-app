@@ -1192,3 +1192,81 @@ describe('DualShutterCamera: a permission ask that rejects', () => {
     expect(camera.useMicrophonePermissions()[1]).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * Important 5 of the whole-branch review -- the camera must not truncate a voice clip.
+ *
+ * FR-007: switching between the three controls loses nothing. `PieceList` was given
+ * `isRecording` so that playing a saved clip cannot steal the audio session from a running
+ * recording (`CaptureScreen.js` explains why), but opening the camera and tapping **Video** over
+ * a running clip does the same thing one level out: `recordAsync` asks for the microphone and
+ * the recording is interrupted. It is not a *loss* -- `VoiceRecorderBar`'s interruption path
+ * finalises the clip and keeps the part already recorded, which is US2-2's behaviour -- but it
+ * is a silent truncation caused by a tap in our own interface, which is worse than either case
+ * FR-007 names.
+ *
+ * **Video only.** Photo needs no microphone, and FR-008 makes two quick taps of Photo the
+ * designed use of this camera: disabling it would take away the thing somebody opened the camera
+ * to do, to protect a recording a photograph cannot touch.
+ */
+describe('DualShutterCamera: Video is unavailable while a voice clip is recording (FR-007)', () => {
+  it('disables Video, and records nothing if it is reached anyway', async () => {
+    const tree = await render({ voiceRecording: true });
+
+    const video = pressable(tree, 'camera-video-button');
+    expect(video.props.disabled).toBe(true);
+    expect(video.props.accessibilityState).toEqual(
+      expect.objectContaining({ disabled: true }),
+    );
+
+    // Belt and braces, as the photo-in-flight guard above: even reached directly it must not
+    // flip the preview out of picture output or ask for the microphone.
+    await tap(tree, 'camera-video-button');
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(preview(tree).props.mode).toBe('picture');
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+  });
+
+  it('leaves Photo alone, because a photograph needs no microphone (FR-008)', async () => {
+    const tree = await render({ voiceRecording: true });
+
+    expect(pressable(tree, 'camera-photo-button').props.disabled).toBeFalsy();
+
+    await tap(tree, 'camera-photo-button');
+    await act(async () => {});
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].kind).toBe('photo');
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+  });
+
+  it('says why Video is dim, rather than leaving a dead control with no explanation', async () => {
+    const tree = await render({ voiceRecording: true });
+
+    expect(has(tree, 'camera-video-blocked')).toBe(true);
+    expect(textAt(tree, 'camera-video-blocked-message')).toMatch(/voice/i);
+  });
+
+  it('gives Video back the moment the clip is finished', async () => {
+    const tree = await render({ voiceRecording: true });
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBe(true);
+
+    await act(async () => {
+      tree.update(element({ voiceRecording: false }));
+    });
+
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBeFalsy();
+    expect(has(tree, 'camera-video-blocked')).toBe(false);
+
+    await tap(tree, 'camera-video-button');
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    expect(preview(tree).props.mode).toBe('video');
+  });
+
+  it('is off by default, so nothing that opens the camera without saying so loses Video', async () => {
+    const tree = await render();
+
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBeFalsy();
+    expect(has(tree, 'camera-video-blocked')).toBe(false);
+  });
+});

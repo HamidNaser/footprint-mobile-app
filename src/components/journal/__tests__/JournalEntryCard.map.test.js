@@ -23,11 +23,12 @@
  *    routes (research R10, round-3 M1). The expected numbering is also written out literally,
  *    so the pair cannot agree with each other while both being wrong.
  *
- * 3. **`isVisible` defaults to true, and the default is load-bearing.** `PersonJournalScreen`
- *    and `FamilySummaryScreen` render this card and know nothing about viewability; a default
- *    of false would silently remove the map from both (round-2 M10). So the default is checked
- *    here *and* those two screens are read to confirm they still pass nothing -- the day one of
- *    them starts passing `isVisible`, this file says so rather than quietly covering less.
+ * 3. **`isVisible` defaults to true, and the default is load-bearing.** A default of false would
+ *    silently remove the map from any screen that renders this card without gating (round-2
+ *    M10). `PersonJournalScreen` and `FamilySummaryScreen` were those screens until the
+ *    whole-branch review's Important 3; they now gate like the Journal, and this file reads them
+ *    to confirm they do it through the shared `useViewableKeys` helper rather than by inventing
+ *    a rule of their own. The default stays, for whichever screen is written next.
  *
  * 4. **Lazy means the map is not in the tree at all.** The assertion is on the absence of
  *    `MapView` itself, not just of the heading: a hidden-but-mounted map still costs a native
@@ -621,8 +622,9 @@ describe('the map sits under the pieces and above the reactions (FR-022)', () =>
   });
 
   it('mounts the map when no one says anything about visibility (round-2 M10)', async () => {
-    // `PersonJournalScreen` and `FamilySummaryScreen` render this card and pass no
-    // `isVisible`; a default of false would take the map off both of them silently.
+    // A default of false would take the map off any screen that renders this card without
+    // gating -- which is every screen written next, until somebody notices. Kept deliberately
+    // even now that `PersonJournalScreen` and `FamilySummaryScreen` do gate.
     const tree = await render(entry);
 
     expect(has(tree, 'memory-route-map')).toBe(true);
@@ -702,15 +704,30 @@ describe('the map sits under the pieces and above the reactions (FR-022)', () =>
     expect(badgeNumbersInRenderOrder(tree)).toEqual([1, 2]);
   });
 
-  it('is the only way the two screens that render this card get their map', async () => {
-    // Read from the screens themselves, so the default above cannot quietly stop mattering:
-    // the day either screen starts passing `isVisible`, this says so.
+  it('is kept as the default even though both other screens now gate, so a third one cannot lose its map', async () => {
+    // This case used to assert the opposite -- that neither screen passed `isVisible` -- and
+    // said "the day either screen starts passing it, this says so". That day came: both now
+    // gate through `useViewableKeys`, because a card per memory meant a native map per memory on
+    // two screens at once, and `FamilySummaryScreen` paginates (review fix, Important 3;
+    // behaviour covered by `src/screens/__tests__/memoryMapViewability.test.js`).
+    //
+    // The *default* is unchanged and still load-bearing, which is what this case now pins: it is
+    // what a screen that is written next, and forgets to gate, falls back to -- showing the map
+    // rather than silently losing it. So the two screens are read to confirm they gate through
+    // the shared helper rather than by inventing a rule of their own, and the default itself is
+    // asserted directly below.
     const screens = path.join(__dirname, '..', '..', '..', 'screens');
     for (const file of ['PersonJournalScreen.js', 'FamilySummaryScreen.js']) {
       const source = fs.readFileSync(path.join(screens, file), 'utf8');
       expect(source).toMatch(/<JournalEntryCard/);
-      expect(source).not.toMatch(/isVisible/);
+      expect(source).toMatch(/useViewableKeys/);
+      expect(source).toMatch(/isVisible=\{isViewable\(/);
     }
+
+    // The default, read off the component rather than off a screen: a card rendered with no
+    // `isVisible` at all shows its map.
+    const tree = await render(entry, {});
+    expect(mapViews(tree)).toHaveLength(1);
   });
 });
 

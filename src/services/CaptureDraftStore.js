@@ -619,10 +619,65 @@ export function clearAfterSave(slot, options = {}) {
   });
 }
 
+/**
+ * Let go of **every** unsaved memory — both slots, their rows, their media, and the copies this
+ * module holds in memory. For the sign-out and account-switch wipe, and nothing else.
+ *
+ * FR-014 is that an unsaved memory stays private to the phone, and `SyncBootstrap`'s
+ * `teardownLocalData` (sign-out) and `ensureFreshLocalStore` (account switch) exist so that no
+ * data bleeds across sessions. A draft left behind by either of them is read by the very next
+ * mount of the capture screen -- `load('new')` restores the pieces, the media is still on disk,
+ * Save is enabled, and `performSave` writes the entry under the **new** user's id. So one
+ * person's unsaved note, photographs and voice clip were shown to the next person to sign in on
+ * that phone, and could be saved into their journal and shared from it.
+ *
+ * Three things have to go, and leaving any one of them out leaves the hole open:
+ *
+ * 1. **The rows.** `DELETE FROM capture_drafts`, both slots at once -- not `removeHeld` per
+ *    slot, which would also delete each slot's folder separately and read the entries table on
+ *    the way past for no reason.
+ * 2. **The media.** One delete of the drafts root takes every slot's folder with it. Idempotent,
+ *    so a phone that has never captured anything (no root at all) is not an error.
+ * 3. **The copies in memory.** `cache` and `unwritten` are module state and outlive a sign-out:
+ *    the bundle is not reloaded, so the next account runs with the same module instance. A slot
+ *    that was still unwritten (a debounced keystroke, or a write that failed) is handed back by
+ *    `loadHeld` *in preference to the row* -- by design, rule 3 in this file's header -- so
+ *    clearing only the row would leave exactly the draft that was never saved readable.
+ *
+ * Both slot locks are held for the whole of it, in a fixed order, so a capture in flight cannot
+ * land between the steps; and a write already under way is awaited before the delete, or it
+ * would land behind the `DELETE` and resurrect the row (the same hazard `removeHeld` names).
+ *
+ * @returns {Promise<void>} rejects if the database delete or the folder delete failed, so the
+ *   caller can say the wipe was incomplete rather than assume it worked.
+ */
+export function clearAllDrafts() {
+  const slots = Object.values(DraftSlot);
+
+  return withSlotLock(DraftSlot.NEW, () =>
+    withSlotLock(DraftSlot.EDIT, async () => {
+      slots.forEach(cancelPendingWrite);
+      cache.clear();
+      unwritten.clear();
+
+      await Promise.all(
+        slots.map((slot) => (writeChains.get(slot) ?? Promise.resolve()).catch(() => {}))
+      );
+      slots.forEach((slot) => writeChains.delete(slot));
+
+      const db = await getDatabase();
+      await db.runAsync('DELETE FROM capture_drafts');
+
+      await FileSystem.deleteAsync(DRAFTS_ROOT, { idempotent: true });
+    })
+  );
+}
+
 export default {
   DraftSlot,
   TEXT_DEBOUNCE_MS,
   slotDirectory,
+  clearAllDrafts,
   load,
   addPiece,
   removePiece,
