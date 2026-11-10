@@ -6,11 +6,11 @@
  * never an instant. FR-032 says a split that builds a `Date` from the civil value and compares
  * it against "now" can quietly misclassify a same-day event once the device's time zone and the
  * clock disagree about which side of UTC midnight they are on -- exactly the bug the constitution's
- * civil-date rule exists to rule out. `isUpcomingToday` below proves two of the cases that bug
- * fails: 00:05 local under UTC-10 (local day has barely started; the UTC instant for "today" has
- * already moved into tomorrow) and 23:55 local under UTC+13 (local day is nearly over; the UTC
- * instant for "today" is still comfortably "in the past" by the time a wall-clock compare would
- * run). Both are discriminating: an implementation that does
+ * civil-date rule exists to rule out. The "FR-032 civil-date split" describe block below proves
+ * two of the cases that bug fails: 00:05 local under UTC-10 (local day has barely started; the
+ * UTC instant for "today" has already moved into tomorrow) and 23:55 local under UTC+13 (local
+ * day is nearly over; the UTC instant for "today" is still comfortably "in the past" by the time
+ * a wall-clock compare would run). Both are discriminating: an implementation that does
  * `new Date(event.date) >= new Date()` puts the same-day event in `past` for both, because the
  * UTC-midnight instant for "today" ends up earlier than the real current UTC instant. A correct
  * string compare of `'YYYY-MM-DD' >= localToday` never does.
@@ -322,6 +322,31 @@ describe('useUpcomingEvents: a malformed date fails closed, not silent', () => {
 
     expect(result.current.upcoming.map((e) => e.id)).toEqual(['no-date']);
     expect(result.current.past).toEqual([]);
+  });
+
+  it('never lets a garbage-dated event occupy the soonest slot ahead of a real one', async () => {
+    // FR-034's "Coming up" card reads the first one or two of `upcoming`. The garbage date is
+    // `''` specifically: an empty string sorts *before* any real `YYYY-MM-DD` string under a
+    // naive string compare (ASCII '' < '2'), so a comparator that does not special-case an
+    // invalid date would put this event first -- exactly the regression this case exists to
+    // catch. (A letters-only garbage string like 'not-a-date' would not catch it: every ASCII
+    // letter sorts after every digit, so it would land last by accident, not by the ordering
+    // rule under test.)
+    mockTabs({
+      my: [
+        event({ id: 'garbage-dated', date: '' }),
+        event({ id: 'soonest-real', date: '2099-01-01' }),
+        event({ id: 'later-real', date: '2099-06-01' }),
+      ],
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.upcoming.map((e) => e.id)).toEqual([
+      'soonest-real',
+      'later-real',
+      'garbage-dated',
+    ]);
   });
 });
 

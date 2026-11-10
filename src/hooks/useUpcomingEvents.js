@@ -15,7 +15,10 @@
  * UTC midnight they fall on (constitution: a civil date is a day, not an instant). A `date`
  * that is not a well-formed `YYYY-MM-DD` string (contract says this cannot happen, but fail
  * closed rather than silently dropping the event) is treated as upcoming, so it is at least
- * visible rather than vanishing from both lists with no signal.
+ * visible rather than vanishing from both lists with no signal -- but ordered *last* within
+ * `upcoming`, after every well-formed date, so it can never displace a real next event out of
+ * the "Coming up" card's one-or-two slot (FR-034). Malformed-dated events keep their relative
+ * order among themselves.
  *
  * An event hosted by the caller and also appearing on their invites tab (e.g. co-hosted) keeps
  * the `my` copy as the base -- the person hosts it, so their own copy is authoritative -- but
@@ -92,6 +95,10 @@ export function useUpcomingEvents() {
         ]);
         if (cancelled || !mountedRef.current) return;
 
+        // Not filtered to published here, deliberately: this map exists only to look an RSVP up
+        // for an event the caller also hosts (below), and the host's own copy of that same
+        // event is already the one gating publication. An unpublished invite copy's RSVP is
+        // still the caller's real RSVP on the same event, not a different, unpublished event.
         const invitedById = new Map((invited || []).filter(Boolean).map((e) => [e.id, e]));
         const seen = new Set();
         const published = [];
@@ -112,7 +119,16 @@ export function useUpcomingEvents() {
         const today = localToday();
         const nextUpcoming = published
           .filter((event) => !isCivilDate(event.date) || event.date >= today)
-          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+          .sort((a, b) => {
+            const aValid = isCivilDate(a.date);
+            const bValid = isCivilDate(b.date);
+            // A malformed date is visible but never soonest: sorts after every well-formed
+            // date, and stays in its original relative order against other malformed dates
+            // (Array#sort is stable, so returning 0 here is enough).
+            if (aValid !== bValid) return aValid ? -1 : 1;
+            if (!aValid) return 0;
+            return a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+          });
         const nextPast = published
           .filter((event) => isCivilDate(event.date) && event.date < today)
           .sort((a, b) => (a.date > b.date ? -1 : a.date < b.date ? 1 : 0));
