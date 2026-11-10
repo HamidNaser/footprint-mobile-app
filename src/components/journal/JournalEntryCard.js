@@ -611,6 +611,18 @@ export const JournalEntryCard = memo(({
   const [highlighted, setHighlighted] = useState(null);
   const highlightTimer = useRef(null);
 
+  /**
+   * Read through a ref so the press handler below never changes identity.
+   *
+   * `JournalScreen` builds this callback per row -- it has to, because only the row knows its
+   * index -- so it is a new function on every render. A press handler that changed with it
+   * would be a new prop on `MemoryRouteMap` every time this card re-rendered, which defeats
+   * the `memo` around it and redraws every marker each time a piece lights up. The map is the
+   * expensive thing in this card, and it is the reason the card mounts it lazily at all.
+   */
+  const scrollRequest = useRef(onRequestScrollTo);
+  scrollRequest.current = onRequestScrollTo;
+
   // The timer outlives nothing: a card scrolled out of the Journal while a piece is lit would
   // otherwise set state on an unmounted component a second later.
   useEffect(
@@ -624,25 +636,22 @@ export const JournalEntryCard = memo(({
    * A pin was pressed. A merged marker hands up every number it holds, so all of them light up
    * and the first is the one brought into view (FR-025, round-2 M1).
    */
-  const handlePinPress = useCallback(
-    (numbers) => {
-      if (!numbers || numbers.length === 0) return;
+  const handlePinPress = useCallback((numbers) => {
+    if (!numbers || numbers.length === 0) return;
 
-      setHighlighted(new Set(numbers));
-      // Restarted rather than extended, so the piece pressed second gets its own second and a
-      // half and the piece pressed first goes out at once.
-      if (highlightTimer.current) clearTimeout(highlightTimer.current);
-      highlightTimer.current = setTimeout(() => {
-        highlightTimer.current = null;
-        setHighlighted(null);
-      }, PIECE_HIGHLIGHT_MS);
+    setHighlighted(new Set(numbers));
+    // Restarted rather than extended, so the piece pressed second gets its own second and a
+    // half and the piece pressed first goes out at once.
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = setTimeout(() => {
+      highlightTimer.current = null;
+      setHighlighted(null);
+    }, PIECE_HIGHLIGHT_MS);
 
-      const { content, pieces } = offsets.current;
-      const y = pieces.get(numbers[0]);
-      if (content !== null && y !== undefined) onRequestScrollTo?.(content + y);
-    },
-    [onRequestScrollTo],
-  );
+    const { content, pieces } = offsets.current;
+    const y = pieces.get(numbers[0]);
+    if (content !== null && y !== undefined) scrollRequest.current?.(content + y);
+  }, []);
 
   /**
    * Render a single content block based on its type
