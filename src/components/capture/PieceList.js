@@ -146,7 +146,12 @@ function PieceRow({
             // The row's own kind, which is the only thing that tells four otherwise identical
             // controls apart for somebody reading by label alone (UI contract).
             accessibilityLabel={`Remove this ${kindLabel(piece.kind)}`}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            // A genuine 44pt target, which is what both platforms ask for and what this
+            // control in particular needs: it sits at the end of a line whose place name is
+            // `numberOfLines={1}` and can run right up to it. The label is 13pt (~16pt tall)
+            // with 6pt of padding above and below, so 28pt is drawn and 8pt of slop at each
+            // end makes 44; sideways it is wider than that before the slop is counted.
+            hitSlop={{ top: 8, bottom: 8, left: 10, right: 10 }}
             style={styles.remove}
             onPress={() => onRemove?.(piece)}
           >
@@ -268,13 +273,19 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
   },
   remove: {
-    paddingVertical: 2,
-    paddingHorizontal: 4,
+    // Six at each end, which with the 13pt label and the control's `hitSlop` is the 44pt
+    // touch target. See the control.
+    paddingVertical: 6,
+    paddingHorizontal: 8,
   },
   removeLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#E5484D',
+    // The app's own destructive red -- the one on the composer's remove-attachment control and
+    // the place picker's trash. Deliberately **not** `KINDS.audio`'s `#E5484D`: that is the
+    // colour of the words "Voice clip" at the other end of this very line, and two identical
+    // reds on one meta line read as one thing said twice.
+    color: '#FF3B30',
   },
   note: {
     marginTop: 6,

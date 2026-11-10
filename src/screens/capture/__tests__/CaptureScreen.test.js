@@ -3980,6 +3980,50 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
     });
 
     /**
+     * The recovery from the case above, which is the likely next thing a person does: Remove,
+     * the write fails, the banner says the piece is still part of this memory -- and they tap
+     * Remove again, and this time it works.
+     *
+     * **The banner has to go when it does.** Left up, it is a sentence saying a piece is still
+     * part of the memory, beside a list that no longer shows it: the screen contradicting
+     * itself about the one thing the person just did. It is also the file's own idiom --
+     * `addCapturedPiece` clears the transient banner on a success and keeps only
+     * `TEXT_NOT_KEPT_MESSAGE`, which is about something else entirely -- and without this a
+     * capture that had nothing to do with the removal would clear it while the retry that
+     * actually fixed it would not.
+     *
+     * Added at the independent review's direction (T073 review, Important 1): T072 had no
+     * fail-then-retry case, which is why a green suite was not evidence against it.
+     */
+    it('takes the failure down once the removal it was about has gone through', async () => {
+      const tree = await noteThenPhoto();
+      const [noteId, photoId] = listed('new');
+      // Once, so the second attempt runs the stand-in's real behaviour -- a retry, not a
+      // different test.
+      CaptureDraftStore.removePiece.mockImplementationOnce(async () => {
+        throw new Error('the draft could not be written');
+      });
+
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      expect(textAt(tree, 'capture-capture-error')).toMatch(COULD_NOT_REMOVE);
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      expect(listed('new')).toEqual([noteId, photoId]);
+
+      // The same control, the same piece, a second time.
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(2);
+      expect(kinds(tree)).toEqual(['Photo']);
+      expect(listed('new')).toEqual([photoId]);
+      // The sentence is no longer true of anything, so it is no longer on screen.
+      expect(has(tree, 'capture-capture-error')).toBe(false);
+      expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 1 piece');
+    });
+
+    /**
      * FR-007. Playing a clip would end a running recording -- it asks the one shared audio
      * session for `allowsRecording: false` -- which is why the player's control is deadened
      * while the bar is recording. Removing touches no audio session, so it is **allowed**: the

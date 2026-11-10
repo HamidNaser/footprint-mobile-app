@@ -1102,11 +1102,30 @@ export default function CaptureScreen({ route, navigation }) {
     async (piece) => {
       try {
         if (isEditMode) await startEditDraft();
-        await CaptureDraftStore.removePiece(slot, piece.localId);
+        const draft = await CaptureDraftStore.removePiece(slot, piece.localId);
+        if (!draft) {
+          // `null` is the store saying the slot holds no draft at all, so nothing was written
+          // and the removal was **not** recorded (data-model, *Removing a piece*). It is the
+          // same outcome as a failed write and gets the same words: the row stays rather than
+          // vanishing from a screen while the store still lists it. A `localId` the draft does
+          // not list is a different answer -- the draft, unchanged -- so a double tap still
+          // succeeds quietly.
+          throw new Error(
+            `[CaptureScreen] the draft store holds no ${slot} draft, so the removal was not ` +
+              'recorded',
+          );
+        }
         if (!mountedRef.current) return;
         setPieces((previous) =>
           previous.filter((candidate) => candidate.localId !== piece.localId),
         );
+        // The banner this screen may have put up for an earlier attempt at this very removal
+        // says the piece is still part of the memory; it has just stopped being true, and a
+        // false sentence beside a list that contradicts it is worse than no sentence. Cleared
+        // the way `addCapturedPiece` clears it, `TEXT_NOT_KEPT_MESSAGE` excepted: that one is
+        // about words of somebody's that are not being kept, which a removal says nothing
+        // about (T073 review, Important 1).
+        setCaptureError((previous) => (previous === TEXT_NOT_KEPT_MESSAGE ? previous : null));
       } catch (error) {
         console.warn('[CaptureScreen] a piece could not be removed', error);
         if (mountedRef.current) setCaptureError(REMOVE_FAILED_MESSAGE);
