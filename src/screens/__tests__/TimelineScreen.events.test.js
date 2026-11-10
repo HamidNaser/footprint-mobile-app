@@ -111,6 +111,7 @@ function mockUpcomingEvents(overrides) {
     draftsCount: 0,
     isLoading: false,
     error: null,
+    refresh: jest.fn(),
     ...overrides,
   });
 }
@@ -266,6 +267,17 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
       expect(shows(tree, /Couldn.t load events/)).toBe(true);
       expect(shows(tree, /Sign in to see your events\./)).toBe(true);
       expect(shows(tree, /No events yet/)).toBe(false);
+    });
+
+    // Fix round 2: the Events pane now mirrors EventsScreen's recovery, not just its list --
+    // `useUpcomingEvents` gained a `refresh()` once this pane became its second consumer.
+    it("renders a working Try again whose press calls the hook's refresh", async () => {
+      const refresh = jest.fn();
+      mockUpcomingEvents({ error: { message: 'Network request failed' }, refresh });
+      const tree = await mount({ route: { params: { view: 'events' } } });
+
+      await press(pressableByText(tree, /^Try again$/));
+      expect(refresh).toHaveBeenCalledTimes(1);
     });
 
     // Important 4: the Lifeline overview (`years.length === 0`) is Timeline-only data. A

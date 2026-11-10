@@ -397,3 +397,82 @@ describe('useUpcomingEvents: failure is closed', () => {
     expect(result.current.error).not.toBeNull();
   });
 });
+
+/**
+ * `refresh()` (fix round 2): the Timeline tab's Events pane mirrors `EventsScreen` and so needs
+ * the same recovery it offers -- `TimelineScreen` is a bottom-tab screen that never unmounts, so
+ * without a `refresh()` here the one load on mount would be the only one for the rest of the app
+ * session. Follows `useEvents`'s own `reloadKey` shape exactly, so the same rules this hook
+ * already proves for the initial load (fail closed, signed-out short-circuit) apply unchanged
+ * to a refresh -- these cases prove that holds, not just that `refresh` exists.
+ */
+describe('useUpcomingEvents: refresh', () => {
+  it('a failed load followed by a successful refresh clears the error and shows the events', async () => {
+    let shouldFail = true;
+    EventsApi.getEvents.mockImplementation(async (tab) => {
+      if (shouldFail) throw new Error('network down');
+      if (tab === 'my') return [event({ id: 'e1', date: '2099-01-01' })];
+      return [];
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.error).not.toBeNull();
+    expect(result.current.upcoming).toEqual([]);
+
+    shouldFail = false;
+    await act(async () => {
+      result.current.refresh();
+    });
+    await act(async () => {});
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.upcoming.map((e) => e.id)).toEqual(['e1']);
+  });
+
+  it('a failed load followed by a failed refresh still shows the error, with empty lists (fail closed, never partial)', async () => {
+    // A different message on the second attempt, not the first: proves the error on screen
+    // after `refresh()` is the *second* load's result, not the first load's error state simply
+    // left standing untouched (which a `refresh()` that silently did nothing would also satisfy,
+    // the same message both times).
+    let attempt = 0;
+    EventsApi.getEvents.mockImplementation(async () => {
+      throw new Error(attempt === 0 ? 'network down' : 'still down after retry');
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    expect(result.current.error).toMatchObject({ message: 'network down' });
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
+
+    attempt = 1;
+    await act(async () => {
+      result.current.refresh();
+    });
+    await act(async () => {});
+
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(6); // refresh asked again, not a no-op
+    expect(result.current.error).toMatchObject({ message: 'still down after retry' });
+    expect(result.current.upcoming).toEqual([]);
+    expect(result.current.past).toEqual([]);
+    expect(result.current.draftsCount).toBe(0);
+  });
+
+  it('a signed-out refresh still short-circuits with NOT_AUTHENTICATED and issues no network call', async () => {
+    mockTabs({});
+    const { result, mount } = setup();
+    await mount();
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(3);
+
+    EventsApi.isAuthenticated.mockReturnValue(false);
+    await act(async () => {
+      result.current.refresh();
+    });
+    await act(async () => {});
+
+    expect(EventsApi.getEvents).toHaveBeenCalledTimes(3); // no new calls on refresh
+    expect(result.current.error).toMatchObject({ code: 'NOT_AUTHENTICATED' });
+    expect(result.current.upcoming).toEqual([]);
+    expect(result.current.past).toEqual([]);
+  });
+});

@@ -21,11 +21,10 @@
  * from directly: `onSelect`/`onDrafts`/`onCreate` are callback props, the same shape `EventCard`
  * itself takes (`onPress`) — the screen that renders `EventsList` owns navigation, not this list.
  *
- * `onRefresh` (pull-to-refresh) and `onRetry` (the error state's "Try again") are both optional
- * and independently so: `useUpcomingEvents`, the Events pane's data source, deliberately has no
- * `refresh()` (FR-034 only asks the "Coming up" card to say loading failed), so the Events pane
- * passes neither, and this component hides the control it would have driven rather than wiring a
- * button to nothing.
+ * `onRefresh` (pull-to-refresh) and `onRetry` (the error state's "Try again") are both optional,
+ * independently of each other and of the mode: whichever caller does not have one to give (none
+ * do today -- both `EventsScreen` and the Events pane always pass both) simply omits it, and
+ * this component hides the control it would have driven rather than wiring a button to nothing.
  */
 
 import React, { memo, useCallback } from 'react';
@@ -76,7 +75,7 @@ EmptyState.displayName = 'EventsEmptyState';
  * Shown when the request failed. Distinct from EmptyState on purpose: "you have no events" and
  * "we could not ask" are different facts, and collapsing them into one blank screen is what hid
  * the failure before (EventsScreen's original comment, carried over with this extraction).
- * `onRetry` is optional: see the module doc on why the Events pane has none to give.
+ * `onRetry` is optional: see the module doc on why a caller might have none to give.
  */
 const ErrorState = memo(({ error, onRetry }) => {
   const detail = [error?.status, error?.code].filter(Boolean).join(' · ');

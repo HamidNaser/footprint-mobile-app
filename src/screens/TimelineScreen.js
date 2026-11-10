@@ -182,11 +182,24 @@ function ViewSwitch({ value, onChange }) {
 
 /**
  * The Events pane (FR-031-033, research R11): `EventsList` in its sectioned mode, fed by
- * `useUpcomingEvents`. That hook deliberately has no `refresh()` (FR-034 only asks the "Coming
- * up" card on Home to say loading failed), so no `onRefresh`/`onRetry` is passed here either --
- * `EventsList` hides the controls it would have driven rather than wiring them to nothing.
+ * `useUpcomingEvents`. This pane mirrors `EventsScreen`, so it offers the same recovery that
+ * screen does -- Try again (`onRetry`, the bare `refresh()`) and pull-to-refresh (`onRefresh`,
+ * wrapped the same way `EventsScreen.handleRefresh` is, to drive `refreshing` without the
+ * full-screen spinner swap mid-pull).
  */
-function EventsPane({ upcoming, past, draftsCount, isLoading, error, onSelect, onDrafts, onCreate }) {
+function EventsPane({
+  upcoming,
+  past,
+  draftsCount,
+  isLoading,
+  error,
+  refreshing,
+  onRefresh,
+  onRetry,
+  onSelect,
+  onDrafts,
+  onCreate,
+}) {
   return (
     <View style={styles.eventsPane}>
       <EventsList
@@ -195,6 +208,9 @@ function EventsPane({ upcoming, past, draftsCount, isLoading, error, onSelect, o
         draftsCount={draftsCount}
         isLoading={isLoading}
         error={error}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+        onRetry={onRetry}
         onSelect={onSelect}
         onDrafts={onDrafts}
         onCreate={onCreate}
@@ -227,8 +243,25 @@ export default function TimelineScreen({ navigation, route }) {
       setView(requested);
     }
   }, [route?.params?.view]);
-  const { upcoming, past, draftsCount, isLoading: eventsLoading, error: eventsError } =
-    useUpcomingEvents();
+  const {
+    upcoming,
+    past,
+    draftsCount,
+    isLoading: eventsLoading,
+    error: eventsError,
+    refresh: refreshEvents,
+  } = useUpcomingEvents();
+  // Pull-to-refresh's own flag, kept apart from `eventsLoading` the same way `EventsScreen`'s
+  // `refreshing` is kept apart from `isLoading`: while this is true, `EventsList` keeps the list
+  // on screen with the native pull spinner instead of swapping in the full-screen one.
+  const [eventsRefreshing, setEventsRefreshing] = useState(false);
+  const handleEventsRefresh = () => {
+    setEventsRefreshing(true);
+    refreshEvents();
+    // `useUpcomingEvents` flips `isLoading`; clear the spinner shortly after (same timing
+    // `EventsScreen.handleRefresh` uses).
+    setTimeout(() => setEventsRefreshing(false), 600);
+  };
   const [personId, setPersonId] = useState(null); // null = current user
   const [year, setYear] = useState(null);
   const [windowStart, setWindowStart] = useState(0);
@@ -442,6 +475,9 @@ export default function TimelineScreen({ navigation, route }) {
           draftsCount={draftsCount}
           isLoading={eventsLoading}
           error={eventsError}
+          refreshing={eventsRefreshing}
+          onRefresh={handleEventsRefresh}
+          onRetry={refreshEvents}
           onSelect={handleSelectEvent}
           onDrafts={handleOpenDrafts}
           onCreate={handleCreateEvent}

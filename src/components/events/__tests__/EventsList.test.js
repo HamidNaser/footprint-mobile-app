@@ -9,10 +9,12 @@
  *
  * `onDrafts`/`onCreate`/`onRefresh`/`onRetry` are callback props, not navigation calls owned by
  * this component -- matching how `EventCard` takes `onPress` rather than navigating itself. The
- * screens that render `EventsList` decide what each callback does. `useUpcomingEvents` (the
- * Events pane's data source) has no `refresh()` by design, so the Events pane passes no
- * `onRefresh`/`onRetry` -- the "omits the Try again button" case below pins that this component
- * degrades gracefully (hides the button) rather than wiring it to nothing.
+ * screens that render `EventsList` decide what each callback does. Both `EventsScreen` and the
+ * Timeline's Events pane pass `onRefresh`/`onRetry` today (the Events pane only since fix round
+ * 2, when `useUpcomingEvents` gained a `refresh()`), but `EventsList` itself still treats them as
+ * independently optional -- the "omits the Try again button"/"passes no RefreshControl" cases
+ * below pin that a caller with neither still degrades gracefully (hides the control) rather than
+ * wiring a button to nothing.
  */
 
 import React from 'react';
@@ -150,7 +152,7 @@ describe('EventsList', () => {
       expect(shows(tree, /No events yet/)).toBe(false);
     });
 
-    it('omits the Try again button when no onRetry is given (useUpcomingEvents has no refresh)', async () => {
+    it('omits the Try again button when no onRetry is given', async () => {
       const tree = await mount({ upcoming: [], past: [], error: { message: 'Network request failed' } });
       expect(shows(tree, /Couldn.t load events/)).toBe(true);
       expect(() => pressableByText(tree, /^Try again$/)).toThrow();
@@ -163,6 +165,24 @@ describe('EventsList', () => {
 
       await press(pressableByText(tree, /^Garden Party$/));
       expect(onSelect).toHaveBeenCalledWith(event);
+    });
+
+    // Fix round 2: `useUpcomingEvents` gained a `refresh()` once this pane became its second
+    // consumer, so the Events pane now wires `onRefresh`/`onRetry` too -- extending round 1's
+    // flat-mode-only pins on the `FlatList`'s `refreshControl` to this path as well.
+    it('passes a RefreshControl to the FlatList when onRefresh is given', async () => {
+      const onRefresh = jest.fn();
+      const tree = await mount({ upcoming: [makeEvent({ id: 'u1' })], past: [], onRefresh });
+
+      const list = tree.root.findByType(FlatList);
+      expect(list.props.refreshControl).toBeTruthy();
+    });
+
+    it('passes no RefreshControl to the FlatList when onRefresh is omitted', async () => {
+      const tree = await mount({ upcoming: [makeEvent({ id: 'u1' })], past: [] });
+
+      const list = tree.root.findByType(FlatList);
+      expect(list.props.refreshControl).toBeUndefined();
     });
   });
 

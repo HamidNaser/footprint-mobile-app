@@ -33,9 +33,19 @@
  *
  * Any one of the three calls failing yields `error` and empty lists -- never a partial result
  * (sharing/reads fail closed, CLAUDE.md).
+ *
+ * `refresh()` re-runs the same load (same `reloadKey` bump `useEvents` uses). Added once this
+ * hook gained a second consumer beyond Home's card: the Timeline tab's Events pane, which
+ * mirrors `EventsScreen` and so needs the same recovery it offers -- Try again and
+ * pull-to-refresh. `TimelineScreen` is a bottom-tab screen that never unmounts, so without a
+ * `refresh()` the one load on mount is the only one for the rest of the app session: a single
+ * transient failure would strand the Events pane on its error state (and "Drafts (n)" stale)
+ * until the app restarts. A refresh is subject to the same rules as the initial load -- fail
+ * closed (never leaves a previous or partial list standing) and the signed-out short-circuit
+ * (no network call, `NOT_AUTHENTICATED`, empty lists).
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { EventsApi } from '../api';
 
 /** The phone's local calendar day, as `YYYY-MM-DD` -- never derived from a civil value. */
@@ -58,6 +68,7 @@ export function useUpcomingEvents() {
   const [draftsCount, setDraftsCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -156,9 +167,11 @@ export function useUpcomingEvents() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadKey]);
 
-  return { upcoming, past, draftsCount, isLoading, error };
+  const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  return { upcoming, past, draftsCount, isLoading, error, refresh };
 }
 
 export default useUpcomingEvents;
