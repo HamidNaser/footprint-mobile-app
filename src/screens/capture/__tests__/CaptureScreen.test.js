@@ -18,6 +18,12 @@
  * device checks Q-D1, Q-D2, Q-D3 and Q-D6. What is driven here is the signal the screen sees
  * from each of them -- an `AppState` change -- and the state it has to come back to.
  *
+ * T072 adds Phase 9 -- a **Remove** control on every row (FR-036, the owner's answer to
+ * question 013-Q1, option B) -- in the last describe of this file: the confirmation and which
+ * of its three bodies a piece gets, what a confirmed removal does to the list, to the status
+ * line and to the memory that is saved afterwards, and the two things a removal must never do
+ * (swallow a failure to record it, or stop a recording that is running).
+ *
  * This is the screen the whole feature is for: one memory, any number of notes, voice clips,
  * photos and videos, in any order, each switch one tap away, and nothing lost on the way
  * (FR-002, FR-003). What is pinned down here:
@@ -168,7 +174,26 @@ jest.mock('../../../services/CaptureDraftStore', () => {
       slots.set(slot, { ...draft, pieces: [...draft.pieces, kept] });
       return kept;
     });
-    store.removePiece.mockImplementation(async () => null);
+    // T072 gives `removePiece` its first caller, so the stand-in has to hold what the real one
+    // holds rather than answer null. The real one (`CaptureDraftStore.js:373`) commits the row
+    // without that piece and hands back the draft as it now stands -- null only when the slot
+    // holds no draft at all, and the draft unchanged for a `localId` it does not list, so a
+    // double tap cannot fail. FR-036's "the unsaved memory no longer lists the removed piece"
+    // is a fact about the draft, not about a spy, so the cases below ask the slot.
+    //
+    // What it deliberately does **not** reproduce is the file deletion: that the store deletes
+    // only media it copied itself, and logs rather than reports a file that will not delete, is
+    // its own file's tests (T016/T017).
+    store.removePiece.mockImplementation(async (slot, localId) => {
+      const draft = slots.get(slot);
+      if (!draft) return null;
+      const next = {
+        ...draft,
+        pieces: draft.pieces.filter((piece) => piece.localId !== localId),
+      };
+      slots.set(slot, next);
+      return next;
+    });
     // Permissive on a slot it is not holding, as this mock has always been: the real store's
     // deliberate cold-cache throw is driven per-case, by the one case that is about it.
     store.updateText.mockImplementation((slot, localId, content) => {
@@ -3662,5 +3687,563 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
     expect(photo.id).toBeUndefined();
     expect(theUploadQueueSkips(photo)).toBe(false);
     expect(isUnuploadedItem(photo)).toBe(true);
+  });
+});
+
+// ============================================================
+// T072 -- Phase 9: a piece can be taken back out (FR-036, and FR-005, FR-007, FR-012,
+// FR-013, FR-017, FR-018)
+// ============================================================
+
+/**
+ * **Remove, on every row.** Added during the build on the owner's answer to question 013-Q1,
+ * option B: *"Build it now. Each piece gets a remove control, and removing one makes the edit
+ * unsaved like any other change."* `CaptureDraftStore.removePiece` was written and unit-tested
+ * in T016/T017 and has had no caller; these cases are the caller.
+ *
+ * The row's own half -- that there is a control, what it is labelled, and that the last
+ * remaining piece has none -- is `PieceList.test.js`. What is pinned here is everything the
+ * screen decides:
+ *
+ *   - **it asks first, and a declined question does nothing at all**: no `removePiece`, no
+ *     list change, and in an edit no draft either -- a cancelled removal is not a change, so
+ *     it must not be what makes an edit unsaved (FR-013);
+ *   - **which of the three bodies that question carries**, which is the subtle half of FR-036
+ *     and the reason the three are pinned a case each rather than together. Nothing brings a
+ *     piece *this phone captured* back, and a piece *the memory already holds* is not changed
+ *     until Save -- so one wording cannot be true of both, and the contract fixes the precedence:
+ *     **origin wins over kind**. A photograph the memory already holds must not be told it is
+ *     about to be deleted from the phone, and a note must not be promised the deletion of
+ *     media it does not have. The case is decided from the **piece's own fields** -- the real
+ *     `CaptureDraftStore.ownsMedia` predicate, reproduced below -- and never from the row's
+ *     index or the screen's mode: an edit holds both kinds of piece at once, which is the case
+ *     that proves it;
+ *   - **what a confirmed removal does**: `removePiece(slot, localId)` once, that row gone, the
+ *     rest in the order they were captured (FR-005), the unsaved memory no longer listing it
+ *     (FR-012), the new-memory status line following the count, and in an edit the first
+ *     change -- the edit started *before* the removal, and the line reading "Changes kept"
+ *     (FR-013) -- with Save then updating that same memory and never making a second one
+ *     (FR-018);
+ *   - **a removal that could not be recorded keeps the row and says so** (FR-017). A row that
+ *     vanished from the screen but not from the draft would come back on the next open, which
+ *     is the one outcome worse than a refusal;
+ *   - **a removal while a recording runs is allowed and does not stop it** (FR-007). Unlike
+ *     *playing* a clip, removing one touches no audio session -- so the control is live, and
+ *     the recording is still running afterwards and still produces its clip.
+ *
+ * What is deliberately not here: the file the store deletes (and the file it refuses to
+ * delete, and the one that will not delete and is logged rather than reported) belongs to
+ * `CaptureDraftStore` and is its own file's tests.
+ */
+describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
+  /**
+   * The three bodies, exactly as `contracts/ui-contract.md` words them, in the contract's own
+   * precedence order. Spelled out as constants because *which* of the three a piece gets is
+   * the whole of this requirement: a case that matched loosely would pass on two of them.
+   */
+  const ALREADY_IN_THE_MEMORY =
+    'It is taken out of this memory when you save. Nothing is deleted from this phone.';
+  const CAPTURED_WITH_MEDIA =
+    'It is taken out of this memory, and its photo, video or recording is deleted from this ' +
+    'phone. This cannot be undone.';
+  const A_NOTE = 'It is taken out of this memory. This cannot be undone.';
+
+  /**
+   * `CaptureDraftStore.ownsMedia` (`CaptureDraftStore.js:168`), written as the store writes it:
+   *
+   *     !!piece?.uri && !piece.remote && piece.uri.startsWith(slotDirectory(slot))
+   *
+   * It is the real predicate for "this store copied the file, so this store is the one to
+   * delete it", and so it is what the first body and the second turn on. Reproduced rather
+   * than restated, so the fixtures below are checked against the rule the production code
+   * uses and not against a paraphrase of it.
+   */
+  const theStoreOwnsTheFile = (slot, piece) =>
+    !!piece?.uri && !piece.remote && piece.uri.startsWith(CaptureDraftStore.slotDirectory(slot));
+
+  /** The question just asked, as `Alert.alert` received it. */
+  const lastAsked = () => Alert.alert.mock.calls[Alert.alert.mock.calls.length - 1];
+
+  /** Keep it -- the cancel button, which must be there and must do nothing. */
+  const keepIt = async () => {
+    const [, , buttons] = lastAsked();
+    const keep = buttons.find((button) => button.style === 'cancel');
+    expect(keep).toBeDefined();
+    expect(keep.text).toBe('Keep it');
+    await act(async () => {
+      keep.onPress?.();
+    });
+  };
+
+  /** Remove -- the destructive button. */
+  const confirmRemoval = async () => {
+    const [, , buttons] = lastAsked();
+    const remove = buttons.find((button) => button.style === 'destructive');
+    expect(remove).toBeDefined();
+    expect(remove.text).toBe('Remove');
+    await act(async () => {
+      remove.onPress?.();
+    });
+  };
+
+  /** Every row's kind, in order: the times of a new memory's pieces are "now". */
+  const kinds = (tree) => rows(tree).map((row) => row.split(' | ')[0]);
+
+  /** What one slot's draft lists, by `localId`. */
+  const listed = (slot) =>
+    (CaptureDraftStore.__slots()[slot]?.pieces ?? []).map((piece) => piece.localId);
+
+  /**
+   * The failure that reaches the person, pinned as a whole sentence. Matched rather than
+   * compared only so the curly apostrophe in "Couldn't" cannot be the thing that fails.
+   */
+  const COULD_NOT_REMOVE = /^Couldn.t remove that piece — it is still part of this memory\.$/;
+
+  // --------------------------------------------------------
+  // A new memory
+  // --------------------------------------------------------
+
+  describe('a new memory', () => {
+    /** A note with words in it and a photograph after it: two pieces, so Remove is offered. */
+    const noteThenPhoto = async () => {
+      const tree = await render();
+      await tap(tree, 'capture-type-button');
+      await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+      await tap(tree, 'capture-camera-button');
+      await tap(tree, 'camera-photo-button');
+      await tap(tree, 'camera-done-button');
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      return tree;
+    };
+
+    it('asks before it removes anything, and a declined question removes nothing', async () => {
+      const tree = await noteThenPhoto();
+
+      await tap(tree, 'piece-remove-0');
+
+      // Asked, not done.
+      expect(Alert.alert).toHaveBeenCalledTimes(1);
+      expect(lastAsked()[0]).toBe('Remove this Note?');
+      expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
+
+      await keepIt();
+
+      expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+      expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 2 pieces');
+      expect(listed('new')).toHaveLength(2);
+    });
+
+    /**
+     * The second body. This photograph is one this phone captured in this session: the store
+     * copied it into the slot's folder, so the store is the one that deletes it, and nothing
+     * brings it back. The fixture is checked against the store's own `ownsMedia` first, because
+     * a piece that failed that test would get this body for the wrong reason.
+     */
+    it('tells a captured photograph that its file goes with it, and cannot be undone', async () => {
+      const tree = await noteThenPhoto();
+
+      const photo = CaptureDraftStore.__slots().new.pieces[1];
+      expect(photo.kind).toBe('photo');
+      expect(theStoreOwnsTheFile('new', photo)).toBe(true);
+
+      await tap(tree, 'piece-remove-1');
+
+      const [title, body] = lastAsked();
+      expect(title).toBe('Remove this Photo?');
+      expect(body).toBe(CAPTURED_WITH_MEDIA);
+    });
+
+    /**
+     * The third. A note has no media, and promising to delete one is a promise about something
+     * that does not exist -- so this body says only that the piece goes.
+     */
+    it('tells a note only that it goes, because it has no media to delete', async () => {
+      const tree = await noteThenPhoto();
+
+      const note = CaptureDraftStore.__slots().new.pieces[0];
+      expect(note.kind).toBe('text');
+      expect(note.uri).toBeUndefined();
+      expect(theStoreOwnsTheFile('new', note)).toBe(false);
+
+      await tap(tree, 'piece-remove-0');
+
+      const [title, body] = lastAsked();
+      expect(title).toBe('Remove this Note?');
+      expect(body).toBe(A_NOTE);
+      // Not the captured-media body: there is no photo, video or recording to delete here.
+      expect(body).not.toMatch(/deleted from this phone/i);
+    });
+
+    /**
+     * US4-4's shape in a new memory: three pieces, the **second** removed, and the other two
+     * keeping their order. Nothing is renumbered or re-sorted -- the list order *is* the
+     * capture order (FR-005) -- and the unsaved memory on the phone no longer lists the piece
+     * either (FR-012), which is what stops it coming back on the next open.
+     */
+    it('removes the piece asked for, keeps the rest in order, and counts down', async () => {
+      const tree = await render();
+      await tap(tree, 'capture-type-button');
+      await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+      await tap(tree, 'voice-record-button');
+      await tap(tree, 'voice-stop-button');
+      await tap(tree, 'capture-camera-button');
+      await tap(tree, 'camera-photo-button');
+      await tap(tree, 'camera-done-button');
+
+      expect(kinds(tree)).toEqual(['Note', 'Voice clip', 'Photo']);
+      expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 3 pieces');
+      const [noteId, clipId, photoId] = listed('new');
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledWith('new', clipId);
+      // The clip is gone and the two around it have closed up in their own order.
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+      expect(textAt(tree, 'piece-detail-1')).toBe('Photo kept with this memory');
+      expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 2 pieces');
+      // And the unsaved memory kept on the phone agrees (FR-012).
+      expect(listed('new')).toEqual([noteId, photoId]);
+    });
+
+    /**
+     * FR-017 on this screen, and FR-036's one explicit failure: if the removal cannot be
+     * **recorded**, the row stays and the failure is said. A row that vanished from the screen
+     * but not from the draft would come back on the next open, so a refusal is the better of
+     * the two outcomes -- and a silent one is not on the list at all.
+     */
+    it('keeps the row and says so when the removal cannot be recorded', async () => {
+      const tree = await noteThenPhoto();
+      const before = listed('new');
+      CaptureDraftStore.removePiece.mockImplementation(async () => {
+        throw new Error('the draft could not be written');
+      });
+
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(textAt(tree, 'capture-capture-error')).toMatch(COULD_NOT_REMOVE);
+      // Still part of this memory, exactly as the message says: on screen, with its words, and
+      // in the draft.
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
+      expect(listed('new')).toEqual(before);
+    });
+
+    /**
+     * FR-007. Playing a clip would end a running recording -- it asks the one shared audio
+     * session for `allowsRecording: false` -- which is why the player's control is deadened
+     * while the bar is recording. Removing touches no audio session, so it is **allowed**: the
+     * control is live, the removal happens, and the recording is still running afterwards and
+     * still hands over its clip. That last part is the real evidence: a recorder that had been
+     * torn down would produce nothing.
+     */
+    it('allows a removal while a recording runs, and the recording carries on', async () => {
+      const tree = await noteThenPhoto();
+
+      await tap(tree, 'voice-record-button');
+      expect(has(tree, 'voice-recorder-bar')).toBe(true);
+      const control = pressable(tree, 'piece-remove-0');
+      expect(control).toBeDefined();
+      expect(control.props.disabled).toBeFalsy();
+
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(kinds(tree)).toEqual(['Photo']);
+      // The bar is still recording, in the same element it started in: a remount would have
+      // taken the recorder, the elapsed time and the audio session with it.
+      expect(has(tree, 'voice-recorder-bar')).toBe(true);
+      expect(pressable(tree, 'voice-stop-button')).toBeDefined();
+      expect(voiceBar.__mounts()).toBe(1);
+
+      // And the clip it was recording all along is kept.
+      await tap(tree, 'voice-stop-button');
+      expect(kinds(tree)).toEqual(['Photo', 'Voice clip']);
+      expect(CaptureDraftStore.addPiece.mock.calls.at(-1)[1].kind).toBe('audio');
+    });
+  });
+
+  // --------------------------------------------------------
+  // An edit
+  // --------------------------------------------------------
+
+  describe('an edit', () => {
+    /** A local instant, so the expected `HH:mm` is the same in every timezone. */
+    const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
+
+    const ENTRY_LOCAL_ID = 'entry-7';
+
+    /**
+     * A piece the memory already holds, as an uploaded item really is: the server's id and url,
+     * and the device's own copy. `pieceFromMediaItem` turns that into a piece carrying
+     * `remote` and a display-only `sourceUri` and **no `uri` of its own**, which is precisely
+     * the shape the first body is for -- the store copied no file, so there is none to delete.
+     */
+    const HELD_PHOTO = {
+      localId: 'm-photo',
+      id: 'media-1',
+      mediaId: 'media-1',
+      url: 'https://media.example/photo-1.jpg',
+      serverUrl: 'https://media.example/photo-1.jpg',
+      localPath: 'file:///documents/media/photo-1.jpg',
+      width: 4032,
+      height: 3024,
+      capturedAt: momentAt(8, 57),
+      location: ARCADE,
+    };
+
+    const HELD_CLIP = {
+      localId: 'm-clip',
+      id: 'media-2',
+      mediaId: 'media-2',
+      url: 'https://media.example/clip-1.m4a',
+      serverUrl: 'https://media.example/clip-1.m4a',
+      localPath: 'file:///documents/media/clip-1.m4a',
+      capturedAt: momentAt(9, 3),
+    };
+
+    /**
+     * The memory as SQLite has it: a photograph, a note in the middle of the memory rather than
+     * at the top of it, a voice clip, and the `location` block the old composer appends -- which
+     * is not a piece, is read by `JournalEntryDetail` as where the memory happened, and must
+     * still be there, in its place, after a piece has been removed.
+     */
+    const SAVED_BLOCKS = [
+      { id: 'b1', type: 'photos', media: [HELD_PHOTO], location: ARCADE },
+      {
+        id: 'b2',
+        type: 'text',
+        content: 'The arcade still smells the same.',
+        capturedAt: momentAt(9, 1),
+        location: ARCADE,
+      },
+      { id: 'b3', type: 'audio', media: [HELD_CLIP], duration: 31, waveform: [0.2, 0.5] },
+      { id: 'b4', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
+    ];
+
+    /** The memory's three rows, in its stored order. */
+    const SAVED_ROWS = [
+      'Photo | 08:57 | Old arcade, Bridge St',
+      'Note | 09:01 | Old arcade, Bridge St',
+      'Voice clip | 09:03 | No place',
+    ];
+
+    /** Edit, as the Journal opens it: the mode, the memory's local id, and nothing else. */
+    const openEdit = async () => {
+      JournalService.getEntry.mockImplementation(async (localId) =>
+        localId === ENTRY_LOCAL_ID
+          ? {
+            localId: ENTRY_LOCAL_ID,
+            journalId: 'journal-1',
+            userId: 'user-1',
+            date: '2026-11-08',
+            visibility: 'family_friends',
+            serverId: 'srv-7',
+            shareState: null,
+            syncStatus: 'synced',
+            contentBlocks: SAVED_BLOCKS.map((block) => ({ ...block })),
+          }
+          : null,
+      );
+      const tree = await render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+      expect(rows(tree)).toEqual(SAVED_ROWS);
+      return tree;
+    };
+
+    /** The memory's pieces as the screen read them, which is what `startEdit` is given. */
+    const piecesAsRead = () => CaptureDraftStore.startEdit.mock.calls[0][1];
+
+    /**
+     * The fixture guard the first body depends on, and the reason it is a case of its own: this
+     * memory's pieces must really be pieces **the store owns no file of**. A fixture that
+     * accidentally carried a `uri` inside the slot's folder would send the photograph down the
+     * second body's branch, and the case below would then pass or fail for a reason that has
+     * nothing to do with the screen.
+     */
+    it('holds pieces the store owns no file of -- remote, with no store-owned uri', async () => {
+      const tree = await openEdit();
+
+      // Something changed, so there is a draft to look inside.
+      await type(tree, 'piece-note-input-1', 'Changed, so there is a draft to look inside');
+      const [photo, note, clip] = CaptureDraftStore.__slots().edit.pieces;
+
+      expect(photo.remote).toEqual({ id: 'media-1', url: HELD_PHOTO.url });
+      expect(photo.uri).toBeUndefined();
+      expect(photo.sourceUri).toBe(HELD_PHOTO.localPath);
+      expect(theStoreOwnsTheFile('edit', photo)).toBe(false);
+
+      expect(clip.remote).toEqual({ id: 'media-2', url: HELD_CLIP.url });
+      expect(clip.uri).toBeUndefined();
+      expect(theStoreOwnsTheFile('edit', clip)).toBe(false);
+
+      // The note is a piece of the memory too, and carries no media of any kind.
+      expect(note.kind).toBe('text');
+      expect(note.uri).toBeUndefined();
+    });
+
+    it('asks before it removes anything, and a declined question starts no edit', async () => {
+      const tree = await openEdit();
+
+      await tap(tree, 'piece-remove-0');
+
+      expect(Alert.alert).toHaveBeenCalledTimes(1);
+      expect(lastAsked()[0]).toBe('Remove this Photo?');
+      expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
+
+      await keepIt();
+
+      expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
+      expect(rows(tree)).toEqual(SAVED_ROWS);
+      // A cancelled removal is not a change, so it must not be the thing that makes this edit
+      // unsaved: no draft, and no status line claiming one (FR-013).
+      expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+      expect(CaptureDraftStore.__slots().edit).toBeUndefined();
+      expect(has(tree, 'capture-status-line')).toBe(false);
+    });
+
+    /**
+     * The first body, and the precedence that makes it first: **origin wins over kind**. A
+     * photograph and a voice clip both *have* media, so the second body's words would fit them
+     * on kind alone -- and they would be false. The memory itself is unchanged until Save, and
+     * Discard changes would put the piece back, so "this cannot be undone" is not true of it,
+     * and nothing of it is deleted from the phone.
+     */
+    it('tells a piece the memory already holds that nothing is deleted, whatever its kind', async () => {
+      const tree = await openEdit();
+
+      await tap(tree, 'piece-remove-0');
+      expect(lastAsked()[0]).toBe('Remove this Photo?');
+      expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
+      // The sentence FR-036 forbids here, named so the case cannot pass on a body that says it.
+      expect(lastAsked()[1]).not.toMatch(/cannot be undone/i);
+      await keepIt();
+
+      // The same, for a clip -- the other kind that carries media the server holds.
+      await tap(tree, 'piece-remove-2');
+      expect(lastAsked()[0]).toBe('Remove this Voice clip?');
+      expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
+      expect(lastAsked()[1]).not.toMatch(/cannot be undone/i);
+    });
+
+    /**
+     * Why the wording cannot be decided from the mode, in one render: an edit holds a piece the
+     * memory already has **and** a piece this phone has just captured into it, and the two get
+     * different bodies. The captured one is checked against the store's own `ownsMedia` first,
+     * so the case is about the screen's choice rather than about the fixture.
+     */
+    it('decides the words from the piece, not the mode: one edit holds both kinds', async () => {
+      const tree = await openEdit();
+
+      await tap(tree, 'capture-camera-button');
+      await tap(tree, 'camera-photo-button');
+      await tap(tree, 'camera-done-button');
+      expect(rows(tree)).toHaveLength(4);
+
+      const captured = CaptureDraftStore.__slots().edit.pieces[3];
+      expect(captured.kind).toBe('photo');
+      expect(theStoreOwnsTheFile('edit', captured)).toBe(true);
+
+      // The photograph the memory already had: nothing is deleted from this phone.
+      await tap(tree, 'piece-remove-0');
+      expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
+      await keepIt();
+
+      // The photograph taken a moment ago, in the same edit: its file goes with it.
+      await tap(tree, 'piece-remove-3');
+      expect(lastAsked()[0]).toBe('Remove this Photo?');
+      expect(lastAsked()[1]).toBe(CAPTURED_WITH_MEDIA);
+    });
+
+    /**
+     * FR-013: a removal is a change like any other, so it is what starts the edit -- and it
+     * must start it **first**. `startEdit` replaces the slot with the memory's own pieces, so a
+     * removal that ran before it would be undone by it, and the piece would be back.
+     *
+     * The order is asserted twice over: by the slot, which is the behaviour (two pieces, not
+     * three), and by the call order, which says which call did it.
+     */
+    it('is the first change: it starts the edit before it removes, and says "Changes kept"', async () => {
+      const tree = await openEdit();
+      expect(has(tree, 'capture-status-line')).toBe(false);
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.startEdit.mock.calls[0][0]).toBe(ENTRY_LOCAL_ID);
+      // The edit starts as the memory is -- all three of its pieces -- and the removal is then
+      // made against that.
+      const [photo, note, clip] = piecesAsRead();
+      expect(piecesAsRead()).toHaveLength(3);
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledWith('edit', note.localId);
+      expect(CaptureDraftStore.startEdit.mock.invocationCallOrder[0]).toBeLessThan(
+        CaptureDraftStore.removePiece.mock.invocationCallOrder[0],
+      );
+      // Which is the same thing said as state: the unsaved edit lists two pieces, in order.
+      expect(listed('edit')).toEqual([photo.localId, clip.localId]);
+
+      expect(rows(tree)).toEqual([SAVED_ROWS[0], SAVED_ROWS[2]]);
+      expect(textAt(tree, 'capture-status-line')).toBe('Changes kept');
+      // Not the new-memory line: "Draft kept · 2 pieces" would say a new memory is being made.
+      expect(textAt(tree, 'capture-status-line')).not.toMatch(/draft kept/i);
+    });
+
+    /**
+     * US4-4's second half (FR-018, SC-005): saving after a removal updates **that same memory**
+     * with one fewer piece, keeps the audience it already had -- no sheet, which is the owner's
+     * round-2 decision -- and never makes a second memory. The `location` block, which is not a
+     * piece, is still there and still where the memory had it.
+     */
+    it('saves that same memory with the piece gone, its audience kept, and no second memory', async () => {
+      const tree = await openEdit();
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+      await tap(tree, 'capture-save-button');
+
+      // No sheet was asked for, and the memory keeps the audience it had.
+      expect(has(tree, 'audience-sheet')).toBe(false);
+      expect(updateEntry).toHaveBeenCalledTimes(1);
+      expect(updateEntry.mock.calls[0][0]).toBe(ENTRY_LOCAL_ID);
+      expect(updateEntry.mock.calls[0][1].visibility).toBe('family_friends');
+      // One memory, not two (FR-018).
+      expect(createEntry).not.toHaveBeenCalled();
+
+      // The note is out of the memory; the two remaining pieces, and the block that is not a
+      // piece, are where they were.
+      const sent = updateEntry.mock.calls[0][1].contentBlocks;
+      expect(sent.map((block) => block.type)).toEqual(['photos', 'audio', 'location']);
+      // The two pieces that stayed are the two that stayed -- not some other pair the same
+      // shape -- and the block that is not a piece came back exactly as it was stored.
+      expect(sent[0].media.map((item) => item.localId)).toEqual(['m-photo']);
+      expect(sent[1].media.map((item) => item.localId)).toEqual(['m-clip']);
+      expect(sent[2]).toEqual(SAVED_BLOCKS[3]);
+    });
+
+    it('keeps the row and says so when the removal cannot be recorded', async () => {
+      const tree = await openEdit();
+      CaptureDraftStore.removePiece.mockImplementation(async () => {
+        throw new Error('the draft could not be written');
+      });
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(textAt(tree, 'capture-capture-error')).toMatch(COULD_NOT_REMOVE);
+      // Still part of this memory: every piece on screen, in order, the note's words included.
+      expect(rows(tree)).toEqual(SAVED_ROWS);
+      expect(valueAt(tree, 'piece-note-input-1')).toBe('The arcade still smells the same.');
+      // And the memory itself was not touched either.
+      expect(updateEntry).not.toHaveBeenCalled();
+    });
   });
 });
