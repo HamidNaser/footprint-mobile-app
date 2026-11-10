@@ -19,7 +19,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
-import { AudioPlayer } from '../media/AudioPlayer';
+// 013 T054: the voice pill's play control, which `media/AudioPlayer` never made work
+// (FR-020). That file stays for `InterviewModeScreen`, which still uses it.
+import VoicePlayer from './VoicePlayer';
 import { EngagementSection } from './EngagementSection';
 import DerivativeImage from '../media/DerivativeImage';
 import { FailedSlot } from '../media/FailedTile';
@@ -482,9 +484,14 @@ const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLay
 });
 
 /**
- * Audio block - displays audio player
+ * Audio block - the voice pill, with a play control that works (013 T054, FR-020).
+ *
+ * The pill itself is unchanged: the mic badge, then the control (FR-021 allows the card only
+ * the additions this feature lists, and a working play control is one of them). The separate
+ * duration text is gone because `VoicePlayer` shows the clip's position *and* its length, so
+ * the pill was about to say the length twice.
  */
-const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure }) => {
+const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure, testID }) => {
   if (!audio) return null;
 
   return (
@@ -500,18 +507,13 @@ const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure })
         <View style={styles.audioIcon}>
           <Ionicons name="mic" size={18} color="#FFF" />
         </View>
-        <AudioPlayer
+        <VoicePlayer
+          testID={testID}
           uri={audio.localPath || audio.serverUrl}
-          waveformData={audio.waveform}
-          primaryColor={primaryColor}
-          compact
+          duration={audio.duration}
+          color={primaryColor}
           style={styles.audioPlayer}
         />
-        {audio.duration && (
-          <Text style={styles.audioDuration}>
-            {Math.floor(audio.duration / 60)}:{String(Math.floor(audio.duration % 60)).padStart(2, '0')}
-          </Text>
-        )}
       </View>
     </PieceSlot>
   );
@@ -799,6 +801,8 @@ export const JournalEntryCard = memo(({
               highlighted={isLit(badge)}
               // A voice clip's own view is its block, so it reports straight to the card.
               onMeasure={onPieceLayout}
+              // Two clips in one memory are two players, so each needs its own testID.
+              testID={`memory-voice-player-${index}-${audioIndex}`}
             />
           );
         });
@@ -1216,11 +1220,6 @@ const styles = StyleSheet.create({
   },
   audioPlayer: {
     flex: 1,
-  },
-  audioDuration: {
-    fontSize: 12,
-    color: '#8E8E93',
-    marginLeft: 8,
   },
 
   // Footer

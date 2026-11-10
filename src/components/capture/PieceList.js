@@ -27,12 +27,16 @@
  *    a piece (so it cannot be lost silently), and the least this list can do is show that
  *    there is something there rather than render an empty space.
  *
- * T054 adds the voice player: the audio row's detail line below is where it goes, replacing
- * the duration text with a play/pause control (FR-020). Nothing else about the row changes.
+ * T054 adds the voice player: the audio row's detail line is where it goes, replacing the
+ * duration text with a play/pause control (FR-020). Nothing else about the row changes -- the
+ * row's kind, time and place are the meta line above it, so the control carries only the
+ * clip's position and length. It is the same `VoicePlayer` the Journal card's voice pill uses,
+ * which is also what makes "one clip plays at a time" hold across the two screens.
  */
 
 import React, { useEffect, useRef } from 'react';
 import { View, Text, TextInput, StyleSheet } from 'react-native';
+import VoicePlayer from '../journal/VoicePlayer';
 
 /** What each kind is called on a row. The label is the contract; the colour is cosmetic. */
 const KINDS = {
@@ -71,8 +75,8 @@ const formatDuration = (seconds) => {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
 
+/** Everything but a note and a voice clip: those two have a control of their own. */
 const detailFor = (piece) => {
-  if (piece.kind === 'audio') return `Voice · ${formatDuration(piece.duration)}`;
   if (piece.kind === 'video') return `Video · ${formatDuration(piece.duration)}`;
   if (piece.kind === 'photo') return 'Photo kept with this memory';
   return 'Kept with this memory';
@@ -124,8 +128,15 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce }) {
           placeholderTextColor="#8E8E93"
           multiline
         />
+      ) : piece.kind === 'audio' ? (
+        // The clip plays here, on the row, rather than only once the memory is saved (FR-020).
+        <VoicePlayer
+          testID={`piece-player-${index}`}
+          uri={piece.uri}
+          duration={piece.duration}
+          style={styles.player}
+        />
       ) : (
-        // T054: the audio row's play/pause control replaces this line (FR-020).
         <Text testID={`piece-detail-${index}`} style={styles.detail}>
           {detailFor(piece)}
         </Text>
@@ -198,5 +209,8 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontSize: 15,
     color: '#1C1C1E',
+  },
+  player: {
+    marginTop: 6,
   },
 });
