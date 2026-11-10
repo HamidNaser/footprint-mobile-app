@@ -36,10 +36,32 @@
  *   - **`SaveAudienceSheet`** is presentational. FR-010's "an edit saves straight away,
  *     keeping its audience, no sheet" is this screen's rule, not the sheet's.
  *
- * **Edit mode is T057/T058.** The slot, the title, the status line and `performSave` are
- * already branched on it so that work is an extension rather than a rewrite, and nothing
- * here opens the audience sheet for an edit -- FR-010 forbids it there. Nothing navigates to
- * this screen with `mode: 'edit'` until T060.
+ * **Edit mode is T058**, and it is User Story 4: Edit opens the memory here and Save updates
+ * that same memory, never a second one (FR-018, SC-005). It is the same screen with four
+ * rules of its own, and each of them is a way of losing something if it is got wrong:
+ *
+ *   - **A piece the server already holds comes back as `remote: {id, url}`, with no local
+ *     path of any kind.** Not an optimisation: a second upload takes a new media id, and the
+ *     server carries a piece's capture moment across an edit by matching first on that id and
+ *     then on its url -- so re-uploading a photograph nobody touched loses the moment and the
+ *     place it was taken (FR-019, research R3, R7). A `localPath` is what
+ *     `JournalService._queueMediaBlockForUpload` reads, and `buildContentBlocks` turns a
+ *     piece's `uri` into exactly that, so neither may be set on a remote piece.
+ *   - **The `edit` slot is written on the first change and not before** (FR-013, round-2 M5).
+ *     Opening Edit and closing again leaves *nothing*: no draft, and so nothing on the
+ *     memory's card claiming an unfinished edit nobody started. `startEdit` is what begins it,
+ *     and it is given the memory's own pieces, so the draft starts as the memory is.
+ *   - **Save saves at once, keeping the memory's audience, with no sheet** (FR-010, the
+ *     owner's round-2 answer). The sheet is for choosing an audience a memory does not have
+ *     yet; asking again about one that has one is a question with a wrong answer available.
+ *   - **Everything that is not a piece is carried through untouched.** A memory can hold a
+ *     `location` block -- `entry.location` written out again by the old composer -- which is
+ *     not a captured piece and which `JournalEntryDetail` reads as where the memory happened
+ *     (`:239`). Rebuilding the memory from its pieces alone would quietly drop it, so blocks
+ *     this screen does not turn into pieces are kept and re-emitted after them.
+ *
+ * Leaving is still leaving (Close keeps the edit), and Discard changes throws away the changes
+ * and not the memory (FR-015).
  *
  * **Durability is T040**, and it is User Story 2: whatever happens mid-capture, what was
  * captured is still here afterwards, private, until the person saves or discards it.
@@ -89,6 +111,7 @@ import CaptureDraftStore, {
   draftIdentity,
 } from '../../services/CaptureDraftStore';
 import CaptureLocation from '../../services/CaptureLocation';
+import { JournalService } from '../../services/JournalService';
 import { SettingsService } from '../../services/SettingsService';
 import { useAuth } from '../../context/AuthContext';
 import { useJournal } from '../../hooks/useJournal';
@@ -171,8 +194,146 @@ const SAVED_MESSAGE =
   'Saved — your memory is on this phone. You can close this screen; there’s no need to ' +
   'save again.';
 
+/**
+ * The memory being edited could not be read at all.
+ *
+ * Said rather than left blank, because an empty capture screen under the title "Edit memory"
+ * is indistinguishable from a memory whose pieces have vanished -- and it would invite a Save
+ * that replaced the memory with nothing. Nothing has been written, so nothing has been lost,
+ * and the sentence says so.
+ */
+const EDIT_LOAD_FAILED_MESSAGE =
+  'Couldn’t open this memory to edit it. Nothing has been changed — close this screen and ' +
+  'try again.';
+
 /** "Draft kept · n pieces" (UI contract), in English for one. */
 const statusLineFor = (count) => `Draft kept · ${count} ${count === 1 ? 'piece' : 'pieces'}`;
+
+/** "Changes kept" (UI contract): an edit, once anything in it has changed. */
+const EDIT_STATUS_LINE = 'Changes kept';
+
+/**
+ * The block types that carry media, and the kind each of their media items is.
+ *
+ * A `Map` rather than an object literal for the reason `memoryPieces.js` gives: a plain
+ * `KINDS[block.type]` is a prototype-chain lookup, so a block whose type is `'constructor'`
+ * would resolve to a truthy *function*, be read as a media block, and travel on as the
+ * piece's kind.
+ */
+const MEDIA_BLOCK_KINDS = new Map([
+  ['photos', 'photo'],
+  ['video', 'video'],
+  ['audio', 'audio'],
+]);
+
+/**
+ * One piece from one media item of one block (FR-018, FR-019).
+ *
+ * **The server's copy comes back by `id` and `url`, and by nothing else.** An item the server
+ * holds -- it has a media id, or an address to fetch it from -- gets `remote: {id, url}` and
+ * **no** `uri`: `buildContentBlocks` writes a piece's `uri` out as `localPath`, which is
+ * exactly what `JournalService._queueMediaBlockForUpload` picks up, so a `uri` here would
+ * upload the photograph again. A second upload takes a new media id, and the server carries a
+ * piece's capture moment across an edit by matching on that id and then on its url, so the
+ * moment and the place of a piece nobody touched would be lost (research R3, R7).
+ *
+ * An item the server does **not** hold yet keeps its local path, for the opposite reason: it
+ * still has to be uploaded, and dropping the path would strand it on this phone for good.
+ *
+ * `location` falls back to the block's, as `memoryPieces.expand` does: a photos or video block
+ * written before this feature carries the place on the block alone, and reading the item only
+ * would turn a piece that has a place into one that has none.
+ */
+function pieceFromMediaItem(kind, block, item) {
+  const heldByTheServer = !!(item.id || item.mediaId || item.url || item.serverUrl);
+
+  return {
+    localId: item.localId ?? uuidv4(),
+    kind,
+    // Contract C3: a media item's time is its own, and a block with media carries none.
+    capturedAt: item.capturedAt ?? null,
+    location: item.location ?? block.location ?? null,
+    ...(item.width != null ? { width: item.width } : {}),
+    ...(item.height != null ? { height: item.height } : {}),
+    // A clip's length and levels sit on the block (`journalBlocks.js`); a video's are on the
+    // item, with the block as the fallback the old composer's shape needs.
+    ...(kind === 'audio'
+      ? { duration: block.duration ?? item.duration, waveform: block.waveform }
+      : {}),
+    ...(kind === 'video' ? { duration: item.duration ?? block.duration } : {}),
+    ...(heldByTheServer
+      ? { remote: { id: item.id ?? item.mediaId ?? null, url: item.url ?? item.serverUrl ?? null } }
+      : { uri: item.localPath ?? item.uri }),
+  };
+}
+
+/**
+ * A saved memory, as the pieces this screen edits plus the blocks that are not pieces.
+ *
+ * **Both halves are returned, and both are needed.** A `location` block is `entry.location`
+ * written out again: the card draws nothing for it, it is not something anybody captured, and
+ * `memoryPieces` deliberately leaves it out of the numbering -- but `JournalEntryDetail` reads
+ * it as where the memory happened (`:239`), so rebuilding the memory from its pieces alone
+ * would quietly delete the only record of that for a memory whose `location` column is empty.
+ * The same goes for a block of a type this app has never heard of, and for a media block whose
+ * `media` is not a usable list: part of somebody's memory, and not this screen's to drop.
+ *
+ * @param {object} entry the saved memory, as `JournalRepository.getByLocalId` hands it back
+ * @returns {{pieces: object[], carried: object[]}} the pieces in stored order, and the blocks
+ *   that are not pieces, in stored order
+ */
+function piecesOfEntry(entry) {
+  const pieces = [];
+  const carried = [];
+
+  (Array.isArray(entry?.contentBlocks) ? entry.contentBlocks : []).forEach((block) => {
+    if (!block) return;
+
+    if (block.type === 'text') {
+      pieces.push({
+        // A text block carries no `localId` of its own (`journalBlocks.js` emits none), and
+        // every reader here needs one -- the list's key, `updateText`, `draftIdentity`. It is
+        // never sent anywhere: the text builder does not write it out.
+        localId: block.localId ?? uuidv4(),
+        kind: 'text',
+        content: block.content ?? '',
+        // A block with no media is where its own capture time is a recorded fact (contract C3).
+        capturedAt: block.capturedAt ?? null,
+        location: block.location ?? null,
+      });
+      return;
+    }
+
+    const kind = MEDIA_BLOCK_KINDS.get(block.type);
+    const media = kind && Array.isArray(block.media) ? block.media.filter(Boolean) : [];
+
+    if (!media.length) {
+      carried.push(block);
+      return;
+    }
+
+    media.forEach((item) => pieces.push(pieceFromMediaItem(kind, block, item)));
+  });
+
+  return { pieces, carried };
+}
+
+/**
+ * Put a stored list of pieces *underneath* whatever has been captured since it was asked for,
+ * never over the top of it.
+ *
+ * Both mounts read from somewhere slow -- the draft store's table, or the memory's row -- and
+ * every capture button is live for the whole of that read. The store appends a capture to the
+ * draft it finds, so the slot's order is the stored pieces and then the new one; a plain
+ * replacement would take that piece off the screen while leaving it in the slot, where Save
+ * would build the memory without it and then let the whole slot go, deleting it (fix round 1).
+ */
+function restoreUnderCaptures(setPieces, stored) {
+  setPieces((previous) => {
+    const restored = new Set(stored.map((piece) => piece.localId));
+    return [...stored, ...previous.filter((piece) => !restored.has(piece.localId))];
+  });
+}
 
 /**
  * Which draft each slot was left holding by a save that worked: slot → `draftIdentity` of the
@@ -212,11 +373,12 @@ const draftsLeftAfterSave = new Map();
 
 export default function CaptureScreen({ route, navigation }) {
   const isEditMode = route?.params?.mode === 'edit';
+  const entryLocalId = route?.params?.entryLocalId ?? null;
   const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
 
   const { user } = useAuth();
   const [journalId, setJournalId] = useState(null);
-  const { createEntry } = useJournal(journalId, { autoFetch: false });
+  const { createEntry, updateEntry } = useJournal(journalId, { autoFetch: false });
 
   /** The memory being captured, in capture order. The array *is* the order (FR-005). */
   const [pieces, setPieces] = useState([]);
@@ -237,8 +399,42 @@ export default function CaptureScreen({ route, navigation }) {
   const [permissionNotice, setPermissionNotice] = useState(null);
   /** Which note should take the keyboard, and a nonce so the same one can be asked twice. */
   const [focusRequest, setFocusRequest] = useState(null);
+  /**
+   * Whether this edit has become an unsaved edit -- which is what the status line says, and
+   * which is true only once a change has reached the draft store (FR-013). Set when the slot
+   * is written, not when the keystroke arrives: "Changes kept" is a claim about the phone.
+   */
+  const [hasEditChanges, setHasEditChanges] = useState(false);
 
   const mountedRef = useRef(true);
+  /**
+   * The memory being edited, as a promise, so that **the first change can wait for it**.
+   *
+   * `startEdit` replaces the slot with the pieces it is given, and every capture button is
+   * live while the memory is still being read. A Type tap inside that window, answered with
+   * the pieces as they stood (none), would write an edit draft holding the new note and not
+   * one of the memory's own -- and reopening that draft later would find every existing piece
+   * missing from it. A promise rather than state because what reads it is an event handler
+   * that has to wait, not a render.
+   */
+  const savedPiecesRef = useRef(null);
+  /**
+   * The memory's blocks that are **not** pieces, re-emitted after the pieces on save, so an
+   * edit cannot quietly drop part of the memory. See `piecesOfEntry`. Always empty for a new
+   * memory, which has nothing to carry.
+   */
+  const carriedBlocksRef = useRef([]);
+  /** The audience the memory already has, which an edit keeps (FR-010). */
+  const entryVisibilityRef = useRef(undefined);
+  /**
+   * Whether the `edit` slot exists and is in the draft store's hand. Until it is, `updateText`
+   * has nothing to write into -- it is synchronous and throws on a cold cache, by design -- so
+   * a keystroke has to queue behind `startEdit` rather than be thrown away for arriving half a
+   * tick early.
+   */
+  const editDraftLiveRef = useRef(false);
+  /** The one `startEdit` for this session, so a second change does not begin a second edit. */
+  const editStartRef = useRef(null);
   /** A note being added, as a second tap can see it before any render has happened. */
   const typeInFlightRef = useRef(false);
   /**
@@ -346,7 +542,7 @@ export default function CaptureScreen({ route, navigation }) {
    *
    * Edit mode does **not** load here: an edit's pieces come from the memory itself, and its
    * slot is written only on the first change, so that opening Edit and closing unchanged
-   * leaves nothing behind (FR-013). That is T058.
+   * leaves nothing behind (FR-013). The effect below is its mount.
    */
   useEffect(() => {
     if (isEditMode) return undefined;
@@ -417,22 +613,123 @@ export default function CaptureScreen({ route, navigation }) {
       }
 
       // Restored *underneath* anything captured while the read was in flight, never over the
-      // top of it. The store appends a capture to the draft it finds, so slot order is the
-      // stored pieces and then the new one -- and a plain replacement would take that piece
-      // off the screen while leaving it in the slot, where Save would build the memory without
-      // it and then let the whole slot go, deleting it (fix round 1).
-      setPieces((previous) => {
-        const restored = new Set(draft.pieces.map((piece) => piece.localId));
-        return [
-          ...draft.pieces,
-          ...previous.filter((piece) => !restored.has(piece.localId)),
-        ];
-      });
+      // top of it -- see `restoreUnderCaptures`.
+      restoreUnderCaptures(setPieces, draft.pieces);
     })();
     return () => {
       cancelled = true;
     };
   }, [isEditMode, slot]);
+
+  /**
+   * Edit mode's mount: the memory, and the unsaved edit of it if there is one (FR-018).
+   *
+   * Two reads, in this order, and both matter:
+   *
+   *   1. **`getEditFor`**, which is also the lifecycle's own cleanup: the store discards an
+   *      `edit` slot whose memory has gone, folder and all, on its way past (FR-013,
+   *      round-2 L2). An unsaved edit of a *different* memory is not this one's and is left
+   *      exactly where it is -- asking whether to discard it is the Journal's, not this
+   *      screen's (T060) -- and the first change here takes it away, which is `startEdit`'s
+   *      documented behaviour.
+   *   2. **`JournalService.getEntry`**, for the pieces, for the audience Save keeps, and for
+   *      the blocks that are not pieces.
+   *
+   * **Nothing is written.** No `load`, no `startEdit`: opening Edit and closing again leaves
+   * no `edit` slot at all (round-2 M5). The first change is what begins one.
+   */
+  useEffect(() => {
+    if (!isEditMode) return undefined;
+
+    let cancelled = false;
+
+    const reading = (async () => {
+      const existing = await CaptureDraftStore.getEditFor(entryLocalId);
+      const entry = await JournalService.getEntry(entryLocalId);
+      if (!entry) {
+        throw new Error(`[CaptureScreen] there is no memory ${entryLocalId} to edit`);
+      }
+      return { entry, existing, ...piecesOfEntry(entry) };
+    })();
+
+    // The memory's own pieces, for the first change to be answered with (see
+    // `savedPiecesRef`). The `catch` is not the error handling -- that is below, on the read
+    // itself -- it is there so a failed read is not also an unhandled rejection.
+    const savedPieces = reading.then(({ pieces: saved }) => saved);
+    savedPieces.catch(() => {});
+    savedPiecesRef.current = savedPieces;
+
+    (async () => {
+      let memory;
+      try {
+        memory = await reading;
+      } catch (error) {
+        console.warn('[CaptureScreen] the memory being edited could not be read', error);
+        // Nothing was written and nothing was changed, and the banner says exactly that.
+        // `pieces` stays empty, so Save is down and cannot replace the memory with nothing.
+        if (!cancelled && mountedRef.current) setCaptureError(EDIT_LOAD_FAILED_MESSAGE);
+        return;
+      }
+      if (cancelled) return;
+
+      entryVisibilityRef.current = memory.entry.visibility;
+      carriedBlocksRef.current = memory.carried;
+
+      if (memory.existing?.pieces?.length) {
+        // An unsaved edit of this very memory (US2-7): it is the newer of the two, and the
+        // slot is already in the store's hand, so there is nothing to start.
+        editDraftLiveRef.current = true;
+        editStartRef.current = Promise.resolve();
+        setHasEditChanges(true);
+        restoreUnderCaptures(setPieces, memory.existing.pieces);
+        return;
+      }
+
+      restoreUnderCaptures(setPieces, memory.pieces);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entryLocalId, isEditMode]);
+
+  /**
+   * Begin keeping this edit on the phone, once, on the first change (FR-013).
+   *
+   * Everything about it is shaped by one thing: `startEdit` *replaces* the slot's pieces with
+   * what it is given, so it must be given the memory's own pieces, and it must therefore wait
+   * for them. See `savedPiecesRef`.
+   *
+   * @returns {Promise<void>} resolved once the slot exists, rejected if it could not be made
+   */
+  const startEditDraft = useCallback(() => {
+    if (!editStartRef.current) {
+      const starting = (async () => {
+        const saved = await savedPiecesRef.current;
+        if (!Array.isArray(saved)) {
+          // Refused rather than started empty. `startEdit` replaces the slot with what it is
+          // given, so starting one here without the memory's pieces would write an edit that
+          // is missing every piece the memory has -- a loss, where a refusal is only a change
+          // that was not kept, and said so.
+          throw new Error(
+            '[CaptureScreen] the memory being edited has not been read yet, so there is ' +
+              'nothing to start this edit from',
+          );
+        }
+        await CaptureDraftStore.startEdit(entryLocalId, saved);
+        // Before anything else is told: from here on a keystroke can be written straight.
+        editDraftLiveRef.current = true;
+        if (mountedRef.current) setHasEditChanges(true);
+      })();
+      editStartRef.current = starting;
+      // Whoever asked for the change reports the failure -- it is their message to show. This
+      // only stops an unhandled rejection, and lets the next change try again.
+      starting.catch(() => {
+        if (editStartRef.current === starting) editStartRef.current = null;
+      });
+    }
+    return editStartRef.current;
+  }, [entryLocalId]);
 
   // ============================================================
   // Capturing
@@ -460,6 +757,12 @@ export default function CaptureScreen({ route, navigation }) {
       // previous save wrote (see `draftsLeftAfterSave`).
       capturedSinceMountRef.current = true;
       try {
+        // A new piece is a change, and an edit becomes an unsaved edit on its first change and
+        // not before (FR-013). Before the stamp rather than after it: `withLocation` waits on
+        // a fix, up to four seconds on a cold GPS, and the slot has to exist before `addPiece`
+        // can put anything in it either way.
+        if (isEditMode) await startEditDraft();
+
         const stamped = await CaptureLocation.withLocation(piece);
         const stored = await CaptureDraftStore.addPiece(slot, stamped);
         if (!mountedRef.current) return null;
@@ -481,7 +784,7 @@ export default function CaptureScreen({ route, navigation }) {
         capturesInFlightRef.current -= 1;
       }
     },
-    [slot],
+    [isEditMode, slot, startEditDraft],
   );
 
   /**
@@ -529,6 +832,24 @@ export default function CaptureScreen({ route, navigation }) {
     }
   }, [addCapturedPiece, pieces]);
 
+  /**
+   * Write some typed words into the slot the store is holding.
+   *
+   * Never allowed to throw past here: `updateText`'s refusal is the one outcome FR-012
+   * forbids being quiet about, and the message for it is the same wherever it comes from.
+   */
+  const keepTypedText = useCallback(
+    (localId, content) => {
+      try {
+        CaptureDraftStore.updateText(slot, localId, content);
+      } catch (error) {
+        console.error('[CaptureScreen] the typed text reached no draft', error);
+        if (mountedRef.current) setCaptureError(TEXT_NOT_KEPT_MESSAGE);
+      }
+    },
+    [slot],
+  );
+
   /** A keystroke. Synchronous all the way down: typing never waits for a copy. */
   const handleChangeText = useCallback(
     (piece, content) => {
@@ -543,14 +864,27 @@ export default function CaptureScreen({ route, navigation }) {
         ),
       );
 
-      try {
-        CaptureDraftStore.updateText(slot, piece.localId, content);
-      } catch (error) {
-        console.error('[CaptureScreen] the typed text reached no draft', error);
-        setCaptureError(TEXT_NOT_KEPT_MESSAGE);
+      if (isEditMode && !editDraftLiveRef.current) {
+        // The first keystroke of an edit is what makes it an unsaved edit (FR-013), and there
+        // is no slot to write into until `startEdit` has made one. So this one keystroke -- and
+        // any that land while that is in flight -- queue behind it, in the order they arrived,
+        // rather than being dropped for being half a tick early. The slot is written with the
+        // memory's pieces and the words are applied over the top, which is why both calls
+        // happen and in that order.
+        startEditDraft().then(
+          () => keepTypedText(piece.localId, content),
+          (error) => {
+            console.error('[CaptureScreen] the edit could not be started, so the typed text ' +
+              'reached no draft', error);
+            if (mountedRef.current) setCaptureError(TEXT_NOT_KEPT_MESSAGE);
+          },
+        );
+        return;
       }
+
+      keepTypedText(piece.localId, content);
     },
-    [slot],
+    [isEditMode, keepTypedText, slot, startEditDraft],
   );
 
   /**
@@ -714,14 +1048,26 @@ export default function CaptureScreen({ route, navigation }) {
       setIsSaving(true);
 
       try {
-        const contentBlocks = buildContentBlocks(pieces);
-        await createEntry({
-          userId: user?.id || 'local_user',
-          contentBlocks,
-          visibility,
-          // No title, and no other field: FR-010 asks for the audience and nothing else. The
-          // memory's date is left to default, as every memory saved on this phone does.
-        });
+        // Everything that is not a piece, after the pieces: a `location` block is part of the
+        // memory and is not this screen's to drop (see `piecesOfEntry`). Empty for a new one.
+        const contentBlocks = [...buildContentBlocks(pieces), ...carriedBlocksRef.current];
+
+        if (isEditMode) {
+          // The same memory, updated (FR-018, SC-005) -- and **only** its content and the
+          // audience it already had. Nothing here touches its server id or its `shareState`,
+          // so a memory whose share the server refused stays "Not shared" and queues no
+          // orphan UPDATE: with no server id the repository queues nothing, and the pending
+          // CREATE or a later re-share carries this content (research R15, round-3 L4).
+          await updateEntry(entryLocalId, { contentBlocks, visibility });
+        } else {
+          await createEntry({
+            userId: user?.id || 'local_user',
+            contentBlocks,
+            visibility,
+            // No title, and no other field: FR-010 asks for the audience and nothing else. The
+            // memory's date is left to default, as every memory saved on this phone does.
+          });
+        }
       } catch (error) {
         console.error('[CaptureScreen] the memory could not be saved', error);
         // Save is handed back here and only here: nothing was written, so a second tap -- or
@@ -737,8 +1083,13 @@ export default function CaptureScreen({ route, navigation }) {
       // The memory is on the phone. Nothing below may claim otherwise, re-arm Save, or offer
       // Try again -- a retry from here would write the memory a second time.
       try {
-        await CaptureDraftStore.clearAfterSave(slot);
-        draftsLeftAfterSave.delete(slot);
+        // An edit that changed nothing has no slot, and letting go of a slot this session
+        // never wrote would mean deleting whatever is in it -- which, if it is an unsaved edit
+        // of another memory, is somebody's unsaved work.
+        if (!isEditMode || editDraftLiveRef.current) {
+          await CaptureDraftStore.clearAfterSave(slot);
+          draftsLeftAfterSave.delete(slot);
+        }
       } catch (error) {
         console.warn(
           '[CaptureScreen] the memory saved, but the unsaved copy could not be let go',
@@ -760,7 +1111,7 @@ export default function CaptureScreen({ route, navigation }) {
         if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
       }
     },
-    [createEntry, navigation, pieces, slot, user?.id],
+    [createEntry, entryLocalId, isEditMode, navigation, pieces, slot, updateEntry, user?.id],
   );
 
   /**
@@ -782,12 +1133,14 @@ export default function CaptureScreen({ route, navigation }) {
   /**
    * FR-010: a new memory asks who can see it, in one sheet, and nothing else.
    *
-   * An edit saves straight away with the memory's existing audience and **no sheet** -- that
-   * is T058's, and nothing navigates here with `mode: 'edit'` until T060, so Save on an edit
-   * deliberately does nothing yet rather than opening a sheet FR-010 forbids there.
+   * **An edit saves straight away, keeping the memory's audience, with no sheet** (the owner's
+   * round-2 answer). The sheet exists to choose an audience for a memory that does not have
+   * one; a memory being edited has one already, and asking again is a question with a wrong
+   * answer available -- including a dismissal, which saves nothing and would make Save on an
+   * edit a button that sometimes does nothing.
    */
   const handleSavePress = useCallback(() => {
-    if (pieces.length === 0 || isSaving || isEditMode) return;
+    if (pieces.length === 0 || isSaving) return;
     setIsMenuOpen(false);
 
     const blocked = saveBlockedMessage();
@@ -797,8 +1150,14 @@ export default function CaptureScreen({ route, navigation }) {
     }
 
     setSaveError(null);
+
+    if (isEditMode) {
+      void performSave(entryVisibilityRef.current);
+      return;
+    }
+
     setIsAudienceSheetOpen(true);
-  }, [isEditMode, isSaving, pieces.length, saveBlockedMessage]);
+  }, [isEditMode, isSaving, performSave, pieces.length, saveBlockedMessage]);
 
   /** FR-011: a choice saves; a dismissal saves nothing and defaults to nothing. */
   const handleAudienceChosen = useCallback(
@@ -822,10 +1181,13 @@ export default function CaptureScreen({ route, navigation }) {
    *
    * It does not ask for the audience again: the person has already answered that about this
    * memory, and asking twice would also let a dismissal strand a memory they had already said
-   * who could see.
+   * who could see. On an edit there was never a question -- the memory's own audience is what
+   * the first attempt used and what the retry uses, so the gate is the mode and not an answer
+   * that was never given.
    */
   const handleRetrySave = useCallback(() => {
-    if (isSaving || chosenAudience == null) return;
+    if (isSaving) return;
+    if (!isEditMode && chosenAudience == null) return;
 
     const blocked = saveBlockedMessage();
     if (blocked) {
@@ -834,8 +1196,8 @@ export default function CaptureScreen({ route, navigation }) {
     }
 
     setSaveError(null);
-    void performSave(chosenAudience);
-  }, [chosenAudience, isSaving, performSave, saveBlockedMessage]);
+    void performSave(isEditMode ? entryVisibilityRef.current : chosenAudience);
+  }, [chosenAudience, isEditMode, isSaving, performSave, saveBlockedMessage]);
 
   const handleAudienceDismissed = useCallback(() => {
     setIsAudienceSheetOpen(false);
@@ -908,9 +1270,14 @@ export default function CaptureScreen({ route, navigation }) {
           </View>
         )}
 
-        {pieces.length > 0 && (
+        {/*
+          The status line is the screen's claim that what is on it is being kept. On an edit
+          that is true only once something has changed -- before then there is no draft at all,
+          and saying "Changes kept" would promise an unsaved edit that does not exist.
+        */}
+        {pieces.length > 0 && (!isEditMode || hasEditChanges) && (
           <Text testID="capture-status-line" style={styles.status}>
-            {statusLineFor(pieces.length)}
+            {isEditMode ? EDIT_STATUS_LINE : statusLineFor(pieces.length)}
           </Text>
         )}
 

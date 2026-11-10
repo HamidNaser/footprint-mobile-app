@@ -103,6 +103,23 @@ jest.mock('../../../services/CaptureDraftStore', () => {
   const stored = (slot, piece) =>
     piece?.uri ? { ...piece, uri: `${slotDirectory(slot)}${piece.localId}` } : piece;
 
+  /**
+   * What this stand-in is actually holding, slot by slot: the drafts, not the calls (T057).
+   *
+   * Half of the edit-mode contract is a **negative** -- nothing is written to the draft store
+   * until the first change, and opening Edit and closing it again must leave no `edit` slot at
+   * all (round-2 M5). `expect(startEdit).not.toHaveBeenCalled()` would prove only that one
+   * function on one mock was not called, and would go on passing if the screen wrote the slot
+   * through some other door. So the stand-in keeps the state the real store keeps, and the
+   * cases below ask it what is in the slot rather than asking a spy what it was asked.
+   *
+   * It is deliberately only as faithful as the assertions need: one draft per slot, pieces
+   * appended by `addPiece`, text replaced by `updateText`, the slot replaced by `startEdit` and
+   * removed by `discard` and `clearAfterSave`. The real store's locking, debouncing, media
+   * copying and cold-cache throw are its own file's tests.
+   */
+  const slots = new Map();
+
   const store = {
     DraftSlot: { NEW: 'new', EDIT: 'edit' },
     TEXT_DEBOUNCE_MS: 500,
@@ -116,19 +133,81 @@ jest.mock('../../../services/CaptureDraftStore', () => {
       pieces.length && pieces.every((piece) => piece?.localId)
         ? pieces.map((piece) => piece.localId).join('|')
         : null,
-    load: jest.fn(async () => null),
-    addPiece: jest.fn(async (slot, piece) => stored(slot, piece)),
-    removePiece: jest.fn(async () => null),
-    updateText: jest.fn(() => null),
-    flush: jest.fn(async () => {}),
-    startEdit: jest.fn(async () => null),
-    getEditFor: jest.fn(async () => null),
-    discard: jest.fn(async () => {}),
+    load: jest.fn(),
+    addPiece: jest.fn(),
+    removePiece: jest.fn(),
+    updateText: jest.fn(),
+    flush: jest.fn(),
+    startEdit: jest.fn(),
+    getEditFor: jest.fn(),
+    discard: jest.fn(),
+    clearAfterSave: jest.fn(),
+    __stored: stored,
+    /** Every slot the store is holding a draft for, as a plain object. */
+    __slots: () => Object.fromEntries(slots),
+    /** An unsaved edit of `entryLocalId` already in the slot, as a previous session left it. */
+    __seedEdit: (entryLocalId, pieces) => {
+      slots.set('edit', {
+        id: 'edit',
+        entryLocalId,
+        pieces: pieces.map((piece) => ({ ...piece })),
+      });
+    },
+    __reset: () => {
+      slots.clear();
+      install();
+    },
+  };
+
+  /** The default behaviour of every method, as `beforeEach` re-installs it. */
+  const install = () => {
+    store.load.mockImplementation(async () => null);
+    store.addPiece.mockImplementation(async (slot, piece) => {
+      const kept = stored(slot, piece);
+      const draft = slots.get(slot) ?? { id: slot, entryLocalId: null, pieces: [] };
+      slots.set(slot, { ...draft, pieces: [...draft.pieces, kept] });
+      return kept;
+    });
+    store.removePiece.mockImplementation(async () => null);
+    // Permissive on a slot it is not holding, as this mock has always been: the real store's
+    // deliberate cold-cache throw is driven per-case, by the one case that is about it.
+    store.updateText.mockImplementation((slot, localId, content) => {
+      const draft = slots.get(slot);
+      if (!draft) return null;
+      const next = {
+        ...draft,
+        pieces: draft.pieces.map((piece) =>
+          piece.localId === localId ? { ...piece, content } : piece,
+        ),
+      };
+      slots.set(slot, next);
+      return next;
+    });
+    store.flush.mockImplementation(async () => {});
+    // Replaces the slot outright, which is how the real one takes a previous edit of a
+    // different memory away, folder and all, on its way past.
+    store.startEdit.mockImplementation(async (entryLocalId, pieces = []) => {
+      const draft = { id: 'edit', entryLocalId, pieces: pieces.map((piece) => ({ ...piece })) };
+      slots.set('edit', draft);
+      return draft;
+    });
+    // An unsaved edit of a *different* memory is not this one's (the real `getEditFor`).
+    store.getEditFor.mockImplementation(async (entryLocalId) => {
+      const draft = slots.get('edit');
+      return draft && draft.entryLocalId === entryLocalId ? draft : null;
+    });
+    store.discard.mockImplementation(async (slot) => {
+      slots.delete(slot);
+    });
     // Reports whether it let a draft go. `true` for the unconditional call the save makes;
     // the conditional call's own refusal is driven per-case where it matters.
-    clearAfterSave: jest.fn(async () => true),
-    __stored: stored,
+    store.clearAfterSave.mockImplementation(async (slot) => {
+      slots.delete(slot);
+      return true;
+    });
   };
+
+  install();
 
   return { __esModule: true, ...store, default: store };
 });
@@ -198,6 +277,21 @@ jest.mock('../../../services/SettingsService', () => {
     getDefaultJournalId: jest.fn(async () => 'journal-1'),
   };
   return { __esModule: true, SettingsService: service, default: service };
+});
+
+/**
+ * The memory an edit opens (T057). `getEntry` is the only thing this screen asks of the
+ * service -- the save goes through `useJournal`, as a new memory's does -- and the real one
+ * reaches the repository, SQLite and the file system from a module-scope singleton.
+ *
+ * What `getEntry` hands back is the row as `JournalRepository.getByLocalId` has it, so the
+ * cases below feed it real stored shapes: a photos block whose media item is the server's
+ * (`{id, url}` and no `localPath`), a text block with its own `capturedAt`, and the `location`
+ * block the old composer wrote.
+ */
+jest.mock('../../../services/JournalService', () => {
+  const service = { getEntry: jest.fn(async () => null) };
+  return { __esModule: true, JournalService: service, default: service };
 });
 
 jest.mock('../../../context/AuthContext', () => ({
@@ -403,6 +497,7 @@ jest.mock('../../../components/capture/SaveAudienceSheet', () => {
 });
 
 import CaptureDraftStore from '../../../services/CaptureDraftStore';
+import { JournalService } from '../../../services/JournalService';
 import { SyncQueue } from '../../../sync/SyncQueue';
 import CaptureLocation from '../../../services/CaptureLocation';
 import * as captureLocationModule from '../../../services/CaptureLocation';
@@ -421,6 +516,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const ARCADE = { lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St', accuracy: 12 };
 
 const createEntry = journalHook.__createEntry;
+const updateEntry = journalHook.__updateEntry;
 
 let trees = [];
 let navigation;
@@ -561,16 +657,13 @@ beforeEach(() => {
   dualCamera.__reset();
   captureLocationModule.__setPlace(null);
 
-  CaptureDraftStore.load.mockImplementation(async () => null);
-  CaptureDraftStore.addPiece.mockImplementation(async (slot, piece) =>
-    piece?.uri ? { ...piece, uri: `file:///documents/capture-drafts/${slot}/${piece.localId}` } : piece,
-  );
-  // Resolves `true`: the store reports whether it let a draft go, and the conditional form
-  // (`onlyIfIdentity`) can answer `false` without that being a failure. A case that needs the
-  // refusal says so itself.
-  CaptureDraftStore.clearAfterSave.mockImplementation(async () => true);
-  CaptureDraftStore.discard.mockImplementation(async () => {});
+  // The stand-in draft store, emptied and its default behaviour re-installed. Both halves
+  // matter: `jest.clearAllMocks()` clears the calls but not the implementations, and the
+  // drafts the stand-in is holding are state of its own that no mock bookkeeping touches.
+  CaptureDraftStore.__reset();
   createEntry.mockImplementation(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+  updateEntry.mockImplementation(async () => ({ localId: 'entry-7' }));
+  JournalService.getEntry.mockImplementation(async () => null);
 
   navigation = { goBack: jest.fn(), navigate: jest.fn(), setOptions: jest.fn() };
   taps = 0;
@@ -2394,5 +2487,641 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
     // words -- and the already-saved pieces are neither restored nor offered for saving again.
     expect(rows(second)).toHaveLength(1);
     expect(valueAt(second, 'piece-note-input-0')).toBe('');
+  });
+});
+
+// ============================================================
+// T057 -- editing a saved memory in place (US4: FR-018, FR-010, FR-013, FR-012, FR-015,
+// FR-017, FR-019)
+// ============================================================
+
+/**
+ * Edit mode: `{ mode: 'edit', entryLocalId }`.
+ *
+ * This is the second half of the screen, and the half where the mistakes are expensive in a
+ * way the new-memory half's are not. Three of them are what these cases exist to stop:
+ *
+ *   1. **A second memory.** Save on an edit must update the memory it opened and no other
+ *      (FR-018, SC-005). So `createEntry` is asserted *never* called, not merely "called
+ *      less".
+ *   2. **A re-uploaded piece.** A piece the server already holds comes back as
+ *      `remote: {id, url}` with **no local path**, because a second upload takes a new media
+ *      id -- and the server carries a piece's capture moment across an edit by matching on
+ *      that id and then on its url, so re-uploading loses the moment and the place of a piece
+ *      nobody touched (FR-019, research R3/R7). One field is all it would take, so the cases
+ *      below assert the *absence* of `localPath` and `uri` on the piece, in the draft, and on
+ *      the block that reaches `updateEntry`.
+ *   3. **A draft nobody asked for.** Opening Edit and closing again unchanged must leave
+ *      nothing behind: no `edit` slot, and no "Unfinished edit -- continue" on a memory
+ *      nobody edited (FR-013, round-2 M5). Asserted against the stand-in store's slots, not
+ *      against a spy.
+ *
+ * And two decisions that are the owner's rather than this screen's, so they are pinned and
+ * not re-litigated: Save on an edit saves **straight away**, keeping the memory's own
+ * audience, with no sheet (FR-010, round 2); and Close keeps the edit while Discard changes
+ * asks first (FR-015).
+ */
+describe('CaptureScreen: editing a saved memory (FR-018)', () => {
+  /** A local instant, so the expected `HH:mm` is the same in every timezone. */
+  const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
+
+  /** The photograph as the server holds it: an id and a url, and no local file anywhere. */
+  const REMOTE_PHOTO = {
+    localId: 'm-photo',
+    id: 'media-1',
+    url: 'https://media.example/photo-1.jpg',
+    width: 4032,
+    height: 3024,
+    capturedAt: momentAt(8, 57),
+    location: ARCADE,
+  };
+
+  const REMOTE_CLIP = {
+    localId: 'm-clip',
+    id: 'media-2',
+    url: 'https://media.example/clip-1.m4a',
+    capturedAt: momentAt(9, 3),
+  };
+
+  /**
+   * The memory's blocks, in the shapes that really reach SQLite: a photos block, a text block
+   * carrying its own `capturedAt` (contract C3), an audio block whose duration and waveform
+   * sit on the block rather than on the item, and the `location` block the old composer
+   * appends -- which is `entry.location` written out again, is not a piece, and which
+   * `JournalEntryDetail` reads as the memory's place (`:239`).
+   */
+  const SAVED_BLOCKS = [
+    { id: 'b1', type: 'photos', media: [REMOTE_PHOTO], location: ARCADE },
+    {
+      id: 'b2',
+      type: 'text',
+      content: 'The arcade still smells the same.',
+      capturedAt: momentAt(9, 1),
+      location: ARCADE,
+    },
+    { id: 'b3', type: 'audio', media: [REMOTE_CLIP], duration: 31, waveform: [0.2, 0.5] },
+    { id: 'b4', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
+  ];
+
+  const ENTRY_LOCAL_ID = 'entry-7';
+
+  const savedEntry = (overrides = {}) => ({
+    localId: ENTRY_LOCAL_ID,
+    journalId: 'journal-1',
+    userId: 'user-1',
+    date: '2026-11-08',
+    visibility: 'family_friends',
+    serverId: 'srv-7',
+    shareState: null,
+    syncStatus: 'synced',
+    contentBlocks: SAVED_BLOCKS.map((block) => ({ ...block })),
+    ...overrides,
+  });
+
+  /** Edit, as the Journal opens it: the mode, the memory's local id, and nothing else. */
+  const openEdit = async (overrides) => {
+    JournalService.getEntry.mockImplementation(async (localId) =>
+      localId === ENTRY_LOCAL_ID ? savedEntry(overrides) : null,
+    );
+    return render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+  };
+
+  /** The three rows of the saved memory, in its stored order. */
+  const SAVED_ROWS = [
+    'Photo | 08:57 | Old arcade, Bridge St',
+    'Note | 09:01 | Old arcade, Bridge St',
+    'Voice clip | 09:03 | No place',
+  ];
+
+  /** The blocks one `updateEntry` call was given. */
+  const blocksSent = (call = 0) => updateEntry.mock.calls[call][1].contentBlocks;
+
+  const blockOfType = (blocks, type) => blocks.find((block) => block.type === type);
+
+  // --------------------------------------------------------
+  // It opens the memory, pieces and all (FR-018)
+  // --------------------------------------------------------
+
+  it('opens with the memory pieces in their stored order, text and all', async () => {
+    const tree = await openEdit();
+
+    expect(JournalService.getEntry).toHaveBeenCalledWith(ENTRY_LOCAL_ID);
+    expect(rows(tree)).toEqual(SAVED_ROWS);
+    // The note's words, not just a note-shaped row -- and the note keeps its place in the
+    // middle of the memory rather than being hoisted to the top (FR-005).
+    expect(valueAt(tree, 'piece-note-input-1')).toBe('The arcade still smells the same.');
+    // The `location` block is not a piece: it is the memory's own place written out again,
+    // and the card draws nothing for it. A fourth row here would be a pin on the map with
+    // nothing in the card to tap.
+    expect(rows(tree)).toHaveLength(3);
+  });
+
+  it('keeps the server copy of a piece by its id and url, with no local path', async () => {
+    const tree = await openEdit();
+
+    // Something changed, so there is a draft to look inside and a save to make.
+    await tap(tree, 'capture-type-button');
+
+    const draft = CaptureDraftStore.__slots().edit;
+    expect(draft.entryLocalId).toBe(ENTRY_LOCAL_ID);
+
+    const [photo, , clip] = draft.pieces;
+    expect(photo).toMatchObject({
+      kind: 'photo',
+      remote: { id: 'media-1', url: REMOTE_PHOTO.url },
+    });
+    expect(clip).toMatchObject({
+      kind: 'audio',
+      remote: { id: 'media-2', url: REMOTE_CLIP.url },
+    });
+
+    // The one field that would undo all of this. `localPath` is what
+    // `JournalService._queueMediaBlockForUpload` reads, and a `uri` becomes a `localPath` the
+    // moment `buildContentBlocks` sees one, so neither may be on a piece the server holds.
+    [photo, clip].forEach((piece) => {
+      expect(piece.uri).toBeUndefined();
+      expect(piece.localPath).toBeUndefined();
+    });
+
+    // And nothing re-copied them into the draft folder either: `addPiece` is what copies
+    // media, and the only piece it was given is the note that was just added.
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.addPiece.mock.calls[0][1].kind).toBe('text');
+
+    await tap(tree, 'capture-save-button');
+
+    const sent = blocksSent();
+    expect(blockOfType(sent, 'photos').media[0]).toEqual(
+      expect.objectContaining({ id: 'media-1', url: REMOTE_PHOTO.url }),
+    );
+    expect(blockOfType(sent, 'photos').media[0].localPath).toBeUndefined();
+    expect(blockOfType(sent, 'audio').media[0]).toEqual(
+      expect.objectContaining({ id: 'media-2', url: REMOTE_CLIP.url }),
+    );
+    expect(blockOfType(sent, 'audio').media[0].localPath).toBeUndefined();
+    // Nothing anywhere in the memory claims a pending local file for a piece the server has.
+    expect(JSON.stringify(sent)).not.toContain('localPath');
+  });
+
+  // --------------------------------------------------------
+  // The slot is written on the first change and not before (FR-013, round-2 M5)
+  // --------------------------------------------------------
+
+  it('writes nothing to the draft store while nothing has changed', async () => {
+    const tree = await openEdit();
+
+    // Every piece of the memory is on screen, and the store is holding nothing at all.
+    expect(rows(tree)).toEqual(SAVED_ROWS);
+    expect(CaptureDraftStore.__slots()).toEqual({});
+    expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.addPiece).not.toHaveBeenCalled();
+  });
+
+  it('leaves no edit slot at all when Edit is opened and closed unchanged', async () => {
+    const tree = await openEdit();
+
+    await tap(tree, 'capture-close-button');
+
+    // The round-2 M5 outcome, in the only terms that matter: there is no unsaved edit of this
+    // memory, so its card says nothing about one and the next Edit opens the memory afresh.
+    expect(CaptureDraftStore.__slots().edit).toBeUndefined();
+    expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts the edit on the first keystroke, and keeps the typing in the slot', async () => {
+    const tree = await openEdit();
+
+    await type(tree, 'piece-note-input-1', 'The arcade still smells the same. It is louder.');
+
+    // `startEdit` first, with the memory's pieces, so the draft begins as the memory is...
+    expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+    const [entryLocalId, piecesGiven] = CaptureDraftStore.startEdit.mock.calls[0];
+    expect(entryLocalId).toBe(ENTRY_LOCAL_ID);
+    expect(piecesGiven.map((piece) => piece.kind)).toEqual(['photo', 'text', 'audio']);
+
+    // ...and the keystroke goes through `updateText`, after it.
+    expect(CaptureDraftStore.updateText).toHaveBeenCalledWith(
+      'edit',
+      piecesGiven[1].localId,
+      'The arcade still smells the same. It is louder.',
+    );
+    expect(CaptureDraftStore.startEdit.mock.invocationCallOrder[0]).toBeLessThan(
+      CaptureDraftStore.updateText.mock.invocationCallOrder[0],
+    );
+
+    // What is in the slot is the memory with the new wording in it.
+    const draft = CaptureDraftStore.__slots().edit;
+    expect(draft.pieces.map((piece) => piece.content)).toEqual([
+      undefined,
+      'The arcade still smells the same. It is louder.',
+      undefined,
+    ]);
+
+    // A second keystroke does not start a second edit.
+    await type(tree, 'piece-note-input-1', 'The arcade still smells the same. Louder now.');
+    expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.__slots().edit.pieces[1].content).toBe(
+      'The arcade still smells the same. Louder now.',
+    );
+    expect(has(tree, 'capture-capture-error')).toBe(false);
+  });
+
+  it('starts the edit on the first new piece, and appends it through addPiece', async () => {
+    const tree = await openEdit();
+
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+
+    expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.startEdit.mock.invocationCallOrder[0]).toBeLessThan(
+      CaptureDraftStore.addPiece.mock.invocationCallOrder[0],
+    );
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledWith(
+      'edit',
+      expect.objectContaining({ kind: 'audio' }),
+    );
+
+    // The slot holds the memory *and* the new clip, in that order -- not the clip alone.
+    expect(CaptureDraftStore.__slots().edit.pieces.map((piece) => piece.kind)).toEqual([
+      'photo',
+      'text',
+      'audio',
+      'audio',
+    ]);
+    expect(rows(tree)).toHaveLength(4);
+  });
+
+  /**
+   * The window the case above cannot see: every capture button is live while the memory is
+   * still being read, and `startEdit` *replaces* the slot's pieces with what it is given. A
+   * Type tap inside that window, answered with the pieces as they stood (none), would write
+   * an edit draft holding the new note and **none of the memory's own pieces** -- and the next
+   * time that draft was reopened, every piece the memory already had would be missing from it.
+   */
+  it('waits for the memory before starting the edit, so a tap inside the read loses nothing', async () => {
+    const reading = deferred();
+    JournalService.getEntry.mockImplementation(() => reading.promise);
+
+    const tree = await render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+
+    // Type, before the memory has come back. Nothing has been written yet.
+    await tap(tree, 'capture-type-button');
+    expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      reading.settle(savedEntry());
+    });
+
+    expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.__slots().edit.pieces.map((piece) => piece.kind)).toEqual([
+      'photo',
+      'text',
+      'audio',
+      'text',
+    ]);
+    expect(rows(tree)).toHaveLength(4);
+  });
+
+  // --------------------------------------------------------
+  // An unsaved edit of this memory is restored (FR-013, US2-7)
+  // --------------------------------------------------------
+
+  it('restores an unsaved edit of this memory instead of the saved pieces', async () => {
+    CaptureDraftStore.__seedEdit(ENTRY_LOCAL_ID, [
+      {
+        localId: 'm-photo',
+        kind: 'photo',
+        remote: { id: 'media-1', url: REMOTE_PHOTO.url },
+        capturedAt: momentAt(8, 57),
+        location: ARCADE,
+        width: 4032,
+        height: 3024,
+      },
+      {
+        localId: 'd-note',
+        kind: 'text',
+        content: 'Half a thought, left unfinished',
+        capturedAt: momentAt(9, 12),
+      },
+    ]);
+
+    const tree = await openEdit();
+
+    expect(CaptureDraftStore.getEditFor).toHaveBeenCalledWith(ENTRY_LOCAL_ID);
+    expect(rows(tree)).toEqual([
+      'Photo | 08:57 | Old arcade, Bridge St',
+      'Note | 09:12 | No place',
+    ]);
+    expect(valueAt(tree, 'piece-note-input-1')).toBe('Half a thought, left unfinished');
+    // It was already an unsaved edit before this screen opened, so nothing is started again --
+    // and the edit it holds is not replaced by the memory's own pieces.
+    expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+    expect(textAt(tree, 'capture-status-line')).toBe('Changes kept');
+
+    // And typing into a restored note reaches the slot: it is in the store's hand already.
+    await type(tree, 'piece-note-input-1', 'Half a thought, finished');
+    expect(CaptureDraftStore.updateText).toHaveBeenCalledWith(
+      'edit',
+      'd-note',
+      'Half a thought, finished',
+    );
+    expect(CaptureDraftStore.__slots().edit.pieces[1].content).toBe('Half a thought, finished');
+  });
+
+  it('ignores an unsaved edit of a different memory, and takes it away on the first change', async () => {
+    CaptureDraftStore.__seedEdit('entry-other', [
+      { localId: 'other-1', kind: 'text', content: 'Another half-finished edit' },
+    ]);
+
+    const tree = await openEdit();
+
+    // Not this memory's edit, so not restored (FR-013: at most one unsaved edit).
+    expect(rows(tree)).toEqual(SAVED_ROWS);
+
+    await tap(tree, 'capture-type-button');
+
+    // The slot now belongs to this memory. The real `startEdit` is what takes the previous
+    // one away, folder and all, on its way past.
+    expect(CaptureDraftStore.__slots().edit.entryLocalId).toBe(ENTRY_LOCAL_ID);
+  });
+
+  // --------------------------------------------------------
+  // The edit is written whenever it may be taken away (FR-012, round-2 L1)
+  // --------------------------------------------------------
+
+  it('flushes the edit slot when the app leaves the foreground', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and not written yet');
+    CaptureDraftStore.flush.mockClear();
+
+    await appStateGoes('background');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('edit');
+  });
+
+  it('flushes the edit slot when the keyboard leaves a note', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and not written yet');
+    CaptureDraftStore.flush.mockClear();
+
+    await blur(tree, 'piece-note-input-1');
+
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('edit');
+  });
+
+  // --------------------------------------------------------
+  // Save (FR-010, owner round 2; FR-018)
+  // --------------------------------------------------------
+
+  it('saves straight away, with no audience sheet, keeping the memory own audience', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'The arcade still smells the same. Louder, though.');
+
+    await tap(tree, 'capture-save-button');
+
+    // FR-010: the sheet is for choosing an audience a memory does not have yet. An edit has
+    // one already, and asking again is a question with a wrong answer available.
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(updateEntry).toHaveBeenCalledTimes(1);
+    expect(updateEntry.mock.calls[0][0]).toBe(ENTRY_LOCAL_ID);
+    expect(updateEntry.mock.calls[0][1].visibility).toBe('family_friends');
+    // FR-018, SC-005: the same memory, updated. Never a second one.
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+
+    // The words that were typed are in what was saved, and the memory is still three pieces.
+    const sent = blocksSent();
+    expect(blockOfType(sent, 'text').content).toBe(
+      'The arcade still smells the same. Louder, though.',
+    );
+    expect(sent.filter((block) => block.type === 'photos')).toHaveLength(1);
+    expect(sent.filter((block) => block.type === 'audio')).toHaveLength(1);
+  });
+
+  it('keeps every unchanged piece moment and place, and a reworded note too (FR-019)', async () => {
+    const tree = await openEdit();
+
+    await type(tree, 'piece-note-input-1', 'The arcade still smells the same. Louder, though.');
+    await tap(tree, 'capture-save-button');
+
+    const sent = blocksSent();
+
+    // The photograph nobody touched: same moment, same place, same server copy.
+    expect(blockOfType(sent, 'photos').media[0]).toEqual(
+      expect.objectContaining({
+        capturedAt: REMOTE_PHOTO.capturedAt,
+        location: ARCADE,
+        width: 4032,
+        height: 3024,
+      }),
+    );
+    // The clip nobody touched, down to the length and the levels the row draws.
+    expect(blockOfType(sent, 'audio')).toEqual(
+      expect.objectContaining({ duration: 31, waveform: [0.2, 0.5] }),
+    );
+    expect(blockOfType(sent, 'audio').media[0].capturedAt).toBe(REMOTE_CLIP.capturedAt);
+
+    // FR-019's named case: the note's wording changed and its moment did not.
+    expect(blockOfType(sent, 'text')).toEqual(
+      expect.objectContaining({
+        content: 'The arcade still smells the same. Louder, though.',
+        capturedAt: momentAt(9, 1),
+        location: ARCADE,
+      }),
+    );
+
+    // And the memory's `location` block -- not a piece, but part of the memory all the same,
+    // and what `JournalEntryDetail` falls back to for where it happened -- is still there.
+    expect(sent).toContainEqual(SAVED_BLOCKS[3]);
+  });
+
+  it('stores an edit of a memory whose share was refused, without re-sharing it', async () => {
+    const tree = await openEdit({ serverId: null, shareState: 'refused', syncStatus: 'pending' });
+
+    await type(tree, 'piece-note-input-1', 'Still not shared, and now reworded');
+    await tap(tree, 'capture-save-button');
+
+    // Research R15's round-3 L4. The screen changes the content and **nothing else**: no
+    // `shareState`, so the card still says "Not shared"; no server id; no re-share. Choosing
+    // an audience again is the card's own action, and it is what enqueues the CREATE.
+    expect(updateEntry).toHaveBeenCalledTimes(1);
+    expect(Object.keys(updateEntry.mock.calls[0][1]).sort()).toEqual([
+      'contentBlocks',
+      'visibility',
+    ]);
+    expect(updateEntry.mock.calls[0][1].visibility).toBe('family_friends');
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(createEntry).not.toHaveBeenCalled();
+    // Nothing on this screen queues anything for the server, in either mode (FR-014).
+    expect(SyncQueue.enqueue).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueueBatch).not.toHaveBeenCalled();
+    // That no UPDATE_ENTRY is queued for a memory with no server id is the repository's rule,
+    // and it is driven against the real queue and real SQLite in
+    // `JournalRepository.update.test.js` ("queues nothing at all for an edit of a memory whose
+    // share the server refused"). It keys on the server id, not on which fields were sent.
+  });
+
+  it('does not let the edit draft go until updateEntry has resolved', async () => {
+    const save = deferred();
+    updateEntry.mockImplementation(() => save.promise);
+
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and being saved');
+    await tap(tree, 'capture-save-button');
+
+    // FR-016: until the phone has written the memory, the draft is the only copy of the edit.
+    expect(updateEntry).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit).toBeDefined();
+    expect(navigation.goBack).not.toHaveBeenCalled();
+
+    await act(async () => {
+      save.settle({ localId: ENTRY_LOCAL_ID });
+    });
+
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledWith('edit');
+    expect(CaptureDraftStore.__slots().edit).toBeUndefined();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  // --------------------------------------------------------
+  // A save that failed (FR-017)
+  // --------------------------------------------------------
+
+  it('stays open with the banner and Try again when the update fails, draft intact', async () => {
+    updateEntry.mockImplementation(async () => {
+      throw new Error('disk full');
+    });
+
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and the save failed');
+    await tap(tree, 'capture-save-button');
+
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    expect(rows(tree)).toHaveLength(3);
+    expect(valueAt(tree, 'piece-note-input-1')).toBe('Changed, and the save failed');
+    expect(textAt(tree, 'capture-save-error')).toMatch(/couldn.t save/i);
+    expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
+    expect(textAt(tree, 'capture-save-error')).not.toMatch(/lost|gone/i);
+    expect(pressable(tree, 'capture-save-retry-button')).toBeDefined();
+
+    // "Still here" is a claim about the draft, so it is the draft that is checked: the edit is
+    // in the slot, with the typing in it, and nothing let it go.
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit.pieces[1].content).toBe(
+      'Changed, and the save failed',
+    );
+  });
+
+  it('tries the update again with the memory own audience, without asking', async () => {
+    updateEntry.mockImplementation(async () => {
+      throw new Error('disk full');
+    });
+
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and the save failed');
+    await tap(tree, 'capture-save-button');
+
+    updateEntry.mockImplementation(async () => ({ localId: ENTRY_LOCAL_ID }));
+    await tap(tree, 'capture-save-retry-button');
+
+    expect(has(tree, 'audience-sheet')).toBe(false);
+    expect(updateEntry).toHaveBeenCalledTimes(2);
+    expect(updateEntry.mock.calls[1][0]).toBe(ENTRY_LOCAL_ID);
+    expect(updateEntry.mock.calls[1][1].visibility).toBe('family_friends');
+    // A retry, not a different save: the same memory, the same pieces.
+    expect(blocksSent(1)).toEqual(blocksSent(0));
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.clearAfterSave).toHaveBeenCalledTimes(1);
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'capture-save-error')).toBe(false);
+  });
+
+  // --------------------------------------------------------
+  // Leaving, and discarding (FR-015)
+  // --------------------------------------------------------
+
+  it('keeps the edit when Close is tapped', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and left for later');
+
+    await tap(tree, 'capture-close-button');
+
+    // Leaving is just leaving: the edit is still on the phone, word for word, for the card's
+    // "Unfinished edit -- continue" to reopen.
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit.pieces[1].content).toBe(
+      'Changed, and left for later',
+    );
+    expect(CaptureDraftStore.flush).toHaveBeenCalledWith('edit');
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks before discarding the changes, and says the memory itself stays', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, and about to be thrown away');
+
+    await tap(tree, 'capture-overflow-button');
+    await tap(tree, 'capture-discard-button');
+
+    const [title, body, buttons] = Alert.alert.mock.calls[0];
+    expect(title).toMatch(/discard your changes/i);
+    // The one thing a person needs to know before answering: the memory is not what goes.
+    expect(body).toMatch(/memory itself\s+stays/i);
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+
+    const discard = buttons.find((button) => button.style === 'destructive');
+    expect(discard.text).toMatch(/discard changes/i);
+    await act(async () => {
+      discard.onPress?.();
+    });
+
+    expect(CaptureDraftStore.discard).toHaveBeenCalledWith('edit');
+    expect(CaptureDraftStore.__slots().edit).toBeUndefined();
+    // Only the changes went: the memory was never touched.
+    expect(updateEntry).not.toHaveBeenCalled();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  // --------------------------------------------------------
+  // What the screen says it is (UI contract)
+  // --------------------------------------------------------
+
+  it('is titled "Edit memory", and says "Changes kept" once something has changed', async () => {
+    const tree = await openEdit();
+
+    expect(textAt(tree, 'capture-title')).toBe('Edit memory');
+    // Nothing has changed yet, so there is nothing kept to say so about: the status line is
+    // the claim that an unsaved edit exists, and until the first change none does.
+    expect(has(tree, 'capture-status-line')).toBe(false);
+
+    await type(tree, 'piece-note-input-1', 'Changed');
+
+    expect(textAt(tree, 'capture-status-line')).toBe('Changes kept');
+    // Not the new-memory line: "Draft kept · 3 pieces" would say a new memory is being made.
+    expect(textAt(tree, 'capture-status-line')).not.toMatch(/draft kept/i);
+    expect(textAt(tree, 'capture-title')).toBe('Edit memory');
+  });
+
+  /**
+   * The failure the "never silent" half of FR-017 forbids being quiet about: the memory could
+   * not be read at all. An empty capture screen under the title "Edit memory" is
+   * indistinguishable from a memory whose pieces have vanished, and it would invite a Save
+   * that replaced the memory with nothing.
+   */
+  it('says so when the memory cannot be read, rather than showing an empty screen', async () => {
+    JournalService.getEntry.mockImplementation(async () => null);
+
+    const tree = await render({ mode: 'edit', entryLocalId: 'entry-gone' });
+
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/couldn.t open this memory/i);
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/nothing has been changed/i);
+    // Nothing was started, and Save cannot replace the memory with an empty one.
+    expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit).toBeUndefined();
+    expect(pressable(tree, 'capture-save-button').props.disabled).toBe(true);
   });
 });
