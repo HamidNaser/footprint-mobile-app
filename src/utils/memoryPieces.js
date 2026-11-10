@@ -94,11 +94,17 @@ const MEDIA_BLOCK_KINDS = new Map([
  * UTC, and a local reading would put a value hours from where the server put it, by a different
  * number of hours in every timezone. Anything unreadable is `null`, never a guess.
  *
- * A value with **no time of day** is left exactly as it is. A date-only form is already UTC by
- * the ES Date Time String Format, and appending a `Z` to it would build `'2026-11-01Z'`, which
- * is outside that format: V8 happens to answer the same instant, but parsing outside the format
- * is implementation-defined, so another engine may answer `NaN` -- which would drop the
- * threshold on a phone and on no CI run.
+ * **A date-only value** is the one exception, and it is left exactly as it is: that form is
+ * already UTC by the ES Date Time String Format, and appending a `Z` would build
+ * `'2026-11-01Z'`, which is outside that format -- V8 happens to answer the same instant, but
+ * parsing outside the format is implementation-defined, so another engine may answer `NaN`,
+ * which would drop the threshold on a phone and on no CI run.
+ *
+ * The exception is written as "is it date-only?" and **not** as "has it no `T`?". The second
+ * question looks equivalent and is not: it sends `'2026-11-01 15:10:00'` down the untouched
+ * path, where it is read in local time -- a device-local reading reaching the ordering
+ * threshold, which is the one thing this file may not do (SC-007). Nothing emits that shape
+ * today; the narrower question costs one character class.
  *
  * @param {string|null|undefined} iso
  * @returns {number|null} milliseconds since the epoch, or null
@@ -110,7 +116,8 @@ function asInstant(iso) {
   // A zone is a trailing `Z`, or a `+hh:mm` / `-hh:mm` offset after the time. The test is
   // anchored at the end so a date's own hyphens are not mistaken for an offset's sign.
   const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
-  const needsUtc = !hasZone && trimmed.includes('T');
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(trimmed);
+  const needsUtc = !hasZone && !isDateOnly;
   const parsed = Date.parse(needsUtc ? `${trimmed}Z` : trimmed);
 
   return Number.isNaN(parsed) ? null : parsed;
@@ -124,15 +131,21 @@ function asInstant(iso) {
  * (FR-023). `storedIndex` is its position in this expansion, which is both the ordering rule's
  * tiebreaker and the stored order a memory with no times keeps.
  *
- * **A media item with no place of its own takes its block's, and SC-008 requires it.** On
- * `origin/release/1.0`, `journalBlocks.js:66` and `:83` put `location: blockLocation` on a photos
- * block and on a video block while their media items take `mediaLocation(p)`, which is often
- * null -- so in a memory saved before this feature the place is frequently recorded on the block
- * alone. SC-008 is that every such memory "still opens and displays exactly as before, plus the
- * map when it has places": without this fallback those are memories that have a place and show
- * **no map at all**. Inheriting gives one pin per piece at the block's spot, which FR-023 then
- * merges into a single marker with its count. The server has already coarsened both values for
- * this viewer, so nothing is revealed that the block did not already reveal (FR-026).
+ * **A media item with no place of its own takes its block's.** On `origin/release/1.0`,
+ * `journalBlocks.js:66` and `:83` put `location: blockLocation` on a photos block and on a video
+ * block, so a block-level place is a shape that genuinely occurs in memories saved before this
+ * feature. On the phone's **own** write path it cannot occur alone: the default resolver is
+ * `mediaLocation = (m) => m?.location || blockLocation` (`:33`) and its only caller passes
+ * `(m) => m.location || LocationService.extractLocationFromExif(m.exif) || blockLocation`
+ * (`JournalComposeModal.js:336-337`), so a phone-written item is null only when its block is too.
+ * This fallback is therefore **defensive cover for the write paths this repo does not own** --
+ * the web client, the API, an importer -- rather than something load-bearing for phone-written
+ * memories. What it buys where it does apply is SC-008: every such memory "still opens and
+ * displays exactly as before, plus the map when it has places", and without it a memory whose
+ * place sits on the block alone would show **no map at all**. Inheriting gives one pin per piece
+ * at the block's spot, which FR-023 merges into a single marker with its count. The server has
+ * already coarsened both values for this viewer, so nothing is revealed that the block did not
+ * already reveal (FR-026).
  */
 function expand(entry) {
   const pieces = [];
