@@ -3,12 +3,17 @@ import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import { useUpcomingEvents } from '../hooks/useUpcomingEvents';
+import ComingUpCard from '../components/home/ComingUpCard';
 
 const PRIMARY_COLOR = '#4361ee';
 const BACKGROUND_COLOR = '#F0F4FF';
 
 export default function HomeScreen({ navigation }) {
   const { user } = useAuth();
+  // Home's "Coming up" card (FR-034, research R11) -- the hook's own behaviour (civil-date
+  // split, fail-closed error) is covered by its own test; here it only feeds the card.
+  const { upcoming, error: upcomingError } = useUpcomingEvents();
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -46,6 +51,12 @@ export default function HomeScreen({ navigation }) {
           </View>
           <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
         </TouchableOpacity>
+
+        <ComingUpCard
+          upcoming={upcoming}
+          error={upcomingError}
+          onPress={() => navigation.navigate('Timeline', { view: 'events' })}
+        />
       </View>
     </SafeAreaView>
   );
