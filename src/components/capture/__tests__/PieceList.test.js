@@ -196,19 +196,43 @@ describe('PieceList: every piece can be taken back out (FR-036)', () => {
     expect(pressable(tree, 'piece-remove-3').props.accessibilityLabel).toBe('Remove this Video');
   });
 
-  it('puts each row\'s control on that row, and not on another', async () => {
+  /**
+   * **At the end of the row's meta line**, which is where the UI contract puts it -- not merely
+   * somewhere in the row, which a control rendered under the note input or below the player
+   * would satisfy just as well. So it is anchored on the meta `View`'s own
+   * `piece-meta-<index>`, and its position within that line is read off the render order.
+   */
+  it('puts each row\'s control at the end of that row\'s meta line, and not on another row', async () => {
     const tree = await render();
 
     FOUR_KINDS.forEach((piece, index) => {
-      const row = nodeAt(tree, `piece-row-${index}`);
-      expect(
-        row.findAll((n) => n.props?.testID === `piece-remove-${index}`).length,
-      ).toBeGreaterThan(0);
-      // A control that rendered outside its row would still be found by testID, so the
-      // negative is checked too: the row holds its own control and no other row's.
+      const meta = nodeAt(tree, `piece-meta-${index}`);
+      expect(meta).toBeDefined();
+
+      // Kind, time, place, Remove -- in that order, inside the meta line. `findAll` walks the
+      // tree in render order, and each node is seen twice (the composite and its host), so the
+      // ids are de-duplicated with their first position kept.
+      const inTheLine = Array.from(
+        new Set(
+          meta
+            .findAll((n) => typeof n.props?.testID === 'string')
+            .map((n) => n.props.testID)
+            .filter((testID) => testID.endsWith(`-${index}`)),
+        ),
+      );
+      expect(inTheLine).toEqual([
+        `piece-meta-${index}`,
+        `piece-kind-${index}`,
+        `piece-time-${index}`,
+        `piece-place-${index}`,
+        `piece-remove-${index}`,
+      ]);
+
+      // And it is that row's control, not another row's: a control outside its own row would
+      // still be found by testID anywhere in the tree, so the negative is checked too.
       FOUR_KINDS.forEach((_, other) => {
         if (other === index) return;
-        expect(row.findAll((n) => n.props?.testID === `piece-remove-${other}`)).toHaveLength(0);
+        expect(meta.findAll((n) => n.props?.testID === `piece-remove-${other}`)).toHaveLength(0);
       });
     });
   });

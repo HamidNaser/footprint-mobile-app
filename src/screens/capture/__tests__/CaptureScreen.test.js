@@ -687,6 +687,110 @@ const deferred = () => {
   return { promise, settle, fail };
 };
 
+// ============================================================
+// The saved memory an edit opens
+// ============================================================
+
+/**
+ * One memory, one fixture, shared by the two describes that open it for editing -- T057's
+ * (FR-018) and T072's Remove cases (FR-036).
+ *
+ * At file scope on purpose. These were T057's own locals until T072 needed the same memory, and
+ * a second copy of them is the kind of duplication that goes wrong silently: a change to one
+ * copy leaves the other describe asserting a shape nothing else in the app produces, and both
+ * suites still pass. Nothing moved to get them here -- every describe below resolves them by
+ * scope and reads exactly as it did.
+ */
+
+/** A local instant, so the expected `HH:mm` is the same in every timezone. */
+const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
+
+/**
+ * The photograph as an uploaded item really is, every address included.
+ *
+ * This is exactly what `SyncEngine._applyUploadedMediaToEntry` (`:1326-1336`) leaves on an
+ * item once its upload lands: the server's id twice over, the original's url twice over, the
+ * two rendition addresses -- and **the device's own copy**, which it never removes. Each one
+ * is read by something: `thumbnailSource` reads `localPath, thumbnailUrl, thumbnailUri`,
+ * `fullSizeSource` reads `localPath, displayUrl, displayUri`, and the voice pill and the
+ * video player read `localPath || serverUrl`. An edit that drops them is fix round 1's
+ * Critical 2.
+ */
+const REMOTE_PHOTO = {
+  localId: 'm-photo',
+  id: 'media-1',
+  mediaId: 'media-1',
+  url: 'https://media.example/photo-1.jpg',
+  serverUrl: 'https://media.example/photo-1.jpg',
+  thumbnailUrl: 'https://media.example/photo-1-thumb.jpg',
+  displayUrl: 'https://media.example/photo-1-display.jpg',
+  localPath: 'file:///documents/media/photo-1.jpg',
+  width: 4032,
+  height: 3024,
+  capturedAt: momentAt(8, 57),
+  location: ARCADE,
+};
+
+const REMOTE_CLIP = {
+  localId: 'm-clip',
+  id: 'media-2',
+  mediaId: 'media-2',
+  url: 'https://media.example/clip-1.m4a',
+  serverUrl: 'https://media.example/clip-1.m4a',
+  localPath: 'file:///documents/media/clip-1.m4a',
+  capturedAt: momentAt(9, 3),
+};
+
+/**
+ * The memory's blocks, in the shapes that really reach SQLite: a photos block, a text block
+ * carrying its own `capturedAt` (contract C3), an audio block whose duration and waveform
+ * sit on the block rather than on the item, and the `location` block the old composer
+ * appends -- which is `entry.location` written out again, is not a piece, and which
+ * `JournalEntryDetail` reads as the memory's place (`:239`).
+ */
+const SAVED_BLOCKS = [
+  { id: 'b1', type: 'photos', media: [REMOTE_PHOTO], location: ARCADE },
+  {
+    id: 'b2',
+    type: 'text',
+    content: 'The arcade still smells the same.',
+    capturedAt: momentAt(9, 1),
+    location: ARCADE,
+  },
+  { id: 'b3', type: 'audio', media: [REMOTE_CLIP], duration: 31, waveform: [0.2, 0.5] },
+  { id: 'b4', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
+];
+
+const ENTRY_LOCAL_ID = 'entry-7';
+
+const savedEntry = (overrides = {}) => ({
+  localId: ENTRY_LOCAL_ID,
+  journalId: 'journal-1',
+  userId: 'user-1',
+  date: '2026-11-08',
+  visibility: 'family_friends',
+  serverId: 'srv-7',
+  shareState: null,
+  syncStatus: 'synced',
+  contentBlocks: SAVED_BLOCKS.map((block) => ({ ...block })),
+  ...overrides,
+});
+
+/** Edit, as the Journal opens it: the mode, the memory's local id, and nothing else. */
+const openEdit = async (overrides) => {
+  JournalService.getEntry.mockImplementation(async (localId) =>
+    localId === ENTRY_LOCAL_ID ? savedEntry(overrides) : null,
+  );
+  return render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+};
+
+/** The three rows of the saved memory, in its stored order. */
+const SAVED_ROWS = [
+  'Photo | 08:57 | Old arcade, Bridge St',
+  'Note | 09:01 | Old arcade, Bridge St',
+  'Voice clip | 09:03 | No place',
+];
+
 beforeEach(() => {
   jest.clearAllMocks();
   voiceBar.__reset();
@@ -2672,45 +2776,6 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
  * asks first (FR-015).
  */
 describe('CaptureScreen: editing a saved memory (FR-018)', () => {
-  /** A local instant, so the expected `HH:mm` is the same in every timezone. */
-  const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
-
-  /**
-   * The photograph as an uploaded item really is, every address included.
-   *
-   * This is exactly what `SyncEngine._applyUploadedMediaToEntry` (`:1326-1336`) leaves on an
-   * item once its upload lands: the server's id twice over, the original's url twice over, the
-   * two rendition addresses -- and **the device's own copy**, which it never removes. Each one
-   * is read by something: `thumbnailSource` reads `localPath, thumbnailUrl, thumbnailUri`,
-   * `fullSizeSource` reads `localPath, displayUrl, displayUri`, and the voice pill and the
-   * video player read `localPath || serverUrl`. An edit that drops them is fix round 1's
-   * Critical 2.
-   */
-  const REMOTE_PHOTO = {
-    localId: 'm-photo',
-    id: 'media-1',
-    mediaId: 'media-1',
-    url: 'https://media.example/photo-1.jpg',
-    serverUrl: 'https://media.example/photo-1.jpg',
-    thumbnailUrl: 'https://media.example/photo-1-thumb.jpg',
-    displayUrl: 'https://media.example/photo-1-display.jpg',
-    localPath: 'file:///documents/media/photo-1.jpg',
-    width: 4032,
-    height: 3024,
-    capturedAt: momentAt(8, 57),
-    location: ARCADE,
-  };
-
-  const REMOTE_CLIP = {
-    localId: 'm-clip',
-    id: 'media-2',
-    mediaId: 'media-2',
-    url: 'https://media.example/clip-1.m4a',
-    serverUrl: 'https://media.example/clip-1.m4a',
-    localPath: 'file:///documents/media/clip-1.m4a',
-    capturedAt: momentAt(9, 3),
-  };
-
   /**
    * The two upload gates, written as the production code writes them, so these cases assert
    * the **real predicates** rather than the absence of a field that stands in for them:
@@ -2730,56 +2795,6 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
   /** Every media item of every block, flattened. */
   const mediaIn = (blocks) =>
     blocks.flatMap((block) => (Array.isArray(block.media) ? block.media : []));
-
-  /**
-   * The memory's blocks, in the shapes that really reach SQLite: a photos block, a text block
-   * carrying its own `capturedAt` (contract C3), an audio block whose duration and waveform
-   * sit on the block rather than on the item, and the `location` block the old composer
-   * appends -- which is `entry.location` written out again, is not a piece, and which
-   * `JournalEntryDetail` reads as the memory's place (`:239`).
-   */
-  const SAVED_BLOCKS = [
-    { id: 'b1', type: 'photos', media: [REMOTE_PHOTO], location: ARCADE },
-    {
-      id: 'b2',
-      type: 'text',
-      content: 'The arcade still smells the same.',
-      capturedAt: momentAt(9, 1),
-      location: ARCADE,
-    },
-    { id: 'b3', type: 'audio', media: [REMOTE_CLIP], duration: 31, waveform: [0.2, 0.5] },
-    { id: 'b4', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
-  ];
-
-  const ENTRY_LOCAL_ID = 'entry-7';
-
-  const savedEntry = (overrides = {}) => ({
-    localId: ENTRY_LOCAL_ID,
-    journalId: 'journal-1',
-    userId: 'user-1',
-    date: '2026-11-08',
-    visibility: 'family_friends',
-    serverId: 'srv-7',
-    shareState: null,
-    syncStatus: 'synced',
-    contentBlocks: SAVED_BLOCKS.map((block) => ({ ...block })),
-    ...overrides,
-  });
-
-  /** Edit, as the Journal opens it: the mode, the memory's local id, and nothing else. */
-  const openEdit = async (overrides) => {
-    JournalService.getEntry.mockImplementation(async (localId) =>
-      localId === ENTRY_LOCAL_ID ? savedEntry(overrides) : null,
-    );
-    return render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
-  };
-
-  /** The three rows of the saved memory, in its stored order. */
-  const SAVED_ROWS = [
-    'Photo | 08:57 | Old arcade, Bridge St',
-    'Note | 09:01 | Old arcade, Bridge St',
-    'Voice clip | 09:03 | No place',
-  ];
 
   /** The blocks one `updateEntry` call was given. */
   const blocksSent = (call = 0) => updateEntry.mock.calls[call][1].contentBlocks;
@@ -3763,8 +3778,28 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
   const theStoreOwnsTheFile = (slot, piece) =>
     !!piece?.uri && !piece.remote && piece.uri.startsWith(CaptureDraftStore.slotDirectory(slot));
 
-  /** The question just asked, as `Alert.alert` received it. */
-  const lastAsked = () => Alert.alert.mock.calls[Alert.alert.mock.calls.length - 1];
+  /**
+   * The question just asked, as `Alert.alert` received it.
+   *
+   * It asserts that one was asked rather than letting the caller's destructuring throw: a
+   * `TypeError` reads like a broken test, and "no confirmation was shown" is a finding.
+   */
+  const lastAsked = () => {
+    expect(Alert.alert).toHaveBeenCalled();
+    return Alert.alert.mock.calls[Alert.alert.mock.calls.length - 1];
+  };
+
+  /**
+   * The two buttons, in order, by text and by style. Matched as a whole rather than found by
+   * style: a third button, or Remove sitting before Keep it -- which on iOS puts a destructive
+   * action where the cancel is expected -- would pass any `find` on `style` alone.
+   */
+  const expectTheTwoButtons = () => {
+    expect(lastAsked()[2].map((button) => [button.text, button.style])).toEqual([
+      ['Keep it', 'cancel'],
+      ['Remove', 'destructive'],
+    ]);
+  };
 
   /** Keep it -- the cancel button, which must be there and must do nothing. */
   const keepIt = async () => {
@@ -3826,6 +3861,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       // Asked, not done.
       expect(Alert.alert).toHaveBeenCalledTimes(1);
       expect(lastAsked()[0]).toBe('Remove this Note?');
+      expectTheTwoButtons();
       expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
 
       await keepIt();
@@ -3980,90 +4016,41 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
   // --------------------------------------------------------
 
   describe('an edit', () => {
-    /** A local instant, so the expected `HH:mm` is the same in every timezone. */
-    const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
-
-    const ENTRY_LOCAL_ID = 'entry-7';
-
     /**
-     * A piece the memory already holds, as an uploaded item really is: the server's id and url,
-     * and the device's own copy. `pieceFromMediaItem` turns that into a piece carrying
-     * `remote` and a display-only `sourceUri` and **no `uri` of its own**, which is precisely
-     * the shape the first body is for -- the store copied no file, so there is none to delete.
+     * The same one memory as T057's describe, from the shared fixture at file scope:
+     * `REMOTE_PHOTO` (a photograph the server holds, every address included), the note in the
+     * middle of the memory rather than at the top of it, `REMOTE_CLIP`, and the `location`
+     * block the old composer appends -- which is not a piece, is read by `JournalEntryDetail`
+     * as where the memory happened, and must still be there, in its place, after a piece has
+     * been removed.
+     *
+     * The one thing these cases want that `openEdit` does not do is to check the memory really
+     * opened with its three rows before a removal is made against them, so that a case about
+     * removing the second piece cannot pass against a screen that showed something else.
      */
-    const HELD_PHOTO = {
-      localId: 'm-photo',
-      id: 'media-1',
-      mediaId: 'media-1',
-      url: 'https://media.example/photo-1.jpg',
-      serverUrl: 'https://media.example/photo-1.jpg',
-      localPath: 'file:///documents/media/photo-1.jpg',
-      width: 4032,
-      height: 3024,
-      capturedAt: momentAt(8, 57),
-      location: ARCADE,
-    };
-
-    const HELD_CLIP = {
-      localId: 'm-clip',
-      id: 'media-2',
-      mediaId: 'media-2',
-      url: 'https://media.example/clip-1.m4a',
-      serverUrl: 'https://media.example/clip-1.m4a',
-      localPath: 'file:///documents/media/clip-1.m4a',
-      capturedAt: momentAt(9, 3),
-    };
-
-    /**
-     * The memory as SQLite has it: a photograph, a note in the middle of the memory rather than
-     * at the top of it, a voice clip, and the `location` block the old composer appends -- which
-     * is not a piece, is read by `JournalEntryDetail` as where the memory happened, and must
-     * still be there, in its place, after a piece has been removed.
-     */
-    const SAVED_BLOCKS = [
-      { id: 'b1', type: 'photos', media: [HELD_PHOTO], location: ARCADE },
-      {
-        id: 'b2',
-        type: 'text',
-        content: 'The arcade still smells the same.',
-        capturedAt: momentAt(9, 1),
-        location: ARCADE,
-      },
-      { id: 'b3', type: 'audio', media: [HELD_CLIP], duration: 31, waveform: [0.2, 0.5] },
-      { id: 'b4', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
-    ];
-
-    /** The memory's three rows, in its stored order. */
-    const SAVED_ROWS = [
-      'Photo | 08:57 | Old arcade, Bridge St',
-      'Note | 09:01 | Old arcade, Bridge St',
-      'Voice clip | 09:03 | No place',
-    ];
-
-    /** Edit, as the Journal opens it: the mode, the memory's local id, and nothing else. */
-    const openEdit = async () => {
-      JournalService.getEntry.mockImplementation(async (localId) =>
-        localId === ENTRY_LOCAL_ID
-          ? {
-            localId: ENTRY_LOCAL_ID,
-            journalId: 'journal-1',
-            userId: 'user-1',
-            date: '2026-11-08',
-            visibility: 'family_friends',
-            serverId: 'srv-7',
-            shareState: null,
-            syncStatus: 'synced',
-            contentBlocks: SAVED_BLOCKS.map((block) => ({ ...block })),
-          }
-          : null,
-      );
-      const tree = await render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+    const openEditShowingItsRows = async () => {
+      const tree = await openEdit();
       expect(rows(tree)).toEqual(SAVED_ROWS);
       return tree;
     };
 
     /** The memory's pieces as the screen read them, which is what `startEdit` is given. */
     const piecesAsRead = () => CaptureDraftStore.startEdit.mock.calls[0][1];
+
+    /**
+     * Nothing on the wire carries the mark -- not a block, not a media item, not anything
+     * nested inside one. The absence *is* the assertion, so it is checked field by field and
+     * then over the whole payload as JSON, which also catches a shape nobody predicted.
+     */
+    const expectNoCarrierIn = (blocks) => {
+      blocks.forEach((block) => {
+        expect(block.fromSavedMemory).toBeUndefined();
+        (Array.isArray(block.media) ? block.media : []).forEach((item) => {
+          expect(item.fromSavedMemory).toBeUndefined();
+        });
+      });
+      expect(JSON.stringify(blocks)).not.toMatch(/fromSavedMemory/);
+    };
 
     /**
      * What the first confirm body is allowed to turn on, pinned in one place.
@@ -4084,18 +4071,18 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * row with no entry to re-derive anything from.
      */
     it('stamps every piece it loads with fromSavedMemory, and owns no file of any of them', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       // Something changed, so there is a draft to look inside.
       await type(tree, 'piece-note-input-1', 'Changed, so there is a draft to look inside');
       const [photo, note, clip] = CaptureDraftStore.__slots().edit.pieces;
 
-      expect(photo.remote).toEqual({ id: 'media-1', url: HELD_PHOTO.url });
+      expect(photo.remote).toEqual({ id: 'media-1', url: REMOTE_PHOTO.url });
       expect(photo.uri).toBeUndefined();
-      expect(photo.sourceUri).toBe(HELD_PHOTO.localPath);
+      expect(photo.sourceUri).toBe(REMOTE_PHOTO.localPath);
       expect(theStoreOwnsTheFile('edit', photo)).toBe(false);
 
-      expect(clip.remote).toEqual({ id: 'media-2', url: HELD_CLIP.url });
+      expect(clip.remote).toEqual({ id: 'media-2', url: REMOTE_CLIP.url });
       expect(clip.uri).toBeUndefined();
       expect(theStoreOwnsTheFile('edit', clip)).toBe(false);
 
@@ -4124,13 +4111,20 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       expect(theStoreOwnsTheFile('edit', captured)).toBe(true);
     });
 
+    /**
+     * The twin of the failed removal at the foot of this describe, and the opposite outcome for
+     * the opposite reason: nothing was attempted here, so nothing was started -- no `edit` draft
+     * and no status line. There, the attempt had to start the draft before it could fail, so the
+     * draft stays and the line reads "Changes kept".
+     */
     it('asks before it removes anything, and a declined question starts no edit', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       await tap(tree, 'piece-remove-0');
 
       expect(Alert.alert).toHaveBeenCalledTimes(1);
       expect(lastAsked()[0]).toBe('Remove this Photo?');
+      expectTheTwoButtons();
       expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
 
       await keepIt();
@@ -4155,7 +4149,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * pinned in the case below, with the note typed in the same edit beside it.
      */
     it('tells a piece the memory already holds that nothing is deleted, whatever its kind', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       await tap(tree, 'piece-remove-0');
       expect(lastAsked()[0]).toBe('Remove this Photo?');
@@ -4186,7 +4180,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * right, and this case fails for either mistake.
      */
     it('tells a note the memory holds the same as its photographs, and a new note not', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       // A note typed in this edit, after the three pieces the memory came with.
       await tap(tree, 'capture-type-button');
@@ -4223,7 +4217,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * so the case is about the screen's choice rather than about the fixture.
      */
     it('decides the words from the piece, not the mode: one edit holds both kinds', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       await tap(tree, 'capture-camera-button');
       await tap(tree, 'camera-photo-button');
@@ -4254,7 +4248,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * three), and by the call order, which says which call did it.
      */
     it('is the first change: it starts the edit before it removes, and says "Changes kept"', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
       expect(has(tree, 'capture-status-line')).toBe(false);
 
       await tap(tree, 'piece-remove-1');
@@ -4287,7 +4281,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * piece, is still there and still where the memory had it.
      */
     it('saves that same memory with the piece gone, its audience kept, and no second memory', async () => {
-      const tree = await openEdit();
+      const tree = await openEditShowingItsRows();
 
       await tap(tree, 'piece-remove-1');
       await confirmRemoval();
@@ -4310,10 +4304,62 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       expect(sent[0].media.map((item) => item.localId)).toEqual(['m-photo']);
       expect(sent[1].media.map((item) => item.localId)).toEqual(['m-clip']);
       expect(sent[2]).toEqual(SAVED_BLOCKS[3]);
+
+      // ⚠ And the mark does not ride out with them. `data-model.md`: `fromSavedMemory` is a
+      // carrier, "written out nowhere"; `ui-contract.md`: `buildContentBlocks` never writes it
+      // out. The route that would make a leak permanent is `savedItem` --
+      // `pieceFromMediaItem` carries the stored item back whole and `mediaItemFor` spreads it
+      // underneath the piece's own values, so a mark that reached the wire once would be read
+      // back on the next edit and written out again for ever, on this memory and every other.
+      expectNoCarrierIn(sent);
     });
 
-    it('keeps the row and says so when the removal cannot be recorded', async () => {
-      const tree = await openEdit();
+    /**
+     * The same, for the piece the mark is *only* reachable on through the text branch: a note
+     * the memory holds, as the piece that **stays**. `buildContentBlocks`' text branch names
+     * its fields one by one today, which is what keeps the mark off the wire -- so this is the
+     * case that fails if T073 reaches for a spread instead.
+     */
+    it('leaves no trace of the mark on a held note it saves', async () => {
+      const tree = await openEditShowingItsRows();
+
+      // The clip goes, so the photograph and the note the memory holds are what is saved.
+      await tap(tree, 'piece-remove-2');
+      await confirmRemoval();
+      await tap(tree, 'capture-save-button');
+
+      const sent = updateEntry.mock.calls[0][1].contentBlocks;
+      expect(sent.map((block) => block.type)).toEqual(['photos', 'text', 'location']);
+      // The note is saved as the memory had it, words, id and moment -- it was never the piece
+      // being removed.
+      expect(sent[1]).toEqual(
+        expect.objectContaining({
+          id: 'b2',
+          content: 'The arcade still smells the same.',
+          capturedAt: momentAt(9, 1),
+        }),
+      );
+      expectNoCarrierIn(sent);
+    });
+
+    /**
+     * The failure in an edit, where it leaves the screen in a state the contract had to settle.
+     *
+     * `startEdit` has already run by the time `removePiece` rejects -- it has to, there being no
+     * slot to remove from until it has -- so **the `edit` draft stays**, holding the memory's own
+     * pieces unchanged, and **the status line reads "Changes kept"** beside the banner. Nothing
+     * is torn down on a failure path: this screen's whole promise is that it does not delete on
+     * the way out of an error (FR-012, SC-002), and the draft it would delete is the one a second
+     * attempt removes from. The line is eager rather than wrong -- the edit *is* open and being
+     * kept -- and it is self-healing either way: saving writes the same pieces back, discarding
+     * drops the slot.
+     *
+     * Its twin is the cancelled removal above, which must leave **no** draft and **no** line, for
+     * the opposite reason: there, nothing was started, because nothing was attempted. The two
+     * read as a pair.
+     */
+    it('keeps the row, says so, and keeps the edit it had to start to try', async () => {
+      const tree = await openEditShowingItsRows();
       CaptureDraftStore.removePiece.mockImplementation(async () => {
         throw new Error('the draft could not be written');
       });
@@ -4326,8 +4372,53 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       // Still part of this memory: every piece on screen, in order, the note's words included.
       expect(rows(tree)).toEqual(SAVED_ROWS);
       expect(valueAt(tree, 'piece-note-input-1')).toBe('The arcade still smells the same.');
+
+      // The edit the attempt had to start is still there, holding the memory as it stands --
+      // all three pieces, none of them removed -- and the line says so.
+      expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+      expect(listed('edit')).toEqual(piecesAsRead().map((piece) => piece.localId));
+      expect(listed('edit')).toHaveLength(3);
+      expect(textAt(tree, 'capture-status-line')).toBe('Changes kept');
+
       // And the memory itself was not touched either.
       expect(updateEntry).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The new-memory case's twin (FR-007), in the mode where a removal does one thing more: it
+     * is also the edit's first change, so it starts the draft while a recording is running. The
+     * recording must survive that too -- and the clip must still land in the edit, not in a new
+     * memory's slot.
+     */
+    it('allows a removal while a recording runs, and the recording carries on', async () => {
+      const tree = await openEditShowingItsRows();
+
+      await tap(tree, 'voice-record-button');
+      expect(has(tree, 'voice-recorder-bar')).toBe(true);
+      const control = pressable(tree, 'piece-remove-1');
+      expect(control).toBeDefined();
+      expect(control.props.disabled).toBeFalsy();
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+
+      // The removal happened, and it started the edit on the way (FR-013).
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.startEdit).toHaveBeenCalledTimes(1);
+      expect(rows(tree)).toEqual([SAVED_ROWS[0], SAVED_ROWS[2]]);
+      expect(textAt(tree, 'capture-status-line')).toBe('Changes kept');
+
+      // The bar is still recording, in the same element it started in.
+      expect(has(tree, 'voice-recorder-bar')).toBe(true);
+      expect(pressable(tree, 'voice-stop-button')).toBeDefined();
+      expect(voiceBar.__mounts()).toBe(1);
+
+      // And the clip it was recording all along is kept -- in this memory's edit.
+      await tap(tree, 'voice-stop-button');
+      expect(rows(tree)).toHaveLength(3);
+      const [slot, piece] = CaptureDraftStore.addPiece.mock.calls.at(-1);
+      expect([slot, piece.kind]).toEqual(['edit', 'audio']);
+      expect(listed('edit')).toHaveLength(3);
     });
   });
 });
