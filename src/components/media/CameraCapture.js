@@ -66,7 +66,12 @@ export const CameraCapture = ({
   // Without it recordAsync fails on iOS rather than silently producing a
   // silent clip.
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
-  const [mode, setMode] = useState(initialMode);
+  // No setter: the toggle that used to change this mid-session is gone (T068, FR-008), so a
+  // mount is PHOTO or VIDEO for its whole life, fixed by whichever `initialMode` it was given.
+  // The video branch below (`startRecording`/`stopRecording`/the recording indicator/styles) is
+  // therefore reachable only through a caller that passes `initialMode={CameraMode.VIDEO}` --
+  // none does today.
+  const [mode] = useState(initialMode);
   const [facing, setFacing] = useState('back');
   const [flash, setFlash] = useState(FlashMode.OFF);
   const [isRecording, setIsRecording] = useState(false);
@@ -327,7 +332,7 @@ export const CameraCapture = ({
 
       {/*
         Overlay, not children. CameraView stopped rendering its children in expo-camera 16+,
-        so everything below -- the shutter, the mode switcher, the close and flip buttons --
+        so everything below -- the shutter, the close and flip buttons --
         simply did not draw: the preview filled the screen with no way to take a picture.
         Rendered as an absolutely-positioned sibling over the preview instead, which is the
         supported arrangement.

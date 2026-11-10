@@ -1,11 +1,14 @@
 /**
  * VoiceRecorderBar (013 T022) -- voice capture for the capture screen.
  *
- * One tap starts, one tap stops, and there is nothing to hold down (FR-006). That is the
- * whole point of this component existing beside `src/components/media/AudioRecorder.js`,
- * which defaults to press-and-hold ("a walkie-talkie, not a two-tap transport") and cannot
- * be walked with. Each stop produces exactly one clip, and the 5:00 cap **keeps** the clip
- * rather than discarding it.
+ * One tap starts, one tap stops, and there is nothing to hold down (FR-006). That used to be
+ * the whole point of this component existing beside `src/components/media/AudioRecorder.js` --
+ * until 013 T068 retired that file's press-and-hold default, which is one tap too now. What
+ * still keeps them separate: this is the capture screen's own recorder, combining the dock's
+ * idle "Voice" button and the recording bar in one component (below) and handling backgrounding
+ * and interruptions (FR-007, T038) that `AudioRecorder.js` -- kept only for
+ * `JournalComposeModal`'s editing path -- has no need to. Each stop produces exactly one clip,
+ * and the 5:00 cap **keeps** the clip rather than discarding it.
  *
  * Idle, it is the dock's "Voice" button; recording, it is the bar from the prototype --
  * timer, "Recording ..." and Stop. One component owns both so that the single tap that

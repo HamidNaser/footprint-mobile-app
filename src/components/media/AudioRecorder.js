@@ -429,7 +429,6 @@ export const AudioRecorder = ({
               },
             ]}
             onPress={handleMainButtonPress}
-            delayPressOut={0}
           >
             {recordingState === RecordingState.IDLE && (
               <Ionicons name="mic" size={32} color="#FFF" />

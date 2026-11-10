@@ -485,10 +485,9 @@ describe('ordered pieces (FR-005, FR-027)', () => {
 
   it('still accepts the legacy object form', () => {
     // Breaking `JournalComposeModal` now would be a defect, not a simplification: it is the
-    // only caller today (the one call site, src/components/journal/JournalComposeModal.js:341),
-    // and T068 (removing what this feature made dead) found that caller still real -- see the
-    // file header above `blocksFromComposer` for why retiring this form is a product decision,
-    // not a cleanup.
+    // only caller today, and T068 (removing what this feature made dead) found that caller
+    // still real -- see the file header above `blocksFromComposer` for why retiring this form
+    // is a product decision, not a cleanup.
     const blocks = buildContentBlocks({
       text: 'Left Gare du Nord',
       attachedMedia: [photo(1)],

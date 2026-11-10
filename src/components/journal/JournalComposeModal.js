@@ -217,7 +217,6 @@ export const JournalComposeModal = ({
   const nextSeq = useCallback(() => { captureSeqRef.current += 1; return captureSeqRef.current; }, []);
   const [visibility, setVisibility] = useState(VisibilityOptions.PRIVATE);
   const [isSaving, setIsSaving] = useState(false);
-  const [activeMode, setActiveMode] = useState('text');
   const [showCamera, setShowCamera] = useState(false);
   const [showAudioRecorder, setShowAudioRecorder] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState(null);
