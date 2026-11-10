@@ -14,12 +14,22 @@
  *   buildContentBlocks(pieces)   -- the capture screen's ordered list of pieces. THE form.
  *   buildContentBlocks({ text, attachedMedia, audioRecordings, textNotes, ... })
  *                                -- the legacy composer's four separate lists, kept working
- *                                   for `JournalComposeModal` until T068 retires it.
+ *                                   for `JournalComposeModal`.
  *
  * The legacy form is not just a different argument shape, it is a different behaviour: it
  * hoists `text` to the top of the entry and it orders by an integer sequence. FR-005 is that a
  * text note keeps its place in capture order rather than always appearing first, so the pieces
  * form does neither.
+ *
+ * T068 (removing what 013-mobile-capture-map made dead) left this form in place: its only
+ * caller, `JournalComposeModal.handleSave`, is still real -- `entryLocationSharing.journey.test.js`
+ * exercises it directly, including for a brand-new entry. Switching that caller to the pieces
+ * form is not a deletion: the composer's capture handlers stamp `capturedAt` with a per-session
+ * integer sequence, never a real instant, and the pieces form writes `capturedAt` onto media and
+ * bare-text blocks as a recorded fact (see the comment above `blocksFromPieces`). Sending that
+ * integer to the server as if it were an instant is exactly the "meaningless value" this file
+ * warns about below, so retiring this form needs the composer's stamping fixed first -- a
+ * product decision, not a cleanup, and out of scope here.
  */
 
 /**
@@ -295,7 +305,8 @@ function mediaItemFor(piece) {
 }
 
 // ============================================================
-// The legacy composer form -- unchanged behaviour, removed by T068
+// The legacy composer form -- unchanged behaviour. Kept (see the file header):
+// `JournalComposeModal.handleSave` is still a real caller.
 // ============================================================
 
 /**

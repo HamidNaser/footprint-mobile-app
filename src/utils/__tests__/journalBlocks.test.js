@@ -201,8 +201,13 @@ describe('edge cases', () => {
  * first". The legacy object form above sorts four separate lists by an integer sequence and
  * hoists the composer text to the top; both of those are what this form replaces.
  *
- * The legacy form stays supported until T068, and every test above still exercises it. That is
- * deliberate: `JournalComposeModal` is the only caller today and it is rewritten by T068, not here.
+ * The legacy form stays supported, and every test above still exercises it. T068 (removing what
+ * 013-mobile-capture-map made dead) looked at retiring it: `JournalComposeModal` is still its
+ * only caller, and that caller is itself still real -- `entryLocationSharing.journey.test.js`
+ * exercises it directly, for a brand-new entry among other things. Moving it to the pieces form
+ * would need the composer's capture handlers to stamp a real instant instead of the per-session
+ * integer sequence they stamp today (see `journalBlocks.js`'s file header), which is a product
+ * fix, not a cleanup, so it was left as is.
  */
 describe('ordered pieces (FR-005, FR-027)', () => {
   // ISO-8601 UTC instants, which is what a piece carries (data-model: "instant of capture").
@@ -478,10 +483,12 @@ describe('ordered pieces (FR-005, FR-027)', () => {
     expect(buildContentBlocks([])).toEqual([]);
   });
 
-  it('still accepts the legacy object form, which T068 removes', () => {
+  it('still accepts the legacy object form', () => {
     // Breaking `JournalComposeModal` now would be a defect, not a simplification: it is the
-    // only caller today (the one call site, src/components/journal/JournalComposeModal.js:341)
-    // and T068 is the task that retires it.
+    // only caller today (the one call site, src/components/journal/JournalComposeModal.js:341),
+    // and T068 (removing what this feature made dead) found that caller still real -- see the
+    // file header above `blocksFromComposer` for why retiring this form is a product decision,
+    // not a cleanup.
     const blocks = buildContentBlocks({
       text: 'Left Gare du Nord',
       attachedMedia: [photo(1)],

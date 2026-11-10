@@ -56,7 +56,6 @@ export const CameraCapture = ({
   onDone,
   captureCount = 0,
   initialMode = CameraMode.PHOTO,
-  allowModeSwitch = true,
   allowFlash = true,
   maxVideoDuration = 60, // seconds
   videoQuality = '720p',
@@ -169,14 +168,6 @@ export const CameraCapture = ({
       default:
         return 'flash-off';
     }
-  };
-
-  /**
-   * Switch camera mode
-   */
-  const switchMode = (newMode) => {
-    if (isRecording) return;
-    setMode(newMode);
   };
 
   /**
@@ -387,42 +378,6 @@ export const CameraCapture = ({
 
         {/* Bottom controls */}
         <View style={styles.bottomControls}>
-          {/* Mode switcher */}
-          {allowModeSwitch && (
-            <View style={styles.modeSwitcher}>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === CameraMode.PHOTO && styles.modeButtonActive,
-                ]}
-                onPress={() => switchMode(CameraMode.PHOTO)}
-                disabled={isRecording}
-              >
-                <Text style={[
-                  styles.modeText,
-                  mode === CameraMode.PHOTO && styles.modeTextActive,
-                ]}>
-                  PHOTO
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === CameraMode.VIDEO && styles.modeButtonActive,
-                ]}
-                onPress={() => switchMode(CameraMode.VIDEO)}
-                disabled={isRecording}
-              >
-                <Text style={[
-                  styles.modeText,
-                  mode === CameraMode.VIDEO && styles.modeTextActive,
-                ]}>
-                  VIDEO
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
           {/* Capture controls */}
           <View style={styles.captureControls}>
             {/* Spacer */}
@@ -564,27 +519,6 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-  },
-  modeSwitcher: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  modeButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-  },
-  modeButtonActive: {
-    // Active mode style
-  },
-  modeText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 13,
-    fontWeight: '600',
-    letterSpacing: 1,
-  },
-  modeTextActive: {
-    color: '#FFF',
   },
   captureControls: {
     flexDirection: 'row',

@@ -232,10 +232,14 @@ export default function JournalScreen({ navigation }) {
   // State
   const [selectedDate, setSelectedDate] = useState(new Date());
   // The old composer. Nothing opens it any more -- T060 pointed its last opener, the detail
-  // view's Edit, at the capture screen -- so this state and the modal below are dead, and
-  // deliberately left for T068 to remove with the rest of what this feature made dead.
+  // view's Edit, at the capture screen -- so no user action ever flips this true. T068
+  // (which removed what this feature made dead elsewhere) left this mount and
+  // `handleSaveEntry` in place on purpose: `entryLocationSharing.journey.test.js` reaches
+  // them as `screen.root.findByType(JournalComposeModal).props.onSave(...)`, a backdoor into
+  // this screen's own createEntry/DB/wire wiring that has nothing to do with opening the
+  // modal. Removing the mount breaks that real regression coverage for no user-visible gain,
+  // so it stays until that test is rewritten to exercise the same wiring another way.
   const [showComposeModal, setShowComposeModal] = useState(false);
-  const [composeMode] = useState('text');
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [showEntryDetail, setShowEntryDetail] = useState(false);
   const [journalId, setJournalId] = useState(null);
@@ -876,10 +880,15 @@ export default function JournalScreen({ navigation }) {
 
   /**
    * Handle save entry from the compose modal, which **nothing on this screen now opens**: the
-   * detail view's Edit was its last opener and T060 re-points that at the capture screen. The
-   * modal and this handler are left where they are for T068, which is the task that removes
-   * what this feature made dead, once `git grep` proves no caller remains anywhere. A new
+   * detail view's Edit was its last opener and T060 re-points that at the capture screen. A new
    * memory does not come through here either: it is captured and saved on `CaptureScreen`.
+   *
+   * T068 (removing what this feature made dead) checked `git grep` for a caller before
+   * removing this, and found one: `entryLocationSharing.journey.test.js` reaches this handler
+   * via `screen.root.findByType(JournalComposeModal).props.onSave(...)`, with nothing in the UI
+   * ever pressed to get there. That is not the dead path it is checking for -- it is real
+   * coverage of `createEntry`/the local DB/the wire serialiser -- so the mount and this handler
+   * stay until that test is rewritten to reach the same wiring another way.
    */
   const handleSaveEntry = useCallback(async (entryData) => {
     try {
@@ -1351,7 +1360,6 @@ export default function JournalScreen({ navigation }) {
         visible={showComposeModal}
         onClose={() => setShowComposeModal(false)}
         onSave={handleSaveEntry}
-        initialMode={composeMode}
         primaryColor={PRIMARY_COLOR}
       />
 

@@ -38,11 +38,14 @@
  *
  * `JournalComposeModal` is **not** removed by T032 and is not expected to be gone here. plan.md's
  * Structure Decision keeps it "only for any remaining non-capture callers"; its one remaining
- * opener on this screen is the detail view's Edit (`JournalScreen.js`'s `JournalEntryDetail`
- * block), which T060 re-points at `Capture` and T068 retires. So the last block below pins that
- * its remaining save path still carries every field it is handed — `locationSharing` above all,
- * which `entryLocationSharing.journey.test.js` exists because it was once dropped — and that it
- * now *reports* a failure instead of swallowing it.
+ * opener on this screen was the detail view's Edit (`JournalScreen.js`'s `JournalEntryDetail`
+ * block), which T060 re-points at `Capture`. T068 (removing what this feature made dead)
+ * confirmed nothing opens the mount any more, but left it and `handleSaveEntry` in place:
+ * `entryLocationSharing.journey.test.js` reaches both directly by `findByType`, exercising this
+ * screen's own `createEntry`/DB/wire wiring with nothing in the UI ever pressed. So the last
+ * block below still pins that its remaining save path carries every field it is handed —
+ * `locationSharing` above all, which `entryLocationSharing.journey.test.js` exists because it
+ * was once dropped — and that it now *reports* a failure instead of swallowing it.
  *
  * Since 013 T059 this file also covers the Journal's two reachable ways **into** an edit — the
  * ⋯ menu's Edit and the "Unfinished edit — continue" line — and the question it asks before an
@@ -512,9 +515,11 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
 describe('JournalComposeModal is no longer opened for a new memory', () => {
   it('is still mounted by the screen, and closed, before anything is tapped', async () => {
     // The guard that stops the three cases below asserting nothing. `findByType` throws if the
-    // screen no longer renders the modal at all, so if T060 or T068 removes it, this file
-    // fails here and is revisited rather than passing vacuously. plan.md keeps the modal for
-    // "any remaining non-capture callers" — on this screen, the detail view's Edit.
+    // screen no longer renders the modal at all, so if this is ever removed, this file fails
+    // here and is revisited rather than passing vacuously. T068 looked at removing it and kept
+    // it instead: plan.md keeps the modal for "any remaining non-capture callers", and
+    // `entryLocationSharing.journey.test.js` is a real one, reaching it by `findByType` the
+    // same way this test does.
     const { tree } = await render();
 
     expect(composeModal(tree).props.visible).toBe(false);
@@ -653,7 +658,7 @@ describe('a new memory is no longer saved by the Journal screen (FR-017)', () =>
 });
 
 // ---------------------------------------------------------------------------
-// What is left of the compose path, which T060 re-points and T068 retires
+// What is left of the compose path, which T060 re-points and T068 kept in place
 // ---------------------------------------------------------------------------
 
 describe('the compose modal’s remaining save path', () => {
