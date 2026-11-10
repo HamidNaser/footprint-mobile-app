@@ -87,6 +87,7 @@ const { JournalRepository } = require('../JournalRepository');
 const { JournalService } = require('../../services/JournalService');
 const { DatabaseService } = require('../../services/DatabaseService');
 const { SyncQueue, SyncOperationType } = require('../../sync/SyncQueue');
+const { SettingsService } = require('../../services/SettingsService');
 const { ShareState } = require('../../database/schema');
 
 const BLOCKS = [{ type: 'text', content: 'the quay at dusk', order: 0 }];
@@ -127,6 +128,15 @@ beforeEach(async () => {
   __freshDatabase();
   await DatabaseService.initialize();
   jest.clearAllMocks();
+  // Cloud sync on, unless a test says otherwise. Re-set rather than cleared: `clearAllMocks`
+  // forgets calls, not implementations, so a test that switches storage off would leak it.
+  SettingsService.isSyncEnabled.mockResolvedValue(true);
+});
+
+// The mid-save tests below spy on a real object; `clearAllMocks` forgets calls but leaves a spy
+// in place, so it has to be put back.
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 describe('update, on a memory the server has never held', () => {
@@ -205,6 +215,24 @@ describe('update, on a memory the server holds', () => {
     expect(storedRow(entry.localId).sync_status).toBe('pending');
   });
 
+  it('edits the one memory ten times over and never adds a second (SC-005)', async () => {
+    // Counted in the table, which is the only place the claim means anything: the service
+    // suite's fake repository cannot insert a row at all, so "one memory" is structurally true
+    // there and could not fail.
+    const entry = await heldByTheServer();
+
+    for (let n = 1; n <= 10; n += 1) {
+      await JournalRepository.update(entry.localId, {
+        contentBlocks: [{ type: 'text', content: `the quay at dusk, take ${n}`, order: 0 }],
+      });
+    }
+
+    expect(__rawDb().prepare('SELECT COUNT(*) AS n FROM journal_entries').get().n).toBe(1);
+    expect(JSON.parse(storedRow(entry.localId).content_blocks)[0].content).toBe(
+      'the quay at dusk, take 10',
+    );
+  });
+
   it('queues one UPDATE_ENTRY per edit, not one per edit plus a stray', async () => {
     // Two edits are two operations by design (the queue does not deduplicate), and the point
     // here is the ratio: an edit adds exactly one row.
@@ -217,6 +245,110 @@ describe('update, on a memory the server holds', () => {
       SyncOperationType.UPDATE_ENTRY,
       SyncOperationType.UPDATE_ENTRY,
     ]);
+  });
+});
+
+describe('update, while storage is Local Only', () => {
+  it('queues nothing and leaves the sync status alone, even for a memory the server holds', async () => {
+    // Nothing drains the queue in this mode, so an operation written here could never be sent,
+    // and `pending` on the row would claim a send that is not coming. `_enqueueSync` returns
+    // early for exactly that reason, and the post-write correction has to hold the same rule --
+    // a memory synced before the person switched cloud sync off is the one row that can still
+    // read SYNCED here, which is precisely what that correction keys on.
+    const entry = await heldByTheServer();
+    SettingsService.isSyncEnabled.mockResolvedValue(false);
+
+    await JournalRepository.update(entry.localId, { contentBlocks: EDITED });
+
+    expect(queueRows()).toEqual([]);
+    expect(storedRow(entry.localId).sync_status).toBe('synced');
+    // The edit itself is stored either way: local journaling never depends on sync.
+    expect(JSON.parse(storedRow(entry.localId).content_blocks)).toEqual(EDITED);
+  });
+});
+
+/**
+ * When the push lands while the edit is being saved (fix round 1, Critical).
+ *
+ * `update` reads the entry, awaits two writes, and reads it back. A create finishing inside
+ * those awaits calls `SyncEngine._handleCreateSuccess` -> `JournalRepository.markSynced`, which
+ * stamps the server id and marks the row synced through its own direct write and enqueues
+ * nothing. Decide anything from the read taken before that and it is decided from a row that no
+ * longer exists: the memory now HAS a server id, and an edit that queued nothing on the strength
+ * of the stale read is an edit no push will ever collect. Nothing heals it -- over `src/sync`
+ * only `_backfillMediaQueue` and `reconcileDefaultJournal` re-enqueue anything, and neither
+ * looks for a dirty row with an empty queue -- so the edit comes back only if the person happens
+ * to edit the memory again.
+ *
+ * It is also the one window in which the old unconditional enqueue did better: the row it wrote
+ * carried `server_id: null`, and `_processSingleOperation` resolves
+ * `operation.serverId || currentEntry?.serverId` (`SyncEngine.js:1065`), so it would have found
+ * the fresh id and sent a real update. Both decisions are therefore made from the read taken
+ * AFTER the write.
+ */
+describe('update, when the push lands while the edit is being saved', () => {
+  /**
+   * The create coming back inside `update`'s own awaits: `markSynced` runs, and then the edit's
+   * write proceeds. Hooked onto the first `DatabaseService.updateEntry` call, which is the
+   * edit's own write, so the stamp lands after `update` has read the row and before it reads it
+   * back. `markSynced`'s nested write goes to the real method: the one-shot implementation is
+   * already spent, and a `jest.spyOn` with none left calls through.
+   */
+  const pushLandsMidSave = (localId, serverId) => {
+    const realUpdateEntry = DatabaseService.updateEntry.bind(DatabaseService);
+    jest
+      .spyOn(DatabaseService, 'updateEntry')
+      .mockImplementationOnce(async (id, data) => {
+        await JournalRepository.markSynced(localId, serverId);
+        return realUpdateEntry(id, data);
+      });
+  };
+
+  /** A memory saved offline whose create has just been pushed, so the queue holds its done row. */
+  const createJustPushed = async () => {
+    const entry = await savedOnThisPhone();
+    const [create] = await SyncQueue.getOperationsForEntity(entry.localId);
+    await SyncQueue.markCompleted(create.id, { serverId: 'srv-late' });
+    return entry;
+  };
+
+  it('queues one UPDATE_ENTRY carrying the id that landed, rather than queueing nothing', async () => {
+    const entry = await createJustPushed();
+    pushLandsMidSave(entry.localId, 'srv-late');
+
+    await JournalRepository.update(entry.localId, { contentBlocks: EDITED });
+
+    expect(queueRows()).toEqual([
+      expect.objectContaining({
+        operation_type: SyncOperationType.CREATE_ENTRY,
+        status: 'completed',
+      }),
+      expect.objectContaining({
+        operation_type: SyncOperationType.UPDATE_ENTRY,
+        entity_id: entry.localId,
+        server_id: 'srv-late',
+        status: 'pending',
+      }),
+    ]);
+    // The column and the payload agree on which memory this is. They were read from different
+    // snapshots before this fix.
+    expect(JSON.parse(queueRows()[1].payload)).toEqual(
+      expect.objectContaining({ serverId: 'srv-late', contentBlocks: EDITED }),
+    );
+  });
+
+  it('leaves the row pending, so an unsent edit is not hidden behind a synced row', async () => {
+    // `markSynced` wrote `synced` after `update` had read `pending`, so nothing in the edit's
+    // own write moved it back -- and a row reading `synced` over an edit the server has not seen
+    // is what tells `ConflictResolver.detectConflict` there is nothing local to protect, so an
+    // incoming server copy overwrites the edit without a conflict being raised at all.
+    const entry = await createJustPushed();
+    pushLandsMidSave(entry.localId, 'srv-late');
+
+    await JournalRepository.update(entry.localId, { contentBlocks: EDITED });
+
+    expect(storedRow(entry.localId).sync_status).toBe('pending');
+    expect(storedRow(entry.localId).server_id).toBe('srv-late');
   });
 });
 

@@ -352,7 +352,38 @@ class JournalRepositoryClass extends BaseRepository {
 
     this.log('update', { localId, fields: Object.keys(updateData) });
 
-    const updated = await this.getByLocalId(localId);
+    let updated = await this.getByLocalId(localId);
+
+    // ⚠ Everything below decides from `updated`, the row as it stands AFTER the write, never
+    // from the `entry` read at the top of this method.
+    //
+    // A push finishing inside this method's own awaits calls
+    // `SyncEngine._handleCreateSuccess` -> `markSynced`, which stamps the server id and marks
+    // the row synced through a direct write that enqueues nothing. The read at the top then
+    // describes a memory that no longer exists, and both decisions made from it are wrong in
+    // the same direction: nothing is queued, and the row is left reading `synced` over an edit
+    // the server has never seen. Nothing heals that -- over `src/sync` only
+    // `_backfillMediaQueue` and `reconcileDefaultJournal` re-enqueue anything, and neither
+    // looks for a dirty row with an empty queue -- so the edit returns only if the person
+    // happens to edit the memory again.
+    //
+    // The sync status first: the edit's own write could only carry PENDING if the stale read
+    // already said SYNCED, so a stamp that landed in between leaves it to be corrected here. A
+    // row reading `synced` over an unsent edit is not cosmetic: it is what tells
+    // `ConflictResolver.detectConflict` there is nothing local to protect, so an incoming
+    // server copy overwrites the edit with no conflict raised.
+    if (syncEnabled && updated?.syncStatus === SyncStatus.SYNCED) {
+      await this.dbService.updateEntry(localId, { syncStatus: SyncStatus.PENDING });
+      updated = await this.getByLocalId(localId);
+    }
+
+    // The server id the queued operation is for. `updated` is the authority -- it is the later
+    // read, and nothing in this codebase ever clears a server id, so it can only have gained
+    // one -- with `entry.serverId` kept as a fallback for the single case `updated` cannot
+    // speak to: a row deleted from under us, where `getByLocalId` answers null. It is also what
+    // keeps the `server_id` column and the `{...updated}` payload describing the same memory;
+    // they were read from different snapshots before this.
+    const serverId = updated?.serverId || entry.serverId || null;
 
     // Queue the update for push -- but only for a memory the server already holds.
     //
@@ -365,12 +396,12 @@ class JournalRepositoryClass extends BaseRepository {
     // or, for a memory whose share the server refused for good and whose create was therefore
     // removed, the next `JournalService.reshareEntry`. This applies to every edit of a
     // not-yet-uploaded memory, not only a refused one (research R15, analyze round-4 U1).
-    if (entry.serverId) {
+    if (serverId) {
       await this._enqueueSync(
         SyncOperationType.UPDATE_ENTRY,
         localId,
         { ...updated, local_id: localId },
-        entry.serverId,
+        serverId,
       );
     }
 

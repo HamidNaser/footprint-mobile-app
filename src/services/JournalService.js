@@ -873,7 +873,15 @@ class JournalServiceClass {
 
     for (const item of items) {
       // Already uploaded: nothing to do.
-      if (item?.serverUrl) continue;
+      //
+      // `url` as well as `serverUrl`, so this gate agrees with the other one on the upload
+      // path: `SyncEngine._isUnuploadedItem` (`:658`) reads either as proof the server holds
+      // the file. A piece loaded back by an edit carries `{id, url}` and no local file, so it
+      // was already excluded here by having no path -- but it is one stray field away from
+      // being uploaded a second time, and a second copy takes a new media id, which loses the
+      // moment and place the server carries across an edit by matching on that id and then on
+      // its url (research R7, R3; FR-019).
+      if (item?.serverUrl || item?.url) continue;
 
       const localPath = item?.localPath || item?.uri;
       if (!localPath) continue;

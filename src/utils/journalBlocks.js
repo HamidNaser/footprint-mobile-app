@@ -220,12 +220,19 @@ function blocksFromPieces(pieces) {
  * A piece loaded back by an edit is already on the server: it is referenced by its server
  * `id`/`url` and carries **no** `localPath`. Remote media is never copied and never re-uploaded.
  *
- * What actually excludes it from the upload queue is the `url`:
- * `SyncEngine._isUnuploadedItem` is
- * `!!((localPath || uri) && !mediaId && !(serverUrl || url))`, so a remote item is already
- * excluded by carrying a `url`, whatever its `localPath` says. `localPath` is omitted anyway so
- * the two signals can never disagree -- an item that claims both a server copy and a pending
- * local file is a contradiction for every later reader of it, not just for the sync engine.
+ * Two independent things exclude it from being uploaded, and it is worth knowing which:
+ *
+ *   - **the missing `localPath`**, which is what `JournalService._queueMediaBlockForUpload`
+ *     needs: it skips an item with no `localPath` and no `uri`;
+ *   - **the `url`**, which both gates on that path now read as proof the server holds the file
+ *     -- `SyncEngine._isUnuploadedItem` is
+ *     `!!((localPath || uri) && !mediaId && !(serverUrl || url))`, and the queue skips on
+ *     `serverUrl || url` too (fix round 1; it keyed only on `serverUrl` before, so the `url`
+ *     alone did NOT exclude it there).
+ *
+ * `localPath` is omitted anyway so the two signals can never disagree -- an item that claims
+ * both a server copy and a pending local file is a contradiction for every later reader of it,
+ * not just for the sync engine.
  */
 function mediaItemFor(piece) {
   const common = {

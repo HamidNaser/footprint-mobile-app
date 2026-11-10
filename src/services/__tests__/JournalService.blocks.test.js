@@ -19,6 +19,11 @@ jest.mock('../DatabaseService', () => {
     DatabaseService: {
       updateEntry: jest.fn(async (localId, updates) => repository.__write(localId, updates)),
       queueMedia: jest.fn(async (media) => {
+        // `INSERT OR IGNORE INTO media_queue (local_id, ...)` (`DatabaseService.js:496`), keyed
+        // as production keys it: re-queueing a file the queue already holds is a no-op, not a
+        // second row. Modelled, so the store cannot show duplicates production never has --
+        // which would force a test asserting its contents to go blind to repeats.
+        if (mediaQueue.some((row) => row.localId === media.localId)) return;
         mediaQueue.push(media);
       }),
     },
@@ -40,7 +45,12 @@ jest.mock('../SettingsService', () => ({
  *     through that private helper (`JournalRepository.js:552-563`), which **returns early when
  *     sync is disabled and catches every enqueue error** — so the real `update` resolves
  *     normally whether or not an operation was really written, and it moves a synced memory
- *     back to pending only when sync is enabled (`:346-349`). An earlier version of this fake
+ *     back to pending only when sync is enabled (`:346-349`). ⚠ It also models the
+ *     **unconditional** `UPDATE_ENTRY` that `update` enqueued before T056 -- deliberately, and
+ *     it is now retired behaviour: that is what makes routing `reshareEntry` back through
+ *     `update` go red here, and the real rule (an `UPDATE_ENTRY` only for a memory the server
+ *     holds) is pinned over the real repository and the real queue in
+ *     `src/repositories/__tests__/JournalRepository.update.test.js`. An earlier version of this fake
  *     enqueued unconditionally and let errors propagate, which is what hid round-1 Critical 1:
  *     a `reshareEntry` that cleared the refusal "once the memory is queued" cleared it over a
  *     memory that was never queued, leaving a card reading "Friends" over a memory nobody can
@@ -394,6 +404,40 @@ describe('updateEntry', () => {
     ]);
   });
 
+  it('never queues a piece the server already holds, even with a local path left on it', async () => {
+    // The two gates on the upload path have to agree about what "already uploaded" means.
+    // `SyncEngine._isUnuploadedItem` (`SyncEngine.js:658`) reads a `url` as proof the file is on
+    // the server; `_queueMediaBlockForUpload` keyed only on `serverUrl`, so a remote piece that
+    // also carried a local path -- one field away, in the edit-mode loader that will set
+    // `piece.remote` -- would have been uploaded a second time. That is the harm R7 and FR-019
+    // exist to prevent: a second copy takes a new media id, and the server carries a piece's
+    // moment and place across an edit by matching on that id and then on its url.
+    seedEntry();
+
+    await edit([{ ...REMOTE, localPath: 'file:///docs/media/quay.jpg' }, newPhoto()]);
+
+    expect(__mediaQueue).toEqual([
+      expect.objectContaining({
+        entryLocalId: 'local-1',
+        filePath: 'file:///docs/media/new-1.jpg',
+      }),
+    ]);
+  });
+
+  it('stores a cleared piece list, and copies nothing (the edit that removes everything)', async () => {
+    // The one input that tells the two branches of the persist guard apart from the outside: an
+    // empty array is a real instruction to remove every piece, not an absent one. An
+    // implementation that read "no pieces" as "nothing to change" would keep the memory's old
+    // pieces and the removal would silently not happen.
+    seedEntry();
+
+    await JournalService.updateEntry('local-1', { contentBlocks: [] });
+
+    expect(stored().contentBlocks).toEqual([]);
+    expect(FileService.persist).not.toHaveBeenCalled();
+    expect(__mediaQueue).toEqual([]);
+  });
+
   it('leaves the pieces alone when the edit changes something else (an audience, say)', async () => {
     // `updates` with no `contentBlocks` is not an empty entry. Treating a missing block list
     // as one -- `_persistMediaBlocks(undefined)` answers `[]` -- would store no pieces at all
@@ -408,7 +452,11 @@ describe('updateEntry', () => {
     expect(__mediaQueue).toEqual([]);
   });
 
-  it('leaves one memory after ten edits, the untouched piece still its own (SC-005)', async () => {
+  it('keeps the untouched piece its own through ten edits (SC-005)', async () => {
+    // "Exactly one memory" is not asserted here: this fake repository's `write` throws when the
+    // row is absent and never inserts, so no implementation could add a second one and the
+    // claim would be structurally true. It is counted in the table instead, in
+    // `src/repositories/__tests__/JournalRepository.update.test.js`.
     seedEntry();
     let media = [REMOTE];
 
@@ -418,15 +466,15 @@ describe('updateEntry', () => {
       media = storedMedia();
     }
 
-    expect(__rows.size).toBe(1);
     expect(storedMedia()).toHaveLength(11);
     // Ten edits later, the piece nobody touched still carries the server's id and url and its
     // original moment and place.
     expect(storedMedia()[0]).toEqual(REMOTE_AS_SAVED);
-    // Every file the upload queue was ever given, as a set: the ten new captures and nothing
-    // else. The remote piece has no local file and is never queued, in any round.
-    expect(new Set(__mediaQueue.map((row) => row.filePath))).toEqual(
-      new Set(Array.from({ length: 10 }, (_, i) => `file:///docs/media/new-${i + 1}.jpg`)),
+    // Every row the upload queue holds, in order: the ten new captures and nothing else. One
+    // row each, because the queue is keyed on the file as production keys it -- so a repeat is
+    // visible here as a duplicate, and the remote piece's absence is the absence of a row.
+    expect(__mediaQueue.map((row) => row.filePath)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `file:///docs/media/new-${i + 1}.jpg`),
     );
   });
 });
