@@ -193,7 +193,7 @@ jest.mock('expo-audio', () => {
 
 import * as audio from 'expo-audio';
 import VoicePlayer, { PLAYBACK_AUDIO_MODE, formatClock } from '../VoicePlayer';
-import { BARS_COMPACT } from '../../media/WaveformStrip';
+import { BARS_COMPACT, resampleLevels } from '../../media/WaveformStrip';
 // The two hosts T054 puts the player in, rendered for real at the bottom of this file.
 import PieceList from '../../capture/PieceList';
 import { JournalEntryCard } from '../JournalEntryCard';
@@ -255,7 +255,28 @@ const stripBars = (tree, testID) =>
   );
 
 const flatten = (style) =>
-  Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style || {};
+  Array.isArray(style)
+    ? Object.assign({}, ...style.filter(Boolean).map((entry) => flatten(entry)))
+    : style || {};
+
+const flattenStyle = flatten;
+
+/**
+ * The flattened style of a node, picked by testID. Host nodes only: a `View` is a composite
+ * wrapping a host of the same name, and the component handed the testID carries it as a prop
+ * without carrying the style that goes with it.
+ */
+const styleOf = (tree, testID) =>
+  flatten(
+    tree.root.findAll((n) => typeof n.type === 'string' && n.props?.testID === testID)[0]?.props
+      ?.style,
+  );
+
+const timeNode = (tree, testID) => node(tree, `${testID}-time`);
+
+/** The height of every bar on a clip's strip, in order. */
+const barHeights = (tree, testID) =>
+  stripBars(tree, testID).map((bar) => flatten(bar.props.style).height);
 
 /** How many bars read as already played. */
 const playedBars = (tree, testID, accent) =>
@@ -517,8 +538,11 @@ describe('VoicePlayer: the strip stays, and works (FR-021)', () => {
     });
     const player = audio.__playerFor(CLIP_A);
 
-    // One bar per recorded level: the strip is this clip's, not a generic one.
-    expect(stripBars(tree, 'clip-a')).toHaveLength(LEVELS.length);
+    // The strip is drawing *this clip*, not a generic one: the bar heights are the clip's own
+    // levels resampled to the strip's bar count, which no fallback strip can coincide with.
+    expect(barHeights(tree, 'clip-a')).toEqual(
+      resampleLevels(LEVELS, BARS_COMPACT).map((level) => level * 24),
+    );
     expect(playedBars(tree, 'clip-a', ACCENT)).toBe(1); // the bar at position 0
 
     await tap(tree, 'clip-a');
@@ -528,7 +552,38 @@ describe('VoicePlayer: the strip stays, and works (FR-021)', () => {
     });
 
     // Three quarters through, so three quarters of the bars read as played.
-    expect(playedBars(tree, 'clip-a', ACCENT)).toBe(7);
+    expect(playedBars(tree, 'clip-a', ACCENT)).toBe(23);
+  });
+
+  it("does not seek until the player knows the clip's length, then seeks by that", async () => {
+    const tree = render({ uri: CLIP_A, duration: 12, waveform: LEVELS, testID: 'clip-a' });
+    const player = audio.__playerFor(CLIP_A);
+    const strip = stripOf(tree, 'clip-a');
+    await act(async () => {
+      strip.props.onLayout({ nativeEvent: { layout: { width: 200, height: 24 } } });
+    });
+
+    // Nothing loaded yet. The only length to hand is the piece's, and the piece's can be short
+    // of the truth -- and once playback has run past it the shown total is the *position*, so
+    // seeking against it would land the playhead where it already is.
+    await act(async () => {
+      audio.__playedTo(player, 13);
+    });
+    await act(async () => {
+      await strip.props.onPress({ nativeEvent: { locationX: 199 } });
+    });
+    expect(player.seekTo).not.toHaveBeenCalled();
+
+    // Now the player reports 20 s, which is the only length a seek is ever measured against.
+    await act(async () => {
+      audio.__loaded(player, 20);
+    });
+    await act(async () => {
+      await strip.props.onPress({ nativeEvent: { locationX: 50 } });
+    });
+
+    // A quarter along a 20-second clip: 5 s. A quarter of the piece's claimed 12 would be 3.
+    expect(player.seekTo).toHaveBeenCalledWith(5);
   });
 
   it('seeks to the point in the clip that was tapped on the strip', async () => {
@@ -550,6 +605,68 @@ describe('VoicePlayer: the strip stays, and works (FR-021)', () => {
     expect(player.seekTo).toHaveBeenCalledWith(3);
   });
 
+  /**
+   * FR-021 is a MUST about appearance, and the pill's appearance has drifted twice in review.
+   * So this case is the exhaustive list: every style property the compact `AudioPlayer` and the
+   * card between them put inside `styles.audioPlayer` today, asserted here so the next drift
+   * fails a test instead of needing another reviewer.
+   *
+   * Today's tree, from `AudioPlayer.js` before this task removed it from the pill:
+   *   containerCompact  row / center / padding 8 / #F5F5F5 / radius 8
+   *   playButtonCompact 32x32 / radius 16 / centred / marginRight 8 / primaryColor
+   *   compactContent    flex 1 / marginRight 8
+   *   waveformContainer row / center / space-between / height 50 / marginBottom 12
+   *   durationCompact   11pt / #999 / tabular / minWidth 70 / right
+   */
+  it("is the compact AudioPlayer's pill, property for property (FR-021)", () => {
+    const tree = render({ uri: CLIP_A, duration: 12, color: ACCENT, testID: 'clip-a' });
+
+    expect(styleOf(tree, 'clip-a')).toMatchObject({
+      flexDirection: 'row',
+      alignItems: 'center',
+      padding: 8,
+      backgroundColor: '#F5F5F5',
+      borderRadius: 8,
+    });
+
+    expect(flattenStyle(toggle(tree, 'clip-a').props.style)).toMatchObject({
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginRight: 8,
+      backgroundColor: ACCENT,
+    });
+
+    expect(styleOf(tree, 'clip-a-content')).toMatchObject({ flex: 1, marginRight: 8 });
+
+    expect(flattenStyle(stripOf(tree, 'clip-a').props.style)).toMatchObject({
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      height: 50,
+      marginBottom: 12,
+    });
+
+    // 30 bars, each at most 24 px, 3 px wide with a 2 px radius -- the compact numbers.
+    const barStyles = stripBars(tree, 'clip-a').map((bar) => flattenStyle(bar.props.style));
+    expect(barStyles).toHaveLength(BARS_COMPACT);
+    barStyles.forEach((bar) => {
+      expect(bar.width).toBe(3);
+      expect(bar.borderRadius).toBe(2);
+      expect(bar.height).toBeLessThanOrEqual(24);
+    });
+
+    expect(flattenStyle(timeNode(tree, 'clip-a').props.style)).toMatchObject({
+      fontSize: 11,
+      color: '#999',
+      fontVariant: ['tabular-nums'],
+      minWidth: 70,
+      textAlign: 'right',
+    });
+  });
+
   it('still draws a strip for a clip whose waveform the server dropped', () => {
     const missing = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
     // `[]` is the shape a server-sourced clip actually arrives in: the backend never stores the
@@ -569,6 +686,12 @@ describe('VoicePlayer: never while a recording is running (FR-007)', () => {
 
     expect(toggle(tree, 'clip-a').props.disabled).toBe(true);
     expect(label(tree, 'clip-a')).toMatch(/recording/i);
+
+    // Loaded, so that the refusal below is the recording guard's and not merely "there is no
+    // length to seek against yet" -- the two are indistinguishable on an unloaded clip.
+    await act(async () => {
+      audio.__loaded(player, 12);
+    });
 
     await tap(tree, 'clip-a');
     const strip = stripOf(tree, 'clip-a');
@@ -747,8 +870,11 @@ describe('VoicePlayer: the two places a voice clip appears (FR-020)', () => {
     });
     trees.push(tree);
 
-    // Four recorded levels, four bars: the pill is drawing this clip and not a generic strip.
-    expect(stripBars(tree, 'memory-voice-player-0-0')).toHaveLength(4);
+    // The block's four levels, resampled across the pill's bars: the card is drawing this
+    // clip's own waveform and not the fallback strip.
+    expect(barHeights(tree, 'memory-voice-player-0-0')).toEqual(
+      resampleLevels([0.3, 0.6, 0.2, 0.9], BARS_COMPACT).map((level) => level * 24),
+    );
 
     await tap(tree, 'memory-voice-player-0-0');
 

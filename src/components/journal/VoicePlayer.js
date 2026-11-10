@@ -55,7 +55,8 @@
  * way `VoiceRecorderBar` prefers `useAudioRecorder` + `useAudioRecorderState` on the recording
  * side of the same API: the hook releases the native player when the component goes, which is
  * the one piece of bookkeeping `src/components/media/AudioPlayer.js` (this file's predecessor
- * in the pill, kept for `InterviewModeScreen`) has to do by hand.
+ * in the pill, and still rendered by `media/MediaPreview.js` and `JournalEntryDetail`) has to do
+ * by hand.
  */
 
 import React, { useCallback, useEffect, useMemo } from 'react';
@@ -251,24 +252,34 @@ export default function VoicePlayer({
     }
   }, [finished, isPlaying, player, unavailable]);
 
-  /** Moves playback to where the strip was tapped. */
+  /**
+   * Moves playback to where the strip was tapped.
+   *
+   * **Measured against `loadedTotal`, never the shown total**, and so not possible at all until
+   * the player has reported a length. The shown total falls back to the piece's recorded length
+   * and is floored at the position, so before the player has loaded a clip that has played past
+   * its recorded length has `total === position` — and seeking against that sends the playhead
+   * to where it already is, leaving the strip fully coloured while the clip plays on. There is
+   * no length worth seeking against until the player has one, and a clip reports its length as
+   * soon as it loads.
+   */
   const seekToFraction = useCallback(
     async (fraction) => {
-      if (unavailable || !(total > 0)) return;
+      if (unavailable || !(loadedTotal > 0)) return;
       try {
-        await player.seekTo(fraction * total);
+        await player.seekTo(fraction * loadedTotal);
       } catch (error) {
         console.warn('[VoicePlayer] could not move through this voice clip', error);
       }
     },
-    [player, total, unavailable],
+    [loadedTotal, player, unavailable],
   );
 
   const accessibilityLabel =
     unavailable ?? (isPlaying ? 'Pause this voice clip' : 'Play this voice clip');
 
   return (
-    <View testID={testID} style={[styles.row, style]}>
+    <View testID={testID} style={[styles.pill, style]}>
       <TouchableOpacity
         testID={`${testID}-toggle`}
         accessibilityRole="button"
@@ -282,20 +293,24 @@ export default function VoicePlayer({
       </TouchableOpacity>
 
       {/* The strip the pill has always had: the clip's shape, how far through it is, and a tap
-          that moves playback (FR-021). */}
-      <WaveformStrip
-        testID={`${testID}-strip`}
-        levels={waveform}
-        seed={uri}
-        bars={BARS_COMPACT}
-        progress={total > 0 ? position / total : 0}
-        color={color}
-        barHeight={STRIP_BAR_HEIGHT}
-        height={STRIP_HEIGHT}
-        disabled={!!unavailable}
-        onSeek={seekToFraction}
-        style={styles.strip}
-      />
+          that moves playback (FR-021). The wrapper is the compact `AudioPlayer`'s
+          `compactContent` -- the strip is laid out in a column inside it, which is what gives
+          the strip its own `marginBottom`. */}
+      <View testID={`${testID}-content`} style={styles.content}>
+        <WaveformStrip
+          testID={`${testID}-strip`}
+          levels={waveform}
+          seed={uri}
+          bars={BARS_COMPACT}
+          progress={total > 0 ? position / total : 0}
+          color={color}
+          barHeight={STRIP_BAR_HEIGHT}
+          height={STRIP_HEIGHT}
+          disabled={!!unavailable}
+          onSeek={seekToFraction}
+          style={styles.strip}
+        />
+      </View>
 
       <Text testID={`${testID}-time`} style={styles.time}>
         {`${formatClock(position)} / ${formatClock(total)}`}
@@ -304,29 +319,47 @@ export default function VoicePlayer({
   );
 }
 
+/**
+ * Property for property, the compact `AudioPlayer`'s pill: `containerCompact`,
+ * `playButtonCompact`, `compactContent`, `waveformContainer` and `durationCompact` as they are
+ * in `media/AudioPlayer.js` today. FR-021 allows the card only this feature's additions, so
+ * nothing here is a fresh choice and none of it should be tidied without reading that rule.
+ * `VoicePlayer.test.js` asserts the lot.
+ */
 const styles = StyleSheet.create({
-  row: {
+  // `containerCompact`: the grey box the pill's contents have always sat in.
+  pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    padding: 8,
+    backgroundColor: '#F5F5F5',
+    borderRadius: 8,
   },
+  // `playButtonCompact`. The spacing is this button's own `marginRight`, not a `gap` on the
+  // row: a gap would also space the time text, which today sits tight against the content box.
   button: {
     width: 32,
     height: 32,
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 8,
   },
-  strip: {
+  // `compactContent`.
+  content: {
     flex: 1,
+    marginRight: 8,
   },
+  // `waveformContainer`'s spacing. Its row, centring and height are the strip's own.
+  strip: {
+    marginBottom: 12,
+  },
+  // `durationCompact`.
   time: {
-    fontSize: 13,
-    color: '#8E8E93',
+    fontSize: 11,
+    color: '#999',
     fontVariant: ['tabular-nums'],
-    // Right-aligned over a fixed width, as the compact `AudioPlayer`'s time was, so the strip
-    // beside it does not resize every time a digit changes.
-    minWidth: 76,
+    minWidth: 70,
     textAlign: 'right',
   },
 });

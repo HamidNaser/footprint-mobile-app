@@ -22,9 +22,11 @@
  *    with 200 kept only as the value to use before the first layout.
  *
  * A clip's **own** levels are drawn when it has them: `VoiceRecorderBar` records up to
- * `WAVEFORM_BARS` of them per clip and `data-model.md` carries them on the audio piece. The
- * fallback is for a clip that has none -- which, see `VoicePlayer`'s header, is every clip that
- * has been round-tripped through the server.
+ * `WAVEFORM_BARS` of them per clip and `data-model.md` carries them on the audio piece. They are
+ * **resampled to the strip's own bar count** rather than drawn one bar each -- see
+ * `resampleLevels` for why the count must not depend on how long the clip is. The fallback is for
+ * a clip that has no levels at all -- which, see `VoicePlayer`'s header, is every clip that has
+ * been round-tripped through the server.
  */
 
 import React, { useCallback, useMemo, useRef } from 'react';
@@ -70,10 +72,46 @@ export const fallbackLevels = (seed, bars = BARS_COMPACT) => {
 const clamp01 = (value) => Math.min(1, Math.max(0, Number(value) || 0));
 
 /**
+ * A clip's own levels, redrawn as exactly `bars` of them.
+ *
+ * The strip always draws the bar count it was asked for, because the count is part of how the
+ * strip *looks* and must not become a function of how long the clip is. `VoiceRecorderBar`
+ * collects about four levels a second and `downsampleWaveform` only ever downsamples, so a
+ * two-second clip arrives with about eight levels and a five-minute one with fifty: one bar per
+ * level would draw eight bars spread `space-between` across a whole pill where thirty have
+ * always appeared.
+ *
+ * Down, it averages each bucket, the way `downsampleWaveform` does, so the shape of the whole
+ * clip survives rather than only its beginning. Up, each bar takes the level it falls on, which
+ * widens a short clip's bars rather than inventing detail it does not have.
+ */
+export const resampleLevels = (levels, bars = BARS_COMPACT) => {
+  if (!Array.isArray(levels) || levels.length === 0) return [];
+  if (!(bars > 0)) return [];
+  if (levels.length === bars) return levels.map(clamp01);
+
+  if (levels.length > bars) {
+    const out = [];
+    for (let i = 0; i < bars; i += 1) {
+      const from = Math.floor((i * levels.length) / bars);
+      const to = Math.max(Math.floor(((i + 1) * levels.length) / bars), from + 1);
+      const bucket = levels.slice(from, to);
+      out.push(bucket.reduce((sum, level) => sum + clamp01(level), 0) / bucket.length);
+    }
+    return out;
+  }
+
+  return Array.from({ length: bars }, (_, i) =>
+    clamp01(levels[Math.floor((i * levels.length) / bars)]),
+  );
+};
+
+/**
  * @param {object} props
- * @param {number[]} [props.levels] The clip's own recorded levels, 0..1. One bar each.
+ * @param {number[]} [props.levels] The clip's own recorded levels, 0..1, however many of them
+ *   there are; they are resampled to `bars`.
  * @param {string} [props.seed] What the fallback strip is derived from; the clip's uri.
- * @param {number} [props.bars] How many bars the fallback draws.
+ * @param {number} [props.bars] How many bars the strip draws, whatever the clip.
  * @param {number} [props.progress] How far through the clip playback is, 0..1.
  * @param {string} [props.color] The colour of the bars already played.
  * @param {number} [props.barHeight] The height of a full-level bar.
@@ -97,9 +135,9 @@ export default function WaveformStrip({
   const recorded = Array.isArray(levels) && levels.length > 0;
 
   const drawn = useMemo(
-    () => (recorded ? levels.map(clamp01) : fallbackLevels(seed, bars)),
+    () => (recorded ? resampleLevels(levels, bars) : fallbackLevels(seed, bars)),
     // `levels` is compared by identity on purpose: a caller handing down a fresh array of the
-    // same numbers every render is a caller problem, and re-mapping is cheap. What must not be
+    // same numbers every render is a caller problem, and resampling is cheap. What must not be
     // recomputed is the fallback, which is why `seed` and `bars` are the other two keys.
     [recorded, levels, seed, bars],
   );
@@ -129,7 +167,11 @@ export default function WaveformStrip({
   return (
     <TouchableOpacity
       testID={testID}
-      accessibilityRole="adjustable"
+      // Deliberately no `accessibilityRole`. "adjustable" was tried and taken out again: it
+      // promises a screen reader increment and decrement actions, and there are none here -- on
+      // a component rendered by the voice pill, `media/MediaPreview.js` and `JournalEntryDetail`
+      // alike. Today's strip carries no role either, so this is also the FR-021 answer; a role
+      // with no `accessibilityValue` and no `onAccessibilityAction` is worse than none.
       activeOpacity={0.9}
       disabled={disabled}
       onLayout={handleLayout}

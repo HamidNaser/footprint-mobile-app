@@ -47,9 +47,9 @@ const PlaybackState = {
 export const AudioPlayer = ({
   uri,
   duration: initialDuration,
-  // The clip's recorded levels. Callers (`JournalEntryDetail`, `InterviewModeScreen`) have
-  // always passed this; until 013 T054 it was never declared here, so the strip drew invented
-  // bars even for a clip that had real ones.
+  // The clip's recorded levels. `JournalEntryDetail` has always passed this; until 013 T054 it
+  // was never declared here, so the strip drew invented bars even for a clip that had real ones.
+  // (`MediaPreview`, the other caller, passes none and gets the fallback strip.)
   waveformData,
   onPlaybackStart,
   onPlaybackEnd,

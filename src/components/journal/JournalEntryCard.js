@@ -20,7 +20,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { VideoThumbnail } from '../media/VideoThumbnail';
 // 013 T054: the voice pill's play control, which `media/AudioPlayer` never made work
-// (FR-020). That file stays for `InterviewModeScreen`, which still uses it.
+// (FR-020). That file stays: `media/MediaPreview.js` and `JournalEntryDetail` both render it.
 import VoicePlayer from './VoicePlayer';
 import { EngagementSection } from './EngagementSection';
 import DerivativeImage from '../media/DerivativeImage';
