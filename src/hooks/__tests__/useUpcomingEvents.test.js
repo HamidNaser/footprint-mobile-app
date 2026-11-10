@@ -458,6 +458,41 @@ describe('useUpcomingEvents: refresh', () => {
     expect(result.current.draftsCount).toBe(0);
   });
 
+  /**
+   * Fix round 3 -- `refresh`'s own identity, across a re-render triggered by a *failed* load
+   * (the state that actually produced the hazard below), not just what `refresh` does.
+   *
+   * `HomeScreen`'s focus-retry callback (fix round 2) depends on `refresh` alone, precisely so
+   * its own identity stays stable across every failure and never re-triggers
+   * `useFocusEffect`'s "callback identity changed while already focused" branch
+   * (`@react-navigation/core`'s `useFocusEffect.tsx`) -- the mechanism behind the retry-storm
+   * Critical that round fixed. If this hook ever made `refresh` identity-unstable (e.g. a
+   * dependency added to its own `useCallback`, line 172), that loop reopens through the one
+   * dependency `HomeScreen`'s callback still has -- and nothing would catch it:
+   * `HomeScreen.comingUp.test.js` mocks this hook with its own always-stable `jest.fn()`, so a
+   * real instability here is invisible from that side. Pinned at the source instead.
+   */
+  it("refresh's own identity is stable across a re-render caused by a failed load (fix round 3 -- HomeScreen's focus-retry depends on this)", async () => {
+    let attempt = 0;
+    EventsApi.getEvents.mockImplementation(async () => {
+      throw new Error(attempt === 0 ? 'network down' : 'still down after retry');
+    });
+    const { result, mount } = setup();
+    await mount();
+
+    const firstRefresh = result.current.refresh;
+    expect(result.current.error).not.toBeNull(); // the failing state this guard is actually for
+
+    attempt = 1;
+    await act(async () => {
+      result.current.refresh();
+    });
+    await act(async () => {});
+
+    expect(result.current.error).not.toBeNull(); // still failing, a fresh error object each time
+    expect(result.current.refresh).toBe(firstRefresh);
+  });
+
   it('a signed-out refresh still short-circuits with NOT_AUTHENTICATED and issues no network call', async () => {
     mockTabs({});
     const { result, mount } = setup();
