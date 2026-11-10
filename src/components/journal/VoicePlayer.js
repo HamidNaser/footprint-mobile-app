@@ -18,6 +18,29 @@
  * 4. **The control follows the player, never a local flag.** `useAudioPlayerStatus` is the
  *    only source of "is it playing", so a clip that ends by itself, or one paused because
  *    another clip started, shows Play again without anybody telling it to.
+ * 5. **A clip whose file has gone is shown as unavailable too.** expo-audio reports that on the
+ *    status as `error`, and a control over an unplayable file is the same dead button in a
+ *    narrower form.
+ * 6. **Nothing plays while a recording is running** (`isRecording`, FR-007). Playing asks for
+ *    `allowsRecording: false`, and there is one audio session for the whole app: on the capture
+ *    screen, where a saved clip's row sits above the recorder bar, a tap on it would otherwise
+ *    take `.playAndRecord` away from the recording in progress -- the same call
+ *    `VoiceRecorderBar` uses to *release* the session when a clip is finished. The recording
+ *    would end mid-sentence, and `VoiceRecorderBar` would read it as an interruption. Being
+ *    stopped by a tap in the app's own UI is worse than either of the cases FR-007 names.
+ *
+ * The strip -- the clip's bars, the played ones coloured, and a tap that moves playback -- is
+ * `WaveformStrip`, shared with `media/AudioPlayer` rather than copied from it. FR-021 allows the
+ * card only this feature's additions, so the pill keeps everything it draws today and gains only
+ * a control that works.
+ *
+ * ⚠ **A clip's own levels reach the pill only while the memory is read from the phone.** The
+ * waveform is stored on the *block* (`journalBlocks.js` puts it there, and the local
+ * `content_blocks` JSON keeps it), but the backend drops it on the way in:
+ * `JournalsController.MapToContentBlock` never sets `ContentBlock.Waveform`, although the domain
+ * model has the field and the response DTO returns it. So a memory that has been round-tripped
+ * through the server comes back with no waveform, and the fallback strip is the normal case, not
+ * the exception. That is a backend defect, not something this component can fix.
  *
  * **One clip plays at a time** (US4-3's "it plays, and tapping again pauses it" read across a
  * Journal full of cards): starting a clip pauses whichever clip was playing. The one playing
@@ -39,6 +62,7 @@ import React, { useCallback, useEffect, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
+import WaveformStrip, { BARS_COMPACT } from '../media/WaveformStrip';
 
 /**
  * The audio mode playing a clip asks for: audible with the ringer switch off, no microphone,
@@ -58,22 +82,34 @@ export const PLAYBACK_AUDIO_MODE = {
  */
 const END_TOLERANCE_S = 0.1;
 
+/** The strip's geometry in the pill, unchanged from the compact `AudioPlayer` it replaces. */
+const STRIP_BAR_HEIGHT = 24;
+const STRIP_HEIGHT = 50;
+
 /**
  * The one clip that is playing, app-wide. Module scope, for the reason in the file header:
  * the voice pill and the capture screen's audio rows are different trees.
  */
 let playingPlayer = null;
 
+/**
+ * Pauses a player without caring whether it is still there.
+ *
+ * Every `pause()` in this file goes through here, because every one of them can reach a player
+ * that has been released: a released `SharedObject` throws when it is called, and a card
+ * scrolling out of a list releases its player without telling the clip that holds the turn.
+ */
+const pauseQuietly = (player) => {
+  try {
+    player.pause();
+  } catch (error) {
+    // Already released: there is nothing left to pause, and whoever owned it has gone.
+  }
+};
+
 /** Starts this clip's turn, pausing whichever clip was playing. */
 const claimPlayback = (player) => {
-  if (playingPlayer && playingPlayer !== player) {
-    try {
-      playingPlayer.pause();
-    } catch (error) {
-      // Released between claiming and now: there is nothing left to pause, and the component
-      // that owned it has already gone.
-    }
-  }
+  if (playingPlayer && playingPlayer !== player) pauseQuietly(playingPlayer);
   playingPlayer = player;
 };
 
@@ -98,6 +134,10 @@ export const formatClock = (seconds) => {
  *   the control says so rather than pretending.
  * @param {number} [props.duration] The clip's length in seconds as the piece recorded it
  *   (data-model.md), shown until the player reports its own.
+ * @param {number[]} [props.waveform] The clip's recorded levels, if it still has them. See the
+ *   file header: a clip that has been round-tripped through the server has not.
+ * @param {boolean} [props.isRecording] True while a voice recording is running on this screen.
+ *   The control goes dead for the duration, for the reason in the file header (FR-007).
  * @param {string} [props.testID] Prefix for this player's nodes; two clips in one card need
  *   two different ones.
  * @param {string} [props.color] The control's colour, so the pill can keep the card's accent.
@@ -105,6 +145,8 @@ export const formatClock = (seconds) => {
 export default function VoicePlayer({
   uri,
   duration,
+  waveform,
+  isRecording = false,
   testID = 'voice-player',
   color = '#007AFF',
   style,
@@ -116,11 +158,37 @@ export default function VoicePlayer({
   const status = useAudioPlayerStatus(player);
 
   const isPlaying = !!status?.playing;
-  // The player's own length once it knows it; until then the length the piece recorded.
-  const total = status?.duration > 0 ? status.duration : Math.max(0, Number(duration) || 0);
+  // The player's own length, and *only* the player's: it is the one value that can be compared
+  // against the position, because both come from the same place.
+  const loadedTotal = status?.duration > 0 ? status.duration : 0;
   const position = Math.max(0, status?.currentTime || 0);
+  // What to *show*: the player's length once it has one, otherwise what the piece recorded --
+  // and never a length shorter than what has already played, which would read as "0:13 / 0:12".
+  const total = Math.max(loadedTotal || Math.max(0, Number(duration) || 0), position);
+  /**
+   * Whether the clip has run out, and so needs rewinding before it can play again.
+   *
+   * Measured against the player's own length, never against the piece's. A piece that
+   * under-reports its clip -- the length is recorded from a 250 ms poll, so a clip stopped
+   * between polls does -- would otherwise be "finished" while it was still mid-sentence, and
+   * the next tap would start it over instead of resuming.
+   */
   const finished =
-    !!status?.didJustFinish || (total > 0 && position >= total - END_TOLERANCE_S);
+    !!status?.didJustFinish || (loadedTotal > 0 && position >= loadedTotal - END_TOLERANCE_S);
+
+  /**
+   * Why this clip cannot be played, if it cannot. All three are the same defect in different
+   * clothes -- a control that looks live and does nothing -- so all three disable it and say so.
+   */
+  const unavailable = !uri
+    ? 'This voice clip is unavailable'
+    : isRecording
+      ? // Playing would call `setAudioModeAsync({ allowsRecording: false, … })` on the one
+        // shared audio session and end the recording that is running. See the file header.
+        'Not while you are recording'
+      : status?.error
+        ? 'This voice clip is unavailable'
+        : null;
 
   /**
    * The slot is given up when this clip stops playing, however it stopped -- including when
@@ -137,12 +205,24 @@ export default function VoicePlayer({
    */
   useEffect(() => () => releasePlayback(player), [player]);
 
+  /**
+   * A recording starting takes the audio session for recording, so a clip that was playing is
+   * stopped by the system whatever this component does. Pausing it here is what keeps the
+   * control honest about it instead of leaving a Pause icon over silence (FR-007).
+   */
+  useEffect(() => {
+    if (isRecording && isPlaying) {
+      pauseQuietly(player);
+      releasePlayback(player);
+    }
+  }, [isRecording, isPlaying, player]);
+
   const toggle = useCallback(async () => {
-    if (!uri) return;
+    if (unavailable) return;
 
     if (isPlaying) {
       // Pause, not stop: FR-020 says "pause when tapped again", so the clip keeps its place.
-      player.pause();
+      pauseQuietly(player);
       releasePlayback(player);
       return;
     }
@@ -164,15 +244,28 @@ export default function VoicePlayer({
       if (finished) await player.seekTo(0);
       player.play();
     } catch (error) {
+      // The turn goes back: the clip that was playing was paused to make way for this one, and
+      // holding the turn for a player that never started would have the next clip reach into it.
+      releasePlayback(player);
       console.warn('[VoicePlayer] could not play this voice clip', error);
     }
-  }, [finished, isPlaying, player, uri]);
+  }, [finished, isPlaying, player, unavailable]);
 
-  const accessibilityLabel = !uri
-    ? 'This voice clip is unavailable'
-    : isPlaying
-      ? 'Pause this voice clip'
-      : 'Play this voice clip';
+  /** Moves playback to where the strip was tapped. */
+  const seekToFraction = useCallback(
+    async (fraction) => {
+      if (unavailable || !(total > 0)) return;
+      try {
+        await player.seekTo(fraction * total);
+      } catch (error) {
+        console.warn('[VoicePlayer] could not move through this voice clip', error);
+      }
+    },
+    [player, total, unavailable],
+  );
+
+  const accessibilityLabel =
+    unavailable ?? (isPlaying ? 'Pause this voice clip' : 'Play this voice clip');
 
   return (
     <View testID={testID} style={[styles.row, style]}>
@@ -180,13 +273,29 @@ export default function VoicePlayer({
         testID={`${testID}-toggle`}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel}
-        accessibilityState={{ disabled: !uri }}
-        disabled={!uri}
+        accessibilityState={{ disabled: !!unavailable }}
+        disabled={!!unavailable}
         onPress={toggle}
-        style={[styles.button, { backgroundColor: uri ? color : '#C7C7CC' }]}
+        style={[styles.button, { backgroundColor: unavailable ? '#C7C7CC' : color }]}
       >
         <Ionicons name={isPlaying ? 'pause' : 'play'} size={16} color="#FFF" />
       </TouchableOpacity>
+
+      {/* The strip the pill has always had: the clip's shape, how far through it is, and a tap
+          that moves playback (FR-021). */}
+      <WaveformStrip
+        testID={`${testID}-strip`}
+        levels={waveform}
+        seed={uri}
+        bars={BARS_COMPACT}
+        progress={total > 0 ? position / total : 0}
+        color={color}
+        barHeight={STRIP_BAR_HEIGHT}
+        height={STRIP_HEIGHT}
+        disabled={!!unavailable}
+        onSeek={seekToFraction}
+        style={styles.strip}
+      />
 
       <Text testID={`${testID}-time`} style={styles.time}>
         {`${formatClock(position)} / ${formatClock(total)}`}
@@ -208,9 +317,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  strip: {
+    flex: 1,
+  },
   time: {
     fontSize: 13,
     color: '#8E8E93',
     fontVariant: ['tabular-nums'],
+    // Right-aligned over a fixed width, as the compact `AudioPlayer`'s time was, so the strip
+    // beside it does not resize every time a digit changes.
+    minWidth: 76,
+    textAlign: 'right',
   },
 });

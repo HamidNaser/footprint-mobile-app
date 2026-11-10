@@ -36,7 +36,9 @@
 
 import React, { useEffect, useRef } from 'react';
 import { View, Text, TextInput, StyleSheet } from 'react-native';
-import VoicePlayer from '../journal/VoicePlayer';
+// `formatClock` comes with it: an audio row and the video row under it must not round the same
+// 11.6 seconds two different ways, and one of the two formatters had to go.
+import VoicePlayer, { formatClock } from '../journal/VoicePlayer';
 
 /** What each kind is called on a row. The label is the contract; the colour is cosmetic. */
 const KINDS = {
@@ -69,15 +71,9 @@ export const placeLabel = (location) => {
   return 'No place';
 };
 
-/** m:ss, for a clip's or a video's length. */
-const formatDuration = (seconds) => {
-  const total = Math.max(0, Math.round(Number(seconds) || 0));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
-};
-
 /** Everything but a note and a voice clip: those two have a control of their own. */
 const detailFor = (piece) => {
-  if (piece.kind === 'video') return `Video · ${formatDuration(piece.duration)}`;
+  if (piece.kind === 'video') return `Video · ${formatClock(piece.duration)}`;
   if (piece.kind === 'photo') return 'Photo kept with this memory';
   return 'Kept with this memory';
 };
@@ -90,7 +86,7 @@ const detailFor = (piece) => {
  * below runs again and focuses the field that is already there instead of a second empty note
  * being added. Zero means "not the focus target".
  */
-function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce }) {
+function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecording }) {
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -134,6 +130,11 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce }) {
           testID={`piece-player-${index}`}
           uri={piece.uri}
           duration={piece.duration}
+          waveform={piece.waveform}
+          // ⚠ Load-bearing, not cosmetic: playing a clip asks the one shared audio session for
+          // `allowsRecording: false`, which would end the recording running below this list
+          // (FR-007). The rows sit above the dock with nothing between them.
+          isRecording={isRecording}
           style={styles.player}
         />
       ) : (
@@ -152,8 +153,16 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce }) {
  * @param {(piece: object) => void} [props.onBlurText]
  * @param {{localId: string, nonce: number}|null} [props.focusRequest] Which note should take
  *   the keyboard, and a nonce so the same note can be asked for twice.
+ * @param {boolean} [props.isRecording] True while a voice recording is running on this screen,
+ *   which stops a clip already on the list from being played over it (FR-007).
  */
-export default function PieceList({ pieces = [], onChangeText, onBlurText, focusRequest }) {
+export default function PieceList({
+  pieces = [],
+  onChangeText,
+  onBlurText,
+  focusRequest,
+  isRecording = false,
+}) {
   return (
     <View testID="capture-piece-list" style={styles.list}>
       {pieces.map((piece, index) => (
@@ -164,6 +173,7 @@ export default function PieceList({ pieces = [], onChangeText, onBlurText, focus
           onChangeText={onChangeText}
           onBlurText={onBlurText}
           focusNonce={focusRequest?.localId === piece.localId ? focusRequest.nonce : 0}
+          isRecording={isRecording}
         />
       ))}
     </View>

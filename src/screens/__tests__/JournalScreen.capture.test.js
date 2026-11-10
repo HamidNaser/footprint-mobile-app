@@ -54,17 +54,13 @@ jest.setTimeout(30000);
 // needs, for the same screen).
 // ---------------------------------------------------------------------------
 
-jest.mock('expo-audio', () => ({
-  createAudioPlayer: jest.fn(() => ({ remove: jest.fn(), play: jest.fn(), pause: jest.fn() })),
-  setAudioModeAsync: jest.fn(),
-  useAudioRecorder: jest.fn(() => ({})),
-  useAudioRecorderState: jest.fn(() => ({})),
-  requestRecordingPermissionsAsync: jest.fn().mockResolvedValue({ granted: true }),
-  AudioModule: { requestRecordingPermissionsAsync: jest.fn() },
-  IOSOutputFormat: { MPEG4AAC: 'aac' },
-  AudioQuality: { LOW: 0, MEDIUM: 1, HIGH: 2, MAX: 3 },
-  RecordingPresets: { HIGH_QUALITY: {}, LOW_QUALITY: {} },
-}));
+/**
+ * `expo-audio` is stubbed once in `jest.setup.js` (it cannot be imported under jest at all --
+ * it touches `AudioModule.AudioPlayer.prototype` at module scope). The per-file mock that used
+ * to sit here shadowed it and carried no `useAudioPlayer`/`useAudioPlayerStatus`, so the first
+ * fixture with a voice clip in it would have failed with "useAudioPlayer is not a function" and
+ * read like a `VoicePlayer` bug (013 T054, fix round 1).
+ */
 
 jest.mock('expo-video', () => {
   const React = require('react');

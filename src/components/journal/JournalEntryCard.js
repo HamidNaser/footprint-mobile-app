@@ -486,12 +486,18 @@ const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLay
 /**
  * Audio block - the voice pill, with a play control that works (013 T054, FR-020).
  *
- * The pill itself is unchanged: the mic badge, then the control (FR-021 allows the card only
- * the additions this feature lists, and a working play control is one of them). The separate
- * duration text is gone because `VoicePlayer` shows the clip's position *and* its length, so
- * the pill was about to say the length twice.
+ * The pill is unchanged: the mic badge, then the waveform strip with its play-progress
+ * colouring and tap-to-seek, then the time -- FR-021 allows the card only the additions this
+ * feature lists, so nothing it draws today is dropped, and the one thing that changes is that
+ * the play control now works. The only thing gone is the *separate* duration text, because
+ * `VoicePlayer` prints the clip's position and its length, so the pill was saying the length
+ * twice.
+ *
+ * `waveform` comes from the **block**, not from the media item: that is where
+ * `journalBlocks.js` puts a clip's levels. The item is what the old code read
+ * (`waveformData={audio.waveform}`), which was always `undefined`.
  */
-const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure, testID }) => {
+const AudioBlock = memo(({ audio, waveform, primaryColor, badge, highlighted, onMeasure, testID }) => {
   if (!audio) return null;
 
   return (
@@ -511,6 +517,7 @@ const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure, t
           testID={testID}
           uri={audio.localPath || audio.serverUrl}
           duration={audio.duration}
+          waveform={waveform}
           color={primaryColor}
           style={styles.audioPlayer}
         />
@@ -796,6 +803,8 @@ export const JournalEntryCard = memo(({
             <AudioBlock
               key={`audio-${index}-${audioIndex}`}
               audio={audio}
+              // The clip's levels sit on the block, beside the media rather than on it.
+              waveform={block.waveform}
               primaryColor={primaryColor}
               badge={badge}
               highlighted={isLit(badge)}

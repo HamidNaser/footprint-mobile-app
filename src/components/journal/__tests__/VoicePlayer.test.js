@@ -72,6 +72,7 @@ jest.mock('expo-audio', () => {
       isLoaded: false,
       didJustFinish: false,
       released: false,
+      error: null,
       play: jest.fn(() => {
         alive('play');
         player.playing = true;
@@ -115,7 +116,7 @@ jest.mock('expo-audio', () => {
     isLoaded: player.isLoaded,
     didJustFinish: player.didJustFinish,
     isBuffering: false,
-    error: null,
+    error: player.error,
   });
 
   const api = {
@@ -157,6 +158,22 @@ jest.mock('expo-audio', () => {
       player.currentTime = seconds;
       player.__emit();
     },
+    /** The next `play()` throws -- a player the native side will not start. */
+    __failPlay: (player) => {
+      player.play.mockImplementation(() => {
+        throw new Error('the player would not start');
+      });
+    },
+    /**
+     * Playback fails: expo-audio reports it on the status as `error` (a string, "cleared when a
+     * new source is loaded or playback resumes successfully"). A clip whose file has been
+     * deleted since it was saved arrives here.
+     */
+    __errored: (player, message) => {
+      player.error = message;
+      player.playing = false;
+      player.__emit();
+    },
     /** The clip runs out on its own: nobody tapped anything. */
     __finish: (player) => {
       player.currentTime = player.duration;
@@ -176,6 +193,7 @@ jest.mock('expo-audio', () => {
 
 import * as audio from 'expo-audio';
 import VoicePlayer, { PLAYBACK_AUDIO_MODE, formatClock } from '../VoicePlayer';
+import { BARS_COMPACT } from '../../media/WaveformStrip';
 // The two hosts T054 puts the player in, rendered for real at the bottom of this file.
 import PieceList from '../../capture/PieceList';
 import { JournalEntryCard } from '../JournalEntryCard';
@@ -220,6 +238,29 @@ const iconName = (tree, testID) =>
   toggle(tree, testID).findAll((n) => typeof n.props?.name === 'string')[0]?.props?.name;
 
 const label = (tree, testID) => toggle(tree, testID).props.accessibilityLabel;
+
+/** The clip's strip: the touchable, not the component handed the same testID. */
+const stripOf = (tree, testID) =>
+  tree.root.findAll(
+    (n) => n.props?.testID === `${testID}-strip` && typeof n.props?.onPress === 'function',
+  )[0];
+
+/** Host nodes only: a `View` is a composite wrapping a host of the same name and testID. */
+const stripBars = (tree, testID) =>
+  tree.root.findAll(
+    (n) =>
+      typeof n.type === 'string' &&
+      typeof n.props?.testID === 'string' &&
+      n.props.testID.startsWith(`${testID}-strip-bar-`),
+  );
+
+const flatten = (style) =>
+  Array.isArray(style) ? Object.assign({}, ...style.filter(Boolean)) : style || {};
+
+/** How many bars read as already played. */
+const playedBars = (tree, testID, accent) =>
+  stripBars(tree, testID).filter((bar) => flatten(bar.props.style).backgroundColor === accent)
+    .length;
 
 const timeText = (tree, testID) => {
   const found = node(tree, `${testID}-time`);
@@ -420,6 +461,29 @@ describe('VoicePlayer: one clip plays at a time', () => {
     expect(playerA.play).toHaveBeenCalledTimes(2);
   });
 
+  it('gives the turn back when a play fails, so nothing is left paused for nothing', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const first = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
+    const second = render({ uri: CLIP_B, duration: 30, testID: 'clip-b' });
+    const playerA = audio.__playerFor(CLIP_A);
+    const playerB = audio.__playerFor(CLIP_B);
+
+    await tap(first, 'clip-a');
+    audio.__failPlay(playerB);
+    await tap(second, 'clip-b'); // pauses A, then fails to start: B is holding a turn it lost
+
+    expect(playerA.pause).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalled();
+
+    playerA.pause.mockClear();
+    await tap(first, 'clip-a');
+
+    // Nothing of B's is playing, so playing A again must not reach for it.
+    expect(playerB.pause).not.toHaveBeenCalled();
+    expect(iconName(first, 'clip-a')).toBe('pause');
+    warn.mockRestore();
+  });
+
   it('forgets a playing clip whose card goes away, so the next clip never calls it', async () => {
     const first = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
     const second = render({ uri: CLIP_B, duration: 30, testID: 'clip-b' });
@@ -439,6 +503,122 @@ describe('VoicePlayer: one clip plays at a time', () => {
   });
 });
 
+describe('VoicePlayer: the strip stays, and works (FR-021)', () => {
+  const LEVELS = [0.2, 0.9, 0.4, 0.7, 0.3, 0.8, 0.5, 0.6];
+  const ACCENT = '#2B7DE9';
+
+  it("draws the clip's own recorded levels, and moves them along as it plays", async () => {
+    const tree = render({
+      uri: CLIP_A,
+      duration: 12,
+      waveform: LEVELS,
+      color: ACCENT,
+      testID: 'clip-a',
+    });
+    const player = audio.__playerFor(CLIP_A);
+
+    // One bar per recorded level: the strip is this clip's, not a generic one.
+    expect(stripBars(tree, 'clip-a')).toHaveLength(LEVELS.length);
+    expect(playedBars(tree, 'clip-a', ACCENT)).toBe(1); // the bar at position 0
+
+    await tap(tree, 'clip-a');
+    await act(async () => {
+      audio.__loaded(player, 12);
+      audio.__playedTo(player, 9);
+    });
+
+    // Three quarters through, so three quarters of the bars read as played.
+    expect(playedBars(tree, 'clip-a', ACCENT)).toBe(7);
+  });
+
+  it('seeks to the point in the clip that was tapped on the strip', async () => {
+    const tree = render({ uri: CLIP_A, duration: 12, waveform: LEVELS, testID: 'clip-a' });
+    const player = audio.__playerFor(CLIP_A);
+    await act(async () => {
+      audio.__loaded(player, 12);
+    });
+
+    const strip = stripOf(tree, 'clip-a');
+    await act(async () => {
+      strip.props.onLayout({ nativeEvent: { layout: { width: 200, height: 24 } } });
+    });
+    await act(async () => {
+      await strip.props.onPress({ nativeEvent: { locationX: 50 } });
+    });
+
+    // A quarter of the way along a 12-second clip.
+    expect(player.seekTo).toHaveBeenCalledWith(3);
+  });
+
+  it('still draws a strip for a clip whose waveform the server dropped', () => {
+    const missing = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
+    // `[]` is the shape a server-sourced clip actually arrives in: the backend never stores the
+    // waveform (see this component's header), and `SocialService` maps the absent value to an
+    // empty array. Both have to draw a strip.
+    const emptied = render({ uri: CLIP_B, duration: 12, waveform: [], testID: 'clip-b' });
+
+    expect(stripBars(missing, 'clip-a')).toHaveLength(BARS_COMPACT);
+    expect(stripBars(emptied, 'clip-b')).toHaveLength(BARS_COMPACT);
+  });
+});
+
+describe('VoicePlayer: never while a recording is running (FR-007)', () => {
+  it('refuses to play, or to be scrubbed, and says why', async () => {
+    const tree = render({ uri: CLIP_A, duration: 12, testID: 'clip-a', isRecording: true });
+    const player = audio.__playerFor(CLIP_A);
+
+    expect(toggle(tree, 'clip-a').props.disabled).toBe(true);
+    expect(label(tree, 'clip-a')).toMatch(/recording/i);
+
+    await tap(tree, 'clip-a');
+    const strip = stripOf(tree, 'clip-a');
+    await act(async () => {
+      await strip.props.onPress({ nativeEvent: { locationX: 50 } });
+    });
+
+    // The point of the guard: playback would set `allowsRecording: false` on the shared audio
+    // session and end the recording that is running (FR-007).
+    expect(audio.setAudioModeAsync).not.toHaveBeenCalled();
+    expect(player.play).not.toHaveBeenCalled();
+    expect(player.seekTo).not.toHaveBeenCalled();
+  });
+
+  it('pauses a clip that is playing when a recording starts', async () => {
+    const tree = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
+    const player = audio.__playerFor(CLIP_A);
+
+    await tap(tree, 'clip-a');
+    expect(iconName(tree, 'clip-a')).toBe('pause');
+
+    await act(async () => {
+      tree.update(
+        <VoicePlayer uri={CLIP_A} duration={12} testID="clip-a" isRecording />,
+      );
+    });
+
+    expect(player.pause).toHaveBeenCalledTimes(1);
+    expect(iconName(tree, 'clip-a')).toBe('play');
+  });
+});
+
+describe('VoicePlayer: a clip that cannot be played says so', () => {
+  it('shows a clip whose file has gone as unavailable, not as a live control', async () => {
+    const tree = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
+    const player = audio.__playerFor(CLIP_A);
+
+    await act(async () => {
+      audio.__errored(player, 'file not found');
+    });
+
+    expect(toggle(tree, 'clip-a').props.disabled).toBe(true);
+    expect(label(tree, 'clip-a')).toMatch(/unavailable/i);
+
+    await tap(tree, 'clip-a');
+
+    expect(player.play).not.toHaveBeenCalled();
+  });
+});
+
 describe('VoicePlayer: how far through the clip it is', () => {
   it("shows the piece's own length until the player reports its own, then the player's", async () => {
     const tree = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
@@ -453,6 +633,27 @@ describe('VoicePlayer: how far through the clip it is', () => {
     });
 
     expect(timeText(tree, 'clip-a')).toBe('0:07 / 1:35');
+  });
+
+  it('does not call a clip finished because its piece under-reported its length', async () => {
+    // The piece says 12 s; the clip is really 13. Until the player has loaded, 12 is all there
+    // is to go on -- and reading "past the end" off it would rewind a clip that is mid-sentence.
+    const tree = render({ uri: CLIP_A, duration: 12, testID: 'clip-a' });
+    const player = audio.__playerFor(CLIP_A);
+
+    await tap(tree, 'clip-a');
+    await act(async () => {
+      audio.__playedTo(player, 13); // still loading: the player reports no duration of its own
+    });
+
+    // Never a length shorter than what has already played.
+    expect(timeText(tree, 'clip-a')).toBe('0:13 / 0:13');
+
+    await tap(tree, 'clip-a'); // pause
+    await tap(tree, 'clip-a'); // resume -- from 0:13, not from the beginning
+
+    expect(player.seekTo).not.toHaveBeenCalled();
+    expect(player.currentTime).toBe(13);
   });
 
   it('formats a clock as m:ss, zero-padded, and never below zero', () => {
@@ -494,12 +695,44 @@ describe('VoicePlayer: the two places a voice clip appears (FR-020)', () => {
     expect(iconName(tree, 'piece-player-0')).toBe('pause');
   });
 
-  it("plays a clip from the Journal card's voice pill", async () => {
+  it("hands the capture screen's recording state down to the row's control (FR-007)", async () => {
+    const pieces = [
+      {
+        localId: 'p1',
+        kind: 'audio',
+        uri: CLIP_A,
+        duration: 12,
+        capturedAt: '2026-11-08T09:15:00.000Z',
+      },
+    ];
+    let tree;
+    act(() => {
+      tree = renderer.create(<PieceList pieces={pieces} isRecording />);
+    });
+    trees.push(tree);
+
+    expect(toggle(tree, 'piece-player-0').props.disabled).toBe(true);
+
+    await tap(tree, 'piece-player-0');
+
+    expect(audio.setAudioModeAsync).not.toHaveBeenCalled();
+    expect(audio.__playerFor(CLIP_A).play).not.toHaveBeenCalled();
+  });
+
+  it("plays a clip from the Journal card's voice pill, with the clip's own strip", async () => {
     const entry = {
       id: 'e1',
       userId: 'u1',
       createdAt: '2026-11-08T09:15:00Z',
-      contentBlocks: [{ type: 'audio', media: { id: 'm1', localPath: CLIP_A, duration: 12 } }],
+      contentBlocks: [
+        {
+          type: 'audio',
+          media: { id: 'm1', localPath: CLIP_A, duration: 12 },
+          // On the **block**, which is where `journalBlocks.js` puts a clip's levels. The code
+          // this replaced read `audio.waveform` off the media item, where there is none.
+          waveform: [0.3, 0.6, 0.2, 0.9],
+        },
+      ],
     };
     let tree;
     act(() => {
@@ -513,6 +746,9 @@ describe('VoicePlayer: the two places a voice clip appears (FR-020)', () => {
       );
     });
     trees.push(tree);
+
+    // Four recorded levels, four bars: the pill is drawing this clip and not a generic strip.
+    expect(stripBars(tree, 'memory-voice-player-0-0')).toHaveLength(4);
 
     await tap(tree, 'memory-voice-player-0-0');
 

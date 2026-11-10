@@ -985,6 +985,13 @@ export default function CaptureScreen({ route, navigation }) {
             onChangeText={handleChangeText}
             onBlurText={handleBlurText}
             focusRequest={focusRequest}
+            // ⚠ FR-007. A saved clip's row carries a play control, and playing it would ask the
+            // one shared audio session for `allowsRecording: false` -- which is how
+            // `VoiceRecorderBar` *releases* the session once a clip is done. Tapping it while
+            // the bar below is recording would therefore end that recording mid-sentence, and
+            // the bar would read it as an interruption. The rows are in a plain ScrollView
+            // right above the dock, so the tap is an easy one to make.
+            isRecording={isRecording}
           />
         </ScrollView>
 

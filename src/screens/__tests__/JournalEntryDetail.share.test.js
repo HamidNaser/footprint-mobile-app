@@ -28,14 +28,13 @@ jest.mock('expo-video', () => {
   };
 });
 
-jest.mock('expo-audio', () => ({
-  createAudioPlayer: jest.fn(() => ({ remove: jest.fn(), play: jest.fn(), pause: jest.fn() })),
-  setAudioModeAsync: jest.fn(),
-  useAudioRecorder: jest.fn(() => ({})),
-  useAudioRecorderState: jest.fn(() => ({})),
-  AudioModule: { requestRecordingPermissionsAsync: jest.fn() },
-  RecordingPresets: { HIGH_QUALITY: {} },
-}));
+/**
+ * `expo-audio` is stubbed once in `jest.setup.js` (it cannot be imported under jest at all --
+ * it touches `AudioModule.AudioPlayer.prototype` at module scope). The per-file mock that used
+ * to sit here shadowed it and carried no `useAudioPlayer`/`useAudioPlayerStatus`, so the first
+ * fixture with a voice clip in it would have failed with "useAudioPlayer is not a function" and
+ * read like a `VoicePlayer` bug (013 T054, fix round 1).
+ */
 
 jest.mock('../../services/mediaStatusPoller', () => {
   const poller = { watch: jest.fn(), unwatch: jest.fn() };

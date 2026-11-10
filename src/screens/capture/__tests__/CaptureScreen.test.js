@@ -642,6 +642,33 @@ describe('CaptureScreen: Type, Voice and Camera are always visible (FR-002)', ()
     expect(pressable(tree, 'capture-camera-button').props.disabled).toBeFalsy();
   });
 
+  /**
+   * 013 T054 (fix round 1). A saved clip's row carries a play control, and playing asks the one
+   * shared audio session for `allowsRecording: false` -- the very call `VoiceRecorderBar` uses
+   * to *release* the session when a clip is finished. The rows sit in a plain `ScrollView`
+   * directly above the dock, so a thumb reaches one easily while the bar is recording, and the
+   * recording would end mid-sentence. FR-007 is about recording surviving the lock screen;
+   * being stopped by a tap in the app's own UI is worse than that.
+   */
+  it('deadens a saved clip\'s play control while a recording is running (FR-007)', async () => {
+    const tree = await render();
+
+    // One clip recorded and kept, so there is a row with a player on it...
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+    expect(pressable(tree, 'piece-player-0-toggle').props.disabled).toBeFalsy();
+
+    // ...and now a second recording is running over it.
+    await tap(tree, 'voice-record-button');
+
+    expect(has(tree, 'voice-recorder-bar')).toBe(true);
+    expect(pressable(tree, 'piece-player-0-toggle').props.disabled).toBe(true);
+
+    // It comes back the moment the recording is over.
+    await tap(tree, 'voice-stop-button');
+    expect(pressable(tree, 'piece-player-0-toggle').props.disabled).toBeFalsy();
+  });
+
   it('mounts the voice component once, and never remounts it', async () => {
     const tree = await render();
 
