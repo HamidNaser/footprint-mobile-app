@@ -34,6 +34,11 @@ import { useNavigation } from '@react-navigation/native';
 // Components
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
 import { ViewportFlatList } from '../components/media/ViewportLists';
+// The same viewability helper the media tiles use (007 FR-027), for the same reason: a card
+// off screen should not mount a native map view (013 research R10 *Lazy rendering*). Until the
+// list has reported anything every row counts as on screen, which is what makes the card's own
+// `isVisible` default of true and this screen agree.
+import { useViewableKeys } from '../hooks/mediaVisibility';
 import { JournalComposeModal } from '../components/journal/JournalComposeModal';
 import { JournalEntryDetail } from './JournalEntryDetail';
 import { ConnectionStatusIndicator } from '../components/common/ConnectionStatusIndicator';
@@ -821,12 +826,56 @@ export default function JournalScreen({ navigation }) {
   }, [refresh]);
 
   /**
+   * Key extractor
+   */
+  const keyExtractor = useCallback((item) => item.localId, []);
+
+  /**
+   * Which cards are on screen, and the list itself (013 T052).
+   *
+   * `MemoryRouteMap` mounts a native map view, and the Journal is a list of cards: one map per
+   * card would cost a map for every memory in a day whether anybody can see it or not. The
+   * list reports its viewable rows and each card is told, so an off-screen card holds the
+   * map's height open instead (research R10 *Lazy rendering*).
+   *
+   * `useViewableKeys` is the helper the media tiles already use, and its rule is the one this
+   * needs: until the list has reported anything every row counts as on screen, so nothing is
+   * held back before React Native has measured a thing. `ViewportFlatList` composes this
+   * callback with its own -- React Native forbids changing `onViewableItemsChanged` on a live
+   * list, and both are stable.
+   */
+  const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
+  const listRef = useRef(null);
+
+  /**
+   * Bring a piece into view, for a pin pressed on the card in row `index` (FR-025).
+   *
+   * The two halves of the measurement meet here. The card knows where the piece sits inside
+   * itself and hands up that offset; it cannot know where it sits in the *list*, because
+   * `FlatList` lays every card inside a cell of its own, so a card's own `onLayout` reports a
+   * position relative to that cell and not to the list's content. The row index supplies the
+   * rest, which is what `scrollToIndex`'s `viewOffset` is for: the row is placed `offset`
+   * points above the top of the screen, which brings the piece itself to the top.
+   *
+   * ⚠ A deliberate deviation from tasks.md's wording ("scrolls the list to the given offset").
+   * `scrollToOffset` would need the row's own position in the list's content, which no public
+   * API on `FlatList` reports.
+   *
+   * Safe without `getItemLayout`: `scrollToIndex` only refuses an index the list has not
+   * measured yet, and this row has been -- a pin can only be pressed on a map, and a card
+   * mounts its map only while the list says the card is on screen.
+   */
+  const scrollPieceIntoView = useCallback((index, offset) => {
+    listRef.current?.scrollToIndex({ index, viewOffset: -offset, animated: true });
+  }, []);
+
+  /**
    * Render entry card
    */
-  const renderEntry = useCallback(({ item }) => {
+  const renderEntry = useCallback(({ item, index: rowIndex }) => {
     // Get the appropriate user info for this entry
     const entryUser = getUserForEntry(item);
-    
+
     return (
       <JournalEntryCard
         entry={item}
@@ -842,15 +891,12 @@ export default function JournalScreen({ navigation }) {
         onReact={handleReact}
         onAddResponse={handleAddResponse}
         onReshare={handleReshare}
+        isVisible={isViewable(item.localId)}
+        onRequestScrollTo={(offset) => scrollPieceIntoView(rowIndex, offset)}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare]);
-
-  /**
-   * Key extractor
-   */
-  const keyExtractor = useCallback((item) => item.localId, []);
+  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare, isViewable, scrollPieceIntoView]);
 
   // Show entry detail view
   if (showEntryDetail && selectedEntry) {
@@ -973,9 +1019,11 @@ export default function JournalScreen({ navigation }) {
           </View>
         ) : (
           <ViewportFlatList
+            ref={listRef}
             data={displayEntries}
             renderItem={renderEntry}
             keyExtractor={keyExtractor}
+            onViewableItemsChanged={onViewableItemsChanged}
             contentContainerStyle={styles.feedContent}
             showsVerticalScrollIndicator={false}
             refreshControl={

@@ -1022,6 +1022,14 @@ describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => 
   const hostsWithTestId = (node, testID) =>
     node.findAll((candidate) => isHost(candidate) && candidate.props?.testID === testID);
 
+  /**
+   * The map views actually mounted. Found by a prop only a map carries -- and the one that says
+   * this map never asks for the user's location (research R10) -- rather than by the stubbed
+   * module's identity, so it counts real mounted maps and not test doubles.
+   */
+  const mapViews = (tree) =>
+    tree.root.findAll((node) => isHost(node) && node.props?.showsUserLocation === false);
+
   /** The list, as the screen really renders it. */
   const list = (tree) => tree.root.findByType(FlatList);
 
@@ -1095,9 +1103,9 @@ describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => 
 
     expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(1);
     expect(hostsWithTestId(tree.root, 'memory-route-map-placeholder')).toHaveLength(1);
-    // The map view itself: `MemoryRouteMap` is the only thing on this screen that renders one,
-    // and it is the cost the placeholder exists to avoid.
-    expect(tree.root.findAll((node) => node.props?.scrollEnabled === false)).toHaveLength(1);
+    // The map view itself, which is the cost the placeholder exists to avoid: one mounted, for
+    // the card the list says is on screen.
+    expect(mapViews(tree)).toHaveLength(1);
   });
 
   it('shows the map again when the card comes back into view', async () => {
