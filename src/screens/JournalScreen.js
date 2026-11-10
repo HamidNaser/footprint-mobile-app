@@ -29,7 +29,7 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
 // Components
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
@@ -101,6 +101,33 @@ const PRIMARY_COLOR = '#4361ee';
  * bar's contract is untouched.
  */
 const KEEPING_NOTE = 'Keeping that note…';
+
+/** How much of an unsaved edit's first note the question that would discard it quotes. */
+const DRAFT_WORDS_LIMIT = 40;
+
+/**
+ * The first words of an unsaved edit, to name it in the question that would throw it away
+ * (FR-013) -- or **null** when it has none.
+ *
+ * `contracts/ui-contract.md` asks for "[title or first words]"; a memory in this app has no
+ * title, so the words are all there is, and an edit of photographs alone has not even those.
+ * A null is answered with a question that names no memory rather than with an empty pair of
+ * quotation marks, which reads as a defect at the one moment somebody is deciding whether to
+ * lose work.
+ *
+ * The draft's own pieces, not the memory's: `startEdit` is given the memory's pieces and the
+ * edit is kept on top of them, so these are the words as the person last left them.
+ */
+function draftFirstWords(draft) {
+  const note = draft?.pieces?.find(
+    (piece) => piece?.kind === 'text' && typeof piece.content === 'string' && piece.content.trim(),
+  );
+  if (!note) return null;
+  const words = note.content.trim().replace(/\s+/g, ' ');
+  return words.length > DRAFT_WORDS_LIMIT
+    ? `${words.slice(0, DRAFT_WORDS_LIMIT).trimEnd()}…`
+    : words;
+}
 
 /**
  * Date selector component
@@ -201,8 +228,11 @@ export default function JournalScreen({ navigation }) {
   
   // State
   const [selectedDate, setSelectedDate] = useState(new Date());
+  // The old composer. Nothing opens it any more -- T060 pointed its last opener, the detail
+  // view's Edit, at the capture screen -- so this state and the modal below are dead, and
+  // deliberately left for T068 to remove with the rest of what this feature made dead.
   const [showComposeModal, setShowComposeModal] = useState(false);
-  const [composeMode, setComposeMode] = useState('text');
+  const [composeMode] = useState('text');
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [showEntryDetail, setShowEntryDetail] = useState(false);
   const [journalId, setJournalId] = useState(null);
@@ -648,10 +678,189 @@ export default function JournalScreen({ navigation }) {
     setShowEntryDetail(true);
   }, []);
 
+  // ---------------------------------------------------------------------------------------
+  // Editing a memory in place (FR-013, FR-018)
+  // ---------------------------------------------------------------------------------------
+
   /**
-   * Handle save entry from the compose modal, which is now reached only by the detail view's
-   * Edit (T060 re-points that at the capture screen, T068 retires the modal). A new memory
-   * does not come through here any more: it is captured and saved on `CaptureScreen`.
+   * Which memory the one unsaved edit belongs to, or null (FR-013).
+   *
+   * There is at most one `edit` draft slot and it names its memory, so this is one read for
+   * the whole list: the card whose `localId` this is says "Unfinished edit — continue", and
+   * every other card says nothing.
+   */
+  const [unfinishedEditOf, setUnfinishedEditOf] = useState(null);
+
+  /**
+   * Read the slot whenever the Journal comes into view.
+   *
+   * That is the moment that matters: the person has just closed the capture screen, and
+   * whether they saved, discarded, or simply left decides what their card should say. A read
+   * on mount alone would leave a card silent about an edit made seconds earlier until the app
+   * was restarted -- the same divergence `PlacesScreen` uses this hook to avoid.
+   *
+   * `load` is a read, and it is also the store's own cleanup: an `edit` slot whose memory has
+   * been deleted is discarded, folder and all, on the way past. So the line can never offer an
+   * edit of a memory that is no longer there.
+   *
+   * A failed read changes nothing, in either direction. It is not evidence that an edit exists
+   * and it is not evidence that one does not, and the slot is read again on the next visit.
+   * Recorded rather than said: the person has not asked this screen for anything, and an alert
+   * on arriving at the Journal would be noise over somebody's memories. Where a failure *is*
+   * said is `openEdit` below, which is an explicit action with something to lose.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+
+      (async () => {
+        try {
+          const draft = await CaptureDraftStore.load(DraftSlot.EDIT);
+          if (!cancelled) setUnfinishedEditOf(draft?.entryLocalId ?? null);
+        } catch (error) {
+          console.warn('[JournalScreen] could not tell which memory has an unsaved edit', error);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }, []),
+  );
+
+  /**
+   * Open the capture screen on a memory that is already saved (FR-018).
+   *
+   * One handler for every way in -- the ⋯ menu's Edit, the detail view's Edit, and the
+   * "Unfinished edit — continue" line -- because each of them has the same thing to protect.
+   *
+   * **There is at most one unsaved edit** (FR-013), and `CaptureDraftStore.startEdit` replaces
+   * the slot, so opening an edit of a *different* memory destroys the unsaved one the moment
+   * anything in the new one changes. The capture screen deliberately does not ask about that
+   * (T057/T058: "asking whether to discard it is the Journal's"), so if this does not ask,
+   * nobody does, and somebody's unsaved changes go without a word. It asks, names the memory
+   * the edit belongs to, and lets go of that edit itself when the person says to -- rather than
+   * leaving it to be deleted silently by the first keystroke in the next one, which would mean
+   * backing out of the new edit left the old one still sitting there after the person had
+   * agreed to lose it.
+   *
+   * Nothing is opened if either step fails. The read failing means the question cannot be asked
+   * at all; the discard failing means the slot still holds the old edit. In both cases opening
+   * anyway would put the capture screen one change away from deleting an edit nobody was asked
+   * about, so it fails closed and says so (FR-017).
+   */
+  const openEdit = useCallback(async (entry) => {
+    const entryLocalId = entry?.localId;
+
+    // Unreachable from the list -- every row is keyed by `localId` -- so this is the guard,
+    // not a case. A bare `return` would be a silent no-op immediately after somebody chose
+    // Edit, which is the one thing a refusal on this screen must never be.
+    if (!entryLocalId) {
+      Alert.alert(
+        'Could not open that edit',
+        'That memory could not be identified, so nothing has been opened and nothing has ' +
+          'been changed.',
+      );
+      return;
+    }
+
+    const open = () => {
+      // The detail view, if that is where Edit was chosen: the capture screen opens over the
+      // Journal, and coming back from it should land on the list the memory is in.
+      setShowEntryDetail(false);
+      navigation.navigate('Capture', { mode: 'edit', entryLocalId });
+    };
+
+    let other = null;
+    try {
+      const draft = await CaptureDraftStore.load(DraftSlot.EDIT);
+      // An unsaved edit of this very memory is not in the way: it *is* what opening this
+      // reopens (US2-7), and the capture screen reads it back for itself.
+      other = draft && draft.entryLocalId !== entryLocalId ? draft : null;
+    } catch (error) {
+      console.warn('[JournalScreen] could not tell whether another edit is unsaved', error);
+      Alert.alert(
+        'Could not open that edit',
+        'The phone could not check whether you have another edit that has not been saved, ' +
+          'so nothing has been opened and nothing has been changed. Please try again.',
+      );
+      return;
+    }
+
+    if (!other) {
+      open();
+      return;
+    }
+
+    const words = draftFirstWords(other);
+    Alert.alert(
+      words
+        ? `Discard your unsaved edit of “${words}”?`
+        : 'Discard your unsaved edit of your other memory?',
+      'Only one unsaved edit is kept at a time, so opening this one removes the changes you ' +
+        'have not saved. That memory itself stays exactly as it was.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          // Returns its promise, so whatever drives this button can wait for the discard to
+          // land before the next screen is open. Its one failure is answered below.
+          onPress: async () => {
+            try {
+              await CaptureDraftStore.discard(DraftSlot.EDIT);
+            } catch (error) {
+              console.warn('[JournalScreen] the unsaved edit could not be discarded', error);
+              Alert.alert(
+                'Could not open that edit',
+                'Your unsaved edit of the other memory is still here, and nothing has been ' +
+                  'opened. Please try again.',
+              );
+              return;
+            }
+            // Said on the cards straight away, rather than at the next visit: the person
+            // agreed to lose that edit, so no card should still be offering it.
+            setUnfinishedEditOf(null);
+            open();
+          },
+        },
+      ],
+    );
+  }, [navigation]);
+
+  /**
+   * The ⋯ on a card, which was wired to nothing at all before this: Edit, on the author's own
+   * memory (FR-018, FR-021).
+   *
+   * **Nothing at all on anybody else's.** There is nothing in another person's memory for the
+   * reader to edit -- an edit saves through `updateEntry`, which is their memory's to accept --
+   * so a menu here would be a menu of one thing that cannot work. Whose memory it is, is the
+   * same question and the same answer as `JournalEntryCard`'s own `isOwnEntry`, and the two
+   * have to agree: the card shows the ⋯ and this decides what it offers.
+   *
+   * The cost of that rule, named: a memory saved while nobody was signed in carries
+   * `local_user` as its author and is not matched, so Edit is not offered on it. It is the same
+   * cost the card's own share line carries, for the same reason -- there is no other definition
+   * of "the author's own memory" available here -- and offering an edit that `updateEntry`
+   * would refuse is worse than not offering one.
+   */
+  const handleMenuPress = useCallback((entry) => {
+    const isOwnEntry =
+      !!authUser?.id && (entry?.userId === authUser.id || entry?.authorId === authUser.id);
+    if (!isOwnEntry) return;
+
+    Alert.alert('Memory options', null, [
+      { text: 'Edit', onPress: () => openEdit(entry) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [authUser?.id, openEdit]);
+
+  /**
+   * Handle save entry from the compose modal, which **nothing on this screen now opens**: the
+   * detail view's Edit was its last opener and T060 re-points that at the capture screen. The
+   * modal and this handler are left where they are for T068, which is the task that removes
+   * what this feature made dead, once `git grep` proves no caller remains anywhere. A new
+   * memory does not come through here either: it is captured and saved on `CaptureScreen`.
    */
   const handleSaveEntry = useCallback(async (entryData) => {
     try {
@@ -906,12 +1115,16 @@ export default function JournalScreen({ navigation }) {
         onReact={handleReact}
         onAddResponse={handleAddResponse}
         onReshare={handleReshare}
+        onMenuPress={handleMenuPress}
+        // The one unsaved edit belongs to one memory, so one card says so (FR-013).
+        hasUnfinishedEdit={unfinishedEditOf === item.localId}
+        onContinueEdit={openEdit}
         isVisible={isViewable(item.localId)}
         onRequestScrollTo={(offset) => scrollPieceIntoView(rowIndex, offset)}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare, isViewable, scrollPieceIntoView]);
+  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare, handleMenuPress, unfinishedEditOf, openEdit, isViewable, scrollPieceIntoView]);
 
   // Show entry detail view
   if (showEntryDetail && selectedEntry) {
@@ -920,11 +1133,10 @@ export default function JournalScreen({ navigation }) {
       <JournalEntryDetail
         entry={selectedEntry}
         user={detailUser}
-        onEdit={(entry) => {
-          setShowEntryDetail(false);
-          setComposeMode('text');
-          setShowComposeModal(true);
-        }}
+        // Edit opens the capture screen on this very memory, and saving there updates it
+        // rather than creating a second one (FR-018). It used to open an *empty* composer,
+        // which saved a new memory and left the one being edited untouched.
+        onEdit={openEdit}
         onDelete={handleDeleteEntry}
         onBack={() => {
           setShowEntryDetail(false);

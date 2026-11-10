@@ -391,3 +391,124 @@ describe('the audience is never offered over somebody else\'s memory', () => {
     expect(lineControl(tree, REFUSED_LINE)).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 013 T059 — the unfinished-edit line (FR-013, US2-7)
+// ---------------------------------------------------------------------------
+
+/**
+ * The card's *other* line under the header, and the reason it is pinned in this file: it sits
+ * beside the share lines above, in the same slot, and a card that showed one where the other
+ * belongs — or both in a way that reads as one sentence — is what this file is for.
+ *
+ * FR-013 allows exactly one unsaved edit, and this line is how the person finds it again: while
+ * an edit of a memory is unsaved, *that* memory's card says "Unfinished edit — continue", and
+ * tapping it reopens the edit. Without the line the edit is invisible until something else
+ * happens to open it, which for somebody who put four photographs into an edit and had the app
+ * closed on them reads as the edit being lost (US2-7).
+ *
+ * **Whether a memory has an unsaved edit is not the card's to know.** The `edit` slot names the
+ * one memory it belongs to (`CaptureDraftStore.getEditFor`), and the screen that renders the
+ * list reads it once and tells each card; a card reading the store itself would mean one
+ * database read per memory in the day. So the card is told, and it reports a tap upward —
+ * exactly as it does for the re-share above, which it also does not perform itself. What the
+ * screen does with it is `JournalScreen.capture.test.js`.
+ */
+describe('a memory with an unsaved edit says so, and offers it back (FR-013)', () => {
+  /** The words a person reads. Verbatim, from `contracts/ui-contract.md`. */
+  const UNFINISHED_LINE = 'Unfinished edit — continue';
+
+  it('says nothing about an edit on a memory that has none unsaved', async () => {
+    // Every memory, nearly always: the line exists for the one memory in the `edit` slot, and
+    // a card that always said it would send people back into an edit they had already saved.
+    const tree = await render(entryWith());
+
+    expect(shows(tree, UNFINISHED_LINE)).toBe(false);
+    expect(lineControl(tree, UNFINISHED_LINE)).toBeUndefined();
+  });
+
+  it('shows "Unfinished edit — continue" on the memory whose edit is unsaved', async () => {
+    const tree = await render(entryWith(), { hasUnfinishedEdit: true });
+
+    expect(shows(tree, UNFINISHED_LINE)).toBe(true);
+  });
+
+  it('reports a tap on the line upward as onContinueEdit(entry), once', async () => {
+    // The card reopens nothing itself -- it has no navigator and no store. The whole memory is
+    // handed up, not its id, so the screen has the pieces it needs to name the memory in a
+    // confirmation without looking it up again.
+    const onContinueEdit = jest.fn();
+    const entry = entryWith();
+    const tree = await render(entry, { hasUnfinishedEdit: true, onContinueEdit });
+
+    await tap(lineControl(tree, UNFINISHED_LINE));
+
+    expect(onContinueEdit).toHaveBeenCalledTimes(1);
+    expect(onContinueEdit).toHaveBeenCalledWith(entry);
+  });
+
+  it('offers nothing to tap while there is no unsaved edit to continue', async () => {
+    // The pair of the case above: wiring the callback is not what puts the line on a card, so
+    // a screen that passes `onContinueEdit` to every card does not thereby claim every memory
+    // has an unfinished edit.
+    const onContinueEdit = jest.fn();
+    const tree = await render(entryWith(), { onContinueEdit });
+
+    expect(shows(tree, UNFINISHED_LINE)).toBe(false);
+    expect(onContinueEdit).not.toHaveBeenCalled();
+  });
+
+  it('survives a tap with no onContinueEdit wired, rather than throwing in the list', async () => {
+    // `PersonJournalScreen` and `FamilySummaryScreen` render this card and know nothing about
+    // drafts. They pass neither prop, so they never show the line -- but a card that threw on
+    // a tap would take the whole list down with it.
+    const tree = await render(entryWith(), { hasUnfinishedEdit: true });
+
+    await tap(lineControl(tree, UNFINISHED_LINE));
+
+    expect(shows(tree, UNFINISHED_LINE)).toBe(true);
+  });
+
+  it('says both things when a memory is unshared and unfinished at once', async () => {
+    // The two lines are independent: the server refused the audience of the memory as saved,
+    // and there is an edit of it that has not been saved. Each must be its own control, or
+    // tapping one would do the other's thing.
+    const tree = await render(entryWith({ shareState: ShareState.REFUSED }), {
+      hasUnfinishedEdit: true,
+      onContinueEdit: jest.fn(),
+      onReshare: jest.fn(),
+    });
+
+    expect(shows(tree, REFUSED_LINE)).toBe(true);
+    expect(shows(tree, UNFINISHED_LINE)).toBe(true);
+    expect(lineControl(tree, UNFINISHED_LINE)).not.toBe(lineControl(tree, REFUSED_LINE));
+  });
+
+  it('opens no audience sheet when the unfinished-edit line is tapped', async () => {
+    // What going wrong would look like: the person taps "continue" on an edit and is asked who
+    // may see the memory. Nothing is shared by continuing an edit (FR-011).
+    const onReshare = jest.fn();
+    const tree = await render(entryWith({ shareState: ShareState.REFUSED }), {
+      hasUnfinishedEdit: true,
+      onContinueEdit: jest.fn(),
+      onReshare,
+    });
+
+    await tap(lineControl(tree, UNFINISHED_LINE));
+
+    expect(sheets(tree)).toHaveLength(0);
+    expect(onReshare).not.toHaveBeenCalled();
+  });
+
+  it('still says the memory is not shared, so continuing an edit hides nothing', async () => {
+    // FR-021: the unfinished-edit line is an *addition*. It does not stand in for the share
+    // line, and SC-010's "never looks shared" holds whatever else the card is saying.
+    const tree = await render(entryWith({ shareState: ShareState.WAITING }), {
+      hasUnfinishedEdit: true,
+    });
+
+    expect(shows(tree, NOT_SHARED_YET)).toBe(true);
+    expect(shows(tree, AUDIENCE_LABELS.family)).toBe(false);
+    expect(shows(tree, UNFINISHED_LINE)).toBe(true);
+  });
+});

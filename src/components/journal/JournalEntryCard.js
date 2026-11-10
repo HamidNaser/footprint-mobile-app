@@ -51,6 +51,15 @@ const CONTENT_WIDTH = SCREEN_WIDTH - (CARD_PADDING * 2);
 /** How long a piece stays lit after its pin is pressed (FR-025, `contracts/ui-contract.md`). */
 const PIECE_HIGHLIGHT_MS = 1500;
 
+/**
+ * What the card says over a memory with an edit that was never saved (FR-013, US2-7).
+ *
+ * The one way back into that edit from the Journal, and the reason it is a line on the card
+ * rather than a badge: an unsaved edit is invisible otherwise, and somebody who put four
+ * photographs into one and had the app closed on them reads that as the edit being lost.
+ */
+const UNFINISHED_EDIT_LINE = 'Unfinished edit — continue';
+
 /** The map's own route colour, so a lit piece reads as "the map is pointing at this one". */
 const HIGHLIGHT_COLOUR = '#4361ee';
 
@@ -571,6 +580,16 @@ export const JournalEntryCard = memo(({
   onAddResponse,     // Callback when user adds response: (entryId, text) => void
   onViewResponses,   // Callback to view all responses
   onReshare,         // The audience chosen again for a refused share: (entry, visibility) => void
+  // Whether an edit of *this* memory has been made and never saved (FR-013). There is at most
+  // one unsaved edit and the `edit` draft slot names the memory it belongs to, so the screen
+  // rendering the list reads that slot once and tells each card; a card that asked the store
+  // itself would cost one database read per memory in the day. False by default, so a screen
+  // that knows nothing about drafts -- `PersonJournalScreen`, `FamilySummaryScreen` -- never
+  // puts the line on a card.
+  hasUnfinishedEdit = false,
+  // The unfinished edit, asked for again: (entry) => void. The card reopens nothing itself, as
+  // it re-shares nothing itself; it has neither a navigator nor the draft store.
+  onContinueEdit,
   primaryColor = '#007AFF',
   showSyncStatus = true,
   showEngagement = true,  // Show reactions/comments section
@@ -866,7 +885,7 @@ export const JournalEntryCard = memo(({
 
       {/* The share line, under the header: the refusal is never silent, and it is shown here
           and nowhere else -- not on the sync badge (FR-011, research R15). The
-          "Unfinished edit - continue" line (FR-013) belongs beside this one, in T060.
+          "Unfinished edit - continue" line (FR-013) sits beside this one, below.
 
           ⚠ `isOwnEntry`, because this line is an offer to choose who may see a memory, and
           that belongs to the person whose memory it is. No card can reach it today --
@@ -903,6 +922,33 @@ export const JournalEntryCard = memo(({
           <Ionicons name="time-outline" size={14} color="#8E8E93" />
           <Text style={styles.shareLineText}>{SHARE_LINES[ShareState.WAITING]}</Text>
         </View>
+      )}
+
+      {/* The unfinished edit, offered back (FR-013, FR-021). Beside the share lines above and
+          in the same slot, because both are the card saying something about this memory that
+          is not part of the memory -- but a line of its own: a tap here continues an edit, and
+          nothing about it is a choice of audience.
+
+          Not gated on `isOwnEntry`, deliberately, and unlike the re-share above. The `edit`
+          slot can only ever hold an edit of the reader's own memory -- it is made by the
+          capture screen, which this card's own menu is the way into -- so the gate would guard
+          nothing reachable. What it *would* do is hide the line whenever a card is rendered
+          without `currentUserId`, and a hidden line here is an unsaved edit the person cannot
+          find: the loss FR-013 exists to prevent, caused by the guard against it. The line
+          carries nothing of the memory's content either way. */}
+      {hasUnfinishedEdit && (
+        <TouchableOpacity
+          style={styles.shareLine}
+          onPress={() => onContinueEdit?.(entry)}
+          accessibilityRole="button"
+          accessibilityLabel={UNFINISHED_EDIT_LINE}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="create-outline" size={14} color={primaryColor} />
+          <Text style={[styles.shareLineText, { color: primaryColor }]}>
+            {UNFINISHED_EDIT_LINE}
+          </Text>
+        </TouchableOpacity>
       )}
 
       {/* The same sheet that saved the memory (T027/T028), not a second audience picker. */}
@@ -1053,7 +1099,9 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
 
-  // Share lines (FR-011)
+  // The lines under the header: the share lines (FR-011) and the unfinished edit (FR-013),
+  // one row apiece. The unfinished-edit line takes its colour from `primaryColor`, so it
+  // reads as the control it is rather than as another piece of bad news about sharing.
   shareLine: {
     flexDirection: 'row',
     alignItems: 'center',

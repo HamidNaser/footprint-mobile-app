@@ -44,6 +44,11 @@
  * which `entryLocationSharing.journey.test.js` exists because it was once dropped — and that it
  * now *reports* a failure instead of swallowing it.
  *
+ * Since 013 T059 this file also covers the Journal's two reachable ways **into** an edit — the
+ * ⋯ menu's Edit and the "Unfinished edit — continue" line — and the question it asks before an
+ * unsaved edit is lost. The detail view's Edit is re-pointed at the same handler by T060 but
+ * cannot be driven from this screen at all; the block at the foot of the file says why.
+ *
  * The first mount transforms this screen and everything React Native pulls in behind it.
  */
 
@@ -172,10 +177,41 @@ jest.mock('../../hooks/useJournalRealtime', () => ({
   useJournalRealtime: () => ({}),
 }));
 
-jest.mock('@react-navigation/native', () => ({
-  useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
-  useFocusEffect: jest.fn(),
-}));
+/**
+ * `useFocusEffect` runs, rather than being a `jest.fn()` that swallows what it is given.
+ *
+ * 013 T059: the screen asks the draft store what is unsaved whenever the Journal comes into
+ * view, which is how a memory's card comes to say "Unfinished edit — continue" (FR-013). The
+ * moment that matters is the person **coming back** from the capture screen, so a no-op mock
+ * would mean this file could never see that read happen at all, in either direction.
+ * `PlacesScreen` uses the hook the same way and for the same reason.
+ *
+ * The mock runs the effect on mount, as React Navigation does on focus, and `__refocus()`
+ * runs it again for every mounted screen — the journey a test cannot otherwise reach: close
+ * the capture screen, come back, and find the Journal saying something new. Any cleanup the
+ * effect returns is run on unmount, and discarded by `__refocus` (a fresh effect follows it
+ * immediately, and running the old one's cleanup would cancel the new one's read).
+ */
+jest.mock('@react-navigation/native', () => {
+  const React = require('react');
+  const focused = new Set();
+  return {
+    useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
+    useFocusEffect: (effect) => {
+      React.useEffect(() => {
+        focused.add(effect);
+        const cleanup = effect();
+        return () => {
+          focused.delete(effect);
+          if (typeof cleanup === 'function') cleanup();
+        };
+      }, [effect]);
+    },
+    __refocus: () => {
+      focused.forEach((effect) => effect());
+    },
+  };
+});
 
 jest.mock('../../services/LocationService', () => ({
   __esModule: true,
@@ -281,6 +317,7 @@ import { act, create } from 'react-test-renderer';
 import { Alert, FlatList, Text, TextInput, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
+import { __refocus } from '@react-navigation/native';
 import JournalScreen from '../JournalScreen';
 import { QuickCaptureBar } from '../../components/journal';
 import { JournalComposeModal } from '../../components/journal/JournalComposeModal';
@@ -1181,5 +1218,473 @@ describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => 
     });
 
     expect(scrollToIndex).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 013 T059 — the ways into an edit, and the unsaved edit that is waiting
+// (FR-018, FR-013)
+// ---------------------------------------------------------------------------
+
+/**
+ * Editing a memory is one screen — the capture screen, in `{ mode: 'edit', entryLocalId }` —
+ * and this is the screen that must send people there. Three things only it can do:
+ *
+ *   1. **The ⋯ on a card** offers Edit on the author's own memory and offers no way into an
+ *      edit of anybody else's (FR-018). It was wired to nothing at all before this task.
+ *   2. **The unsaved edit is asked about before it is lost.** There is at most one (FR-013),
+ *      so starting an edit of a *different* memory would take the unsaved one with it the
+ *      moment anything changed — `CaptureDraftStore.startEdit` replaces the slot. The capture
+ *      screen deliberately does not ask (T057/T058: "asking whether to discard it is the
+ *      Journal's"), so if this screen does not ask, nobody does, and four photographs put into
+ *      an edit vanish without a word.
+ *   3. **The memory with the unsaved edit says so on its card**, which is how it is found
+ *      again (US2-7). The slot names one memory, so the screen reads the slot once and tells
+ *      each card; the card's half of that line is `JournalEntryCard.share.test.js`.
+ *
+ * `JournalEntryDetail`'s Edit is re-pointed at the same handler by T060 — and it is **not**
+ * driven end to end here, because it cannot be: `handleEntryPress`, the only thing that sets
+ * `showEntryDetail`, is wired to no control on this screen (`git grep handleEntryPress` finds
+ * its definition and nothing else; `JournalEntryCard` takes no whole-card `onPress`, and no
+ * navigator registers the detail screen). That gap is pre-existing and is recorded in the
+ * task's report rather than closed here. What the detail's Edit calls is the same `openEdit`
+ * everything below drives.
+ *
+ * The draft store is a stand-in (see its mock above) and the `edit` slot is set per test, so
+ * "there is an unsaved edit of this memory" is a statement about the slot's contents — the
+ * same question `CaptureDraftStore.getEditFor` answers for the capture screen.
+ */
+
+/** The card component React gives a fiber for — `memo`'s inner function, as elsewhere here. */
+const EntryCard = JournalEntryCard.type ?? JournalEntryCard;
+
+/** The words a person reads, verbatim from `contracts/ui-contract.md`. */
+const UNFINISHED_LINE = 'Unfinished edit — continue';
+
+const ownMemory = (localId, content) => ({
+  localId,
+  id: localId,
+  userId: 'user-1',
+  journalId: 'journal-1',
+  // Today, so the screen's own day filter shows it without relying on the jump-to-newest
+  // effect.
+  date: toDateKey(new Date()),
+  createdAt: Date.now(),
+  visibility: 'family',
+  syncStatus: 'synced',
+  contentBlocks: [{ type: 'text', content }],
+});
+
+const WALK = ownMemory('local-walk', 'on the 34 bus');
+const KIOSK = ownMemory('local-kiosk', 'the kiosk on the corner');
+const THEIRS = {
+  ...ownMemory('local-theirs', 'their morning, not mine'),
+  userId: 'someone-else',
+  authorId: 'someone-else',
+  author: { name: 'Mo' },
+};
+
+/** The cards the list rendered. */
+const entryCards = (tree) => tree.root.findAllByType(EntryCard);
+
+/** The card for one memory, as the list really renders it. */
+const cardFor = (tree, localId) => {
+  const match = entryCards(tree).find((candidate) => candidate.props.entry.localId === localId);
+  if (!match) {
+    throw new Error(`The Journal is not showing the memory ${localId}`);
+  }
+  return match;
+};
+
+/** The innermost control inside `node` carrying this line — the tappable line itself. */
+const lineControlIn = (node, line) => {
+  const matches = node.findAll(
+    (candidate) =>
+      candidate.type === TouchableOpacity &&
+      typeof candidate.props?.onPress === 'function' &&
+      textsAnywhere(candidate).includes(line),
+  );
+  return matches[matches.length - 1];
+};
+
+/** The ⋯ on a card. */
+const menuControl = (card) => {
+  const matches = card
+    .findAllByType(TouchableOpacity)
+    .filter((node) => iconsIn(node).includes('ellipsis-horizontal'));
+  if (matches.length === 0) {
+    throw new Error('No control on the card carries the ⋯ icon');
+  }
+  return matches[matches.length - 1];
+};
+
+/** Every button the screen has put in front of the person, in the order it offered them. */
+const offered = (alert) =>
+  alert.mock.calls.flatMap(([, , buttons]) => (Array.isArray(buttons) ? buttons : []));
+
+const offeredTexts = (alert) => offered(alert).map((button) => button.text);
+
+/** Everything the screen has said, titles and messages together. */
+const said = (alert) =>
+  alert.mock.calls.map((call) => call.slice(0, 2).filter(Boolean).join(' ')).join(' | ');
+
+/** Press a button the screen offered, by the words on it. */
+const pressOffered = async (alert, text) => {
+  const button = offered(alert).find((candidate) => candidate.text === text);
+  expect({ text, offered: !!button }).toEqual({ text, offered: true });
+  await act(async () => {
+    await button.onPress?.();
+  });
+};
+
+/** The `edit` slot, holding an unsaved edit of one memory with one note in it. */
+const unsavedEditOf = (entryLocalId, content) => {
+  CaptureDraftStore.load.mockImplementation(async (slot) =>
+    slot === 'edit'
+      ? {
+          id: 'edit',
+          entryLocalId,
+          createdAt: '2026-11-10T08:00:00.000Z',
+          updatedAt: '2026-11-10T08:05:00.000Z',
+          pieces: [{ localId: 'piece-1', kind: 'text', content }],
+        }
+      : null,
+  );
+};
+
+/** The slot as the mock factory leaves it: nothing unsaved, and nothing that fails. */
+const resetDraftStore = () => {
+  CaptureDraftStore.load.mockImplementation(async () => null);
+  CaptureDraftStore.discard.mockImplementation(async () => {});
+};
+
+/** Come back to the Journal, as closing the capture screen does. */
+const comeBack = async () => {
+  await act(async () => {
+    __refocus();
+  });
+};
+
+describe('Edit opens the capture screen on the memory itself (FR-018)', () => {
+  let alert;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK, THEIRS]);
+    alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    alert.mockRestore();
+    resetDraftStore();
+  });
+
+  it('shows the three memories, so the cases below are about something', async () => {
+    const { tree } = await render();
+
+    expect(entryCards(tree).map((card) => card.props.entry.localId)).toEqual([
+      'local-walk',
+      'local-kiosk',
+      'local-theirs',
+    ]);
+  });
+
+  it('offers Edit when the ⋯ on the author’s own memory is tapped', async () => {
+    const { tree } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+
+    expect(offeredTexts(alert)).toContain('Edit');
+  });
+
+  it('opens Capture with { mode: "edit", entryLocalId } and goes nowhere else', async () => {
+    // `toEqual` on the whole call list: an edit is one hop, to one route, carrying the memory
+    // it is an edit of and nothing else. An extra parameter here is what would let the capture
+    // screen think it was something other than an edit of this memory.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+  });
+
+  it('edits the memory whose ⋯ was tapped, not the first one on screen', async () => {
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-kiosk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-kiosk',
+    });
+  });
+
+  it('saves nothing and opens no second composer (FR-018)', async () => {
+    // FR-018's "it MUST NOT create a second memory" where this screen could still break it:
+    // `createEntry` is the one route by which it can save, and the old composer — which always
+    // called `createEntry`, never `updateEntry` — is the one thing Edit used to open.
+    const { tree } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+
+  it('offers no way into an edit of somebody else’s memory (FR-018)', async () => {
+    // Not an assertion about an absent call: the ⋯ is found and really tapped, and then
+    // **every** button the screen offered is pressed. Whatever it put on screen, none of it
+    // reaches an edit of a memory that is not the reader's.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-theirs')));
+    expect(offeredTexts(alert)).not.toContain('Edit');
+
+    for (const button of offered(alert)) {
+      await act(async () => {
+        await button.onPress?.();
+      });
+    }
+
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('says so when a memory arrives with no local id, rather than opening nothing', async () => {
+    // Unreachable from the list — every row is keyed by `localId` — so this is the handler's
+    // own guard. A bare `return` here would be a silent no-op immediately after the person
+    // chose Edit, which is the shape FR-017 rules out everywhere else on this screen.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-walk').props.onContinueEdit({ ...WALK, localId: null });
+    });
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('an unsaved edit of another memory is asked about first (FR-013)', () => {
+  let alert;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+    alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    // The person has an edit of "on the 34 bus" that has never been saved.
+    unsavedEditOf('local-walk', 'on the 34 bus');
+  });
+
+  afterEach(() => {
+    alert.mockRestore();
+    resetDraftStore();
+  });
+
+  /** Ask to edit the *other* memory — the one the unsaved edit does not belong to. */
+  const editTheKiosk = async (tree) => {
+    await tap(menuControl(cardFor(tree, 'local-kiosk')));
+    await pressOffered(alert, 'Edit');
+  };
+
+  it('asks before opening it, naming the memory whose edit it would throw away', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+
+    expect(said(alert)).toContain('Discard your unsaved edit of');
+    // The first words of the edit itself, so the question is about a memory the person
+    // recognises rather than about "a draft".
+    expect(said(alert)).toContain('on the 34 bus');
+    // And nothing has happened yet: not the opening, and above all not the discarding.
+    expect(navigate).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+  });
+
+  it('throws the unsaved edit away and then opens the new one, when the person says so', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Discard');
+
+    expect(CaptureDraftStore.discard).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.discard).toHaveBeenCalledWith('edit');
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-kiosk',
+    });
+  });
+
+  it('keeps the unsaved edit, and opens nothing, when the person backs out', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Keep it');
+
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    // The property, not the absent call: the edit is still in the slot, and the Journal still
+    // says which memory it belongs to — as it would after coming back to the screen.
+    await comeBack();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('asks nothing when the unsaved edit is this very memory’s, and reopens it (US2-7)', async () => {
+    // The whole point of the one-edit rule: continuing your own unfinished edit is not a
+    // discard, and being asked to throw away the thing you are about to open would be absurd.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(said(alert)).not.toContain('Discard');
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-walk',
+    });
+  });
+
+  it('opens nothing when the phone cannot tell what is unsaved — it fails closed', async () => {
+    // The one read that decides whether to ask. If it fails, opening the edit anyway would let
+    // the first change in it delete an unsaved edit nobody was asked about: the loss FR-013
+    // exists to prevent, in the one case where it happens silently. So nothing opens, nothing
+    // is discarded, and the person is told.
+    const warned = silenceWarnings();
+    CaptureDraftStore.load.mockImplementation(async () => {
+      throw new Error('the database is locked');
+    });
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(warned).toHaveBeenCalled();
+  });
+
+  it('opens nothing when the unsaved edit could not be thrown away', async () => {
+    // The order the two steps have to be in. The person agreed to lose one edit, not to open
+    // the next one on top of it — and the slot still holds the old edit, so opening would put
+    // the capture screen one keystroke away from deleting it unasked.
+    const warned = silenceWarnings();
+    CaptureDraftStore.discard.mockImplementation(async () => {
+      throw new Error('the folder would not go');
+    });
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Discard');
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(warned).toHaveBeenCalled();
+    // And the edit the person agreed to lose is still there, still named on its card.
+    await comeBack();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('names the memory even when the unsaved edit has no words in it', async () => {
+    // A photographs-only edit: there are no "first words" to quote, and a question with an
+    // empty pair of quotation marks in it reads as a bug. It still says what it is about.
+    CaptureDraftStore.load.mockImplementation(async (slot) =>
+      slot === 'edit'
+        ? { id: 'edit', entryLocalId: 'local-walk', pieces: [{ localId: 'p1', kind: 'photo' }] }
+        : null,
+    );
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+
+    expect(said(alert)).toContain('Discard your unsaved edit');
+    expect(said(alert)).not.toContain('“”');
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('the memory with an unsaved edit says so on its card (FR-013, US2-7)', () => {
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+  });
+
+  afterEach(() => {
+    resetDraftStore();
+  });
+
+  it('asks the draft store which memory the unsaved edit belongs to', async () => {
+    // The guard for everything below: one read of the one slot, for the whole list, rather
+    // than a read per card.
+    await render();
+
+    expect(CaptureDraftStore.load).toHaveBeenCalledWith('edit');
+  });
+
+  it('shows the line on that memory’s card and on no other', async () => {
+    unsavedEditOf('local-walk', 'on the 34 bus');
+
+    const { tree } = await render();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+    expect(textsAnywhere(cardFor(tree, 'local-kiosk'))).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('says nothing of the kind while nothing is unsaved', async () => {
+    const { tree } = await render();
+
+    expect(textsAnywhere(tree.root)).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('says so as soon as the person comes back from the capture screen', async () => {
+    // The journey US2-7 is about: edit a memory, leave without saving, and find it again. The
+    // Journal is already on screen, so a read on mount alone would say nothing until the app
+    // was restarted.
+    const { tree } = await render();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).not.toContain(UNFINISHED_LINE);
+
+    unsavedEditOf('local-walk', 'on the 34 bus');
+    await comeBack();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('stops saying it once the edit has been saved or discarded', async () => {
+    // The other direction, and the one that would leave a dead control on a card: the slot is
+    // empty after a save (`clearAfterSave`) or a discard, and the line has to go with it.
+    unsavedEditOf('local-walk', 'on the 34 bus');
+    const { tree } = await render();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+
+    CaptureDraftStore.load.mockImplementation(async () => null);
+    await comeBack();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('opens the edit again when the line is tapped', async () => {
+    unsavedEditOf('local-walk', 'on the 34 bus');
+
+    const { tree, navigate } = await render();
+    await tap(lineControlIn(cardFor(tree, 'local-walk'), UNFINISHED_LINE));
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+  });
+
+  it('claims no unfinished edit when the slot cannot be read', async () => {
+    // A failed read is not evidence of an unsaved edit, and a line offering an edit that is
+    // not there would open the capture screen on the memory as saved and call it a draft.
+    const warned = silenceWarnings();
+    CaptureDraftStore.load.mockImplementation(async () => {
+      throw new Error('the database is locked');
+    });
+
+    const { tree } = await render();
+
+    expect(textsAnywhere(tree.root)).not.toContain(UNFINISHED_LINE);
+    expect(warned).toHaveBeenCalled();
   });
 });
