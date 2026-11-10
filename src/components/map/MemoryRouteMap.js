@@ -46,6 +46,52 @@ import { toNumberedPieces } from '../../utils/memoryPieces';
 export const MEMORY_ROUTE_MAP_HEIGHT = 180;
 
 /**
+ * The heights this component lays itself out with, so a card can reserve exactly the space it
+ * takes (round-1 item 1).
+ *
+ * `JournalEntryCard` mounts this component only while the card is on screen and shows a
+ * placeholder otherwise. The first version of that reserved `MEMORY_ROUTE_MAP_HEIGHT` alone --
+ * the **frame**, not the slot -- which is 48 points short of the heading, and 26 more short
+ * when the "without a place" line is there. With `itemVisiblePercentThreshold: 1` the swap
+ * happens the instant a row stops being viewable, so a card above the viewport shrank by that
+ * much with the scroll position unchanged, pulling everything below it up mid-scroll and
+ * possibly flipping the row's viewability straight back.
+ *
+ * Every line therefore carries an **explicit `lineHeight`**: without one, a line's height is
+ * whatever the platform's font metrics make it, which no constant can predict and no caller can
+ * reserve. The numbers below are the arithmetic a card needs and the arithmetic Yoga does.
+ */
+const TITLE_LINE_HEIGHT = 20;
+const SUBTITLE_GAP = 2;
+const SUBTITLE_LINE_HEIGHT = 18;
+const FRAME_GAP = 8;
+const WITHOUT_PLACE_GAP = 8;
+const WITHOUT_PLACE_LINE_HEIGHT = 18;
+
+/** The gap above the whole slot. Outside the slot's own height, as a margin is. */
+export const MEMORY_ROUTE_MAP_GAP = 12;
+
+/**
+ * The height of the whole slot -- heading, frame and, when there is one, the line counting the
+ * pieces with no place. Excludes `MEMORY_ROUTE_MAP_GAP`, which a caller repeats as its own
+ * margin rather than folding in.
+ *
+ * @param {{withoutPlace?: boolean}} [options] `withoutPlace` when the map will also show the
+ *   "k pieces without a place" line (FR-026) -- the slot is taller then, so a placeholder has
+ *   to be conditional on the same thing.
+ */
+export function memoryRouteMapSlotHeight({ withoutPlace = false } = {}) {
+  return (
+    TITLE_LINE_HEIGHT +
+    SUBTITLE_GAP +
+    SUBTITLE_LINE_HEIGHT +
+    FRAME_GAP +
+    MEMORY_ROUTE_MAP_HEIGHT +
+    (withoutPlace ? WITHOUT_PLACE_GAP + WITHOUT_PLACE_LINE_HEIGHT : 0)
+  );
+}
+
+/**
  * The smallest span the map opens on, in degrees -- about 440 m north to south. A memory that
  * happened in one spot has no span to fit, and a region of zero degrees is not a view of
  * anywhere; a route narrower than this is padded out to it for the same reason.
@@ -127,7 +173,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
         {pieceCount(placedCount)}
       </Text>
 
-      <View style={styles.frame}>
+      <View testID="memory-route-map-frame" style={styles.frame}>
         <MapView
           style={StyleSheet.absoluteFill}
           provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
@@ -176,28 +222,31 @@ export default memo(MemoryRouteMap);
 
 const styles = StyleSheet.create({
   container: {
-    marginTop: 12,
+    marginTop: MEMORY_ROUTE_MAP_GAP,
   },
   title: {
     fontSize: 15,
+    lineHeight: TITLE_LINE_HEIGHT,
     fontWeight: '600',
     color: '#1C1C1E',
   },
   subtitle: {
     fontSize: 13,
+    lineHeight: SUBTITLE_LINE_HEIGHT,
     color: '#8E8E93',
-    marginTop: 2,
+    marginTop: SUBTITLE_GAP,
   },
   frame: {
     height: MEMORY_ROUTE_MAP_HEIGHT,
-    marginTop: 8,
+    marginTop: FRAME_GAP,
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: '#E8EEFF',
   },
   withoutPlace: {
     fontSize: 13,
+    lineHeight: WITHOUT_PLACE_LINE_HEIGHT,
     color: '#8E8E93',
-    marginTop: 8,
+    marginTop: WITHOUT_PLACE_GAP,
   },
 });

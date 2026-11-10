@@ -232,6 +232,21 @@ const photographIn = (pieceNode) =>
 const EngagementComponent = EngagementSection.type ?? EngagementSection;
 
 /**
+ * The strings a person reads, with every fragment kept -- including the numbers. `texts` below
+ * drops the non-strings, because `TextBlock` renders its content beside a falsy "read more"
+ * fragment and joining that would append "false"; the `+N` overlay on a full grid renders
+ * `['+', 2]`, which only reads as "+2" if the number is kept.
+ */
+const rawTexts = (node) =>
+  node
+    .findAllByType(Text)
+    .map((element) =>
+      Array.isArray(element.props.children)
+        ? element.props.children.filter((child) => child !== false).join('')
+        : String(element.props.children ?? ''),
+    );
+
+/**
  * Every string the card renders. `TextBlock` renders its content beside a falsy "read more"
  * fragment, so a child may be an array rather than a string.
  */
@@ -941,7 +956,7 @@ describe('a grid that cannot show every tile still answers for every pin (FR-025
 
     expect(pins(tree).map((pin) => pin.label).sort()).toEqual(['1', '2', '3', '4', '5', '6']);
     expect(badgeNumbersInRenderOrder(tree)).toEqual([1, 2, 3, 4]);
-    expect(texts(tree.root)).toContain('+2');
+    expect(rawTexts(tree.root)).toContain('+2');
   });
 
   it('brings the block into view and lights the tile when a hidden piece’s pin is pressed', async () => {
@@ -999,7 +1014,7 @@ describe('a grid that cannot show every tile still answers for every pin (FR-025
 
     await pressPin(tree, '3');
 
-    expect(texts(tree.root)).not.toContain('+0');
+    expect(rawTexts(tree.root)).not.toContain('+0');
     expect(onRequestScrollTo.mock.calls).toEqual([[40]]);
     expect(has(tree, 'piece-highlight-3')).toBe(true);
     expect(has(tree, 'piece-highlight-4')).toBe(false);

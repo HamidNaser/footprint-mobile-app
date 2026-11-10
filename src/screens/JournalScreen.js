@@ -861,12 +861,27 @@ export default function JournalScreen({ navigation }) {
    * `scrollToOffset` would need the row's own position in the list's content, which no public
    * API on `FlatList` reports.
    *
-   * Safe without `getItemLayout`: `scrollToIndex` only refuses an index the list has not
-   * measured yet, and this row has been -- a pin can only be pressed on a map, and a card
-   * mounts its map only while the list says the card is on screen.
+   * `scrollToIndex` only refuses an index the list has not laid out, and this row has been -- a
+   * pin can only be pressed on a map, and a card mounts its map only while the list says the
+   * card is on screen. `onScrollToIndexFailed` on the list below is there because being wrong
+   * about that would be a **crash** rather than a missed scroll: without `getItemLayout` and
+   * without that handler, `VirtualizedList` throws an invariant, and there is no error boundary
+   * anywhere in this app to contain it (round-1 item 5).
    */
   const scrollPieceIntoView = useCallback((index, offset) => {
     listRef.current?.scrollToIndex({ index, viewOffset: -offset, animated: true });
+  }, []);
+
+  /**
+   * A row the list had not laid out after all: the memory stays where it is.
+   *
+   * Deliberately silent to the person. They pressed a pin and the Journal did not move, which
+   * is the honest outcome and is self-evident on screen; an alert over a memory would be worse
+   * than the missed scroll. The highlight on the piece still happens -- the card does that
+   * itself -- so the pin is not completely without an answer.
+   */
+  const handleScrollToIndexFailed = useCallback((info) => {
+    console.warn('[JournalScreen] could not scroll to a pressed pin’s piece', info);
   }, []);
 
   /**
@@ -1024,6 +1039,7 @@ export default function JournalScreen({ navigation }) {
             renderItem={renderEntry}
             keyExtractor={keyExtractor}
             onViewableItemsChanged={onViewableItemsChanged}
+            onScrollToIndexFailed={handleScrollToIndexFailed}
             contentContainerStyle={styles.feedContent}
             showsVerticalScrollIndicator={false}
             refreshControl={

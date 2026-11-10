@@ -28,7 +28,10 @@ import { ShareState } from '../../database/schema';
 // One copy of the words, shared with `JournalEntryDetail` -- the screen a tap on this card
 // opens, which must not say "Family" over a memory this card has just called not shared.
 import { SHARE_LINES, NOT_SHARED_YET } from './shareLabels';
-import MemoryRouteMap, { MEMORY_ROUTE_MAP_HEIGHT } from '../map/MemoryRouteMap';
+import MemoryRouteMap, {
+  MEMORY_ROUTE_MAP_GAP,
+  memoryRouteMapSlotHeight,
+} from '../map/MemoryRouteMap';
 // The pin's own colour function, so a piece's badge and its pin cannot be different colours
 // (FR-023). It reads the `PIN_COLOURS` table the map's markers read, and carries the same
 // neutral colour for a kind neither file knows -- repeating that fallback here is how the two
@@ -51,6 +54,48 @@ const HIGHLIGHT_COLOUR = '#4361ee';
 
 /** `blockIndex` and `mediaIndex` from `toNumberedPieces`, as one lookup key. */
 const pieceKey = (blockIndex, mediaIndex) => `${blockIndex}:${mediaIndex ?? ''}`;
+
+/**
+ * How many tiles a photo or video grid shows, however many items the block holds.
+ *
+ * Pre-existing and not this feature's to change: the fourth tile carries a `+N` overlay for
+ * the rest. What *is* this feature's problem is that `toNumberedPieces` numbers every item with
+ * a place, so a six-photograph block draws six pins over four tiles -- see `slotNumbersFor`.
+ */
+const VISIBLE_MEDIA_TILES = 4;
+
+/**
+ * Every piece number one tile of a media grid answers for, and the badge it draws.
+ *
+ * Ordinarily a tile is one piece. The **last visible tile of a grid that cannot show
+ * everything** is different: its `+N` overlay is the only thing on screen standing for items
+ * five and up, so it answers for their numbers too (round-1 item 2). Without that, a pin for a
+ * hidden photograph was a dead control -- no badge, no `onLayout`, so no measured offset, so
+ * `handlePinPress` found nothing to scroll to and nothing lit. Answering means a hidden piece's
+ * pin brings its **block** into view and lights the tile standing in for it, which is as close
+ * to FR-025 as four tiles allow.
+ *
+ * What it cannot do is show a hidden piece's badge: the piece is not on screen to carry one.
+ * That is a limit of the grid rather than of the numbering, and the `+N` overlay is what says
+ * there is more behind it.
+ *
+ * @param {Array<{number: number, kind: string}|null>} badges aligned with the block's `media`
+ * @param {number} index the tile's index in the grid
+ * @param {number} total how many media items the block holds
+ */
+function slotNumbersFor(badges, index, total) {
+  const own = badges?.[index] || null;
+  const standsForTheRest = index === VISIBLE_MEDIA_TILES - 1 && total > VISIBLE_MEDIA_TILES;
+  const hidden = standsForTheRest ? (badges || []).slice(VISIBLE_MEDIA_TILES).filter(Boolean) : [];
+  const mine = own ? [own, ...hidden] : hidden;
+
+  return {
+    // The tile's own badge when it has one; otherwise the first hidden piece it answers for,
+    // so a pin still finds this tile when the fourth photograph happens to have no place.
+    badge: own,
+    numbers: mine.map((badge) => badge.number),
+  };
+}
 
 /**
  * The number a piece wears, in the colour its pin wears (FR-023).
@@ -80,12 +125,28 @@ const PieceBadge = ({ number, kind, style }) => (
  * The ring is laid over the piece rather than drawn around it, and takes no touches: a piece
  * that grew a border for a second and a half would reflow the card under the reader's thumb.
  *
- * @param {{number: number, kind: string}|null} badge
- * @param {boolean} highlighted
+ * @param {{number: number, kind: string}|null} badge What to draw, if anything.
+ * @param {number[]} [numbers] Every piece number this one view answers for. Defaults to the
+ *   badge's own; the last tile of a grid that cannot show everything passes more than one
+ *   (`slotNumbersFor`), so a pin for a piece behind the `+N` overlay still finds this view.
+ * @param {boolean} highlighted Whether any of `numbers` is lit.
  * @param {(number: number, y: number) => void} [onMeasure] Given the piece's offset from the
  *   top of the piece list, which is what a pin press scrolls to.
  */
-const PieceSlot = ({ badge, highlighted, onMeasure, style, badgeAbove = false, badgeStyle, children }) => {
+const PieceSlot = ({
+  badge,
+  numbers,
+  highlighted,
+  onMeasure,
+  style,
+  badgeAbove = false,
+  badgeStyle,
+  children,
+}) => {
+  const mine = numbers || (badge ? [badge.number] : []);
+  // Which number names this view, for a test id and for the ring. The tile's own when it has
+  // one, so `memory-piece-4` stays on the fourth tile whatever else it answers for.
+  const anchor = mine.length === 0 ? null : mine[0];
   const marks = badge ? (
     <PieceBadge number={badge.number} kind={badge.kind} style={badgeStyle} />
   ) : null;
@@ -93,20 +154,20 @@ const PieceSlot = ({ badge, highlighted, onMeasure, style, badgeAbove = false, b
   return (
     <View
       style={style}
-      testID={badge ? `memory-piece-${badge.number}` : undefined}
+      testID={anchor === null ? undefined : `memory-piece-${anchor}`}
       onLayout={
-        badge && onMeasure
-          ? (event) => onMeasure(badge.number, event.nativeEvent.layout.y)
-          : undefined
+        anchor === null || !onMeasure
+          ? undefined
+          : (event) => mine.forEach((number) => onMeasure(number, event.nativeEvent.layout.y))
       }
     >
       {badgeAbove && marks}
       {children}
       {!badgeAbove && marks}
-      {badge && highlighted && (
+      {anchor !== null && highlighted && (
         <View
           pointerEvents="none"
-          testID={`piece-highlight-${badge.number}`}
+          testID={`piece-highlight-${anchor}`}
           style={styles.pieceHighlight}
         />
       )}
@@ -257,10 +318,10 @@ const PhotoImage = ({ media, style, onPress, failed }) =>
  * where the Hub will serve a 7 KB rendition -- and the person opening the photograph
  * properly gets the display copy, because the viewer picks its own source.
  */
-const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLayout }) => {
+const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLayout, testID }) => {
   const { onBlockLayout, onTileLayout } = useTileOffsets(onPieceLayout);
 
-  if (!photos || photos.length === 0) return null;
+  if (!Array.isArray(photos) || photos.length === 0) return null;
 
   const PHOTO_HEIGHT = 200;
   const GRID_GAP = 4;
@@ -274,10 +335,11 @@ const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLay
   // every one of the five tile sites to passing `failed={…uploadFailed…}` and `media={…}`, so
   // that no layout can grow a tile that forgets either. Five copies is the price of that guard.
   const slotFor = (index) => {
-    const badge = badges?.[index] || null;
+    const { badge, numbers } = slotNumbersFor(badges, index, photos.length);
     return {
       badge,
-      highlighted: !!badge && !!highlighted?.has(badge.number),
+      numbers,
+      highlighted: numbers.some((number) => !!highlighted?.has(number)),
       onMeasure: onTileLayout,
     };
   };
@@ -343,7 +405,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLay
 
   const renderFourPlusPhotos = () => (
     <View style={styles.photoGrid}>
-      {photos.slice(0, 4).map((photo, index) => (
+      {photos.slice(0, VISIBLE_MEDIA_TILES).map((photo, index) => (
         <PieceSlot
           key={photo.localId || photo.id || index}
           {...slotFor(index)}
@@ -355,9 +417,9 @@ const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLay
             style={{ height: '100%' }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
-          {index === 3 && photos.length > 4 && (
+          {index === VISIBLE_MEDIA_TILES - 1 && photos.length > VISIBLE_MEDIA_TILES && (
             <View style={styles.moreOverlay}>
-              <Text style={styles.moreText}>+{photos.length - 4}</Text>
+              <Text style={styles.moreText}>+{photos.length - VISIBLE_MEDIA_TILES}</Text>
             </View>
           )}
         </PieceSlot>
@@ -366,7 +428,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLay
   );
 
   return (
-    <View style={styles.mediaBlock} onLayout={onBlockLayout}>
+    <View testID={testID} style={styles.mediaBlock} onLayout={onBlockLayout}>
       {photos.length === 1 && renderSinglePhoto()}
       {photos.length === 2 && renderTwoPhotos()}
       {photos.length === 3 && renderThreePhotos()}
@@ -378,22 +440,23 @@ const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLay
 /**
  * Video block - displays video thumbnails
  */
-const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLayout }) => {
+const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLayout, testID }) => {
   const { onBlockLayout, onTileLayout } = useTileOffsets(onPieceLayout);
 
-  if (!videos || videos.length === 0) return null;
+  if (!Array.isArray(videos) || videos.length === 0) return null;
 
   return (
-    <View style={styles.mediaBlock} onLayout={onBlockLayout}>
+    <View testID={testID} style={styles.mediaBlock} onLayout={onBlockLayout}>
       <View style={styles.videoGrid}>
-        {videos.slice(0, 4).map((video, index) => {
-          const badge = badges?.[index] || null;
+        {videos.slice(0, VISIBLE_MEDIA_TILES).map((video, index) => {
+          const { badge, numbers } = slotNumbersFor(badges, index, videos.length);
           return (
             <PieceSlot
               key={video.localId || video.id || index}
               style={styles.videoContainer}
               badge={badge}
-              highlighted={!!badge && !!highlighted?.has(badge.number)}
+              numbers={numbers}
+              highlighted={numbers.some((number) => !!highlighted?.has(number))}
               onMeasure={onTileLayout}
             >
               <VideoThumbnail
@@ -403,9 +466,9 @@ const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLay
                 height={videos.length === 1 ? 200 : 100}
                 onPress={() => onVideoPress?.(videos, index)}
               />
-              {index === 3 && videos.length > 4 && (
+              {index === VISIBLE_MEDIA_TILES - 1 && videos.length > VISIBLE_MEDIA_TILES && (
                 <View style={styles.moreOverlay}>
-                  <Text style={styles.moreText}>+{videos.length - 4}</Text>
+                  <Text style={styles.moreText}>+{videos.length - VISIBLE_MEDIA_TILES}</Text>
                 </View>
               )}
             </PieceSlot>
@@ -567,25 +630,45 @@ export const JournalEntryCard = memo(({
    * `toNumberedPieces` is pure and cheap and giving the map the entry means a caller cannot
    * hand it groups that disagree with the badges (T048's second decision).
    */
-  const badges = useMemo(() => {
+  const { badges, mediaBadges, hasPlaces, withoutPlace } = useMemo(() => {
     const byPiece = new Map();
-    toNumberedPieces(entry, entry.serverUpdatedAt).pieces.forEach((piece) => {
+    // One array per media block, aligned with its `media`, built **here** rather than per
+    // render: a fresh array each time made `PhotoBlock`'s and `VideoBlock`'s `memo` useless, so
+    // lighting one piece re-rendered every grid in the card (round-1 item 7).
+    //
+    // `Array.isArray`, not `|| []`, for the same reason `memoryPieces.expand` uses it: a
+    // historical row whose `media` is a single object would otherwise have no `.map` here
+    // either, and there is no error boundary anywhere in `src` to catch it (round-1 item 4).
+    const byBlock = new Map();
+    (entry.contentBlocks || []).forEach((block, blockIndex) => {
+      if (Array.isArray(block?.media)) {
+        byBlock.set(blockIndex, new Array(block.media.length).fill(null));
+      }
+    });
+
+    const { pieces, withoutPlaceCount } = toNumberedPieces(entry, entry.serverUpdatedAt);
+    pieces.forEach((piece) => {
       // A piece with no place carries no number, and a memory with no places carries none at
       // all, so its card looks exactly as it does today (FR-023, SC-008).
       if (piece.number == null) return;
-      byPiece.set(pieceKey(piece.blockIndex, piece.mediaIndex), {
-        number: piece.number,
-        kind: piece.kind,
-      });
+      const badge = { number: piece.number, kind: piece.kind };
+      byPiece.set(pieceKey(piece.blockIndex, piece.mediaIndex), badge);
+      const row = byBlock.get(piece.blockIndex);
+      if (row && piece.mediaIndex != null) row[piece.mediaIndex] = badge;
     });
-    return byPiece;
+
+    return {
+      badges: byPiece,
+      mediaBadges: byBlock,
+      hasPlaces: byPiece.size > 0,
+      // Whether the mounted map will also show its "k pieces without a place" line, which
+      // makes the slot taller -- so the placeholder has to know too (FR-026, round-1 item 1).
+      withoutPlace: withoutPlaceCount > 0,
+    };
   }, [entry]);
 
-  const hasPlaces = badges.size > 0;
-
-  /** The badges of one media block's items, aligned with its `media` array. */
-  const mediaBadges = (blockIndex, media) =>
-    (media || []).map((_, mediaIndex) => badges.get(pieceKey(blockIndex, mediaIndex)) || null);
+  /** The height the map's slot takes, mounted or not, so the card never changes height. */
+  const slotHeight = memoryRouteMapSlotHeight({ withoutPlace });
 
   /**
    * Where each numbered piece sits: the piece list's offset in the card, and each piece's
@@ -680,9 +763,10 @@ export const JournalEntryCard = memo(({
             key={`photos-${index}`}
             photos={block.media}
             onPhotoPress={onPhotoPress}
-            badges={mediaBadges(index, block.media)}
+            badges={mediaBadges.get(index)}
             highlighted={highlighted}
             onPieceLayout={onPieceLayout}
+            testID={`memory-piece-block-${index}`}
           />
         );
 
@@ -692,9 +776,10 @@ export const JournalEntryCard = memo(({
             key={`video-${index}`}
             videos={block.media}
             onVideoPress={onVideoPress}
-            badges={mediaBadges(index, block.media)}
+            badges={mediaBadges.get(index)}
             highlighted={highlighted}
             onPieceLayout={onPieceLayout}
+            testID={`memory-piece-block-${index}`}
           />
         );
 
@@ -840,7 +925,10 @@ export const JournalEntryCard = memo(({
               onPinPress={handlePinPress}
             />
           ) : (
-            <View testID="memory-route-map-placeholder" style={styles.mapPlaceholder} />
+            <View
+              testID="memory-route-map-placeholder"
+              style={[styles.mapPlaceholder, { height: slotHeight }]}
+            />
           )}
         </View>
       )}
@@ -984,8 +1072,7 @@ const styles = StyleSheet.create({
   // The height `MemoryRouteMap` reserves for the map itself, held open while the card is off
   // screen. Its `marginTop` is the map container's, so the pieces above sit where they will.
   mapPlaceholder: {
-    height: MEMORY_ROUTE_MAP_HEIGHT,
-    marginTop: 12,
+    marginTop: MEMORY_ROUTE_MAP_GAP,
     borderRadius: 12,
     backgroundColor: '#E8EEFF',
   },

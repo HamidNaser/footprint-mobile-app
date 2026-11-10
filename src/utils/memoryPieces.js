@@ -87,6 +87,28 @@ const MEDIA_BLOCK_KINDS = new Map([
 ]);
 
 /**
+ * A block type that is stored on a memory but is not a piece of it (round-1 item 8).
+ *
+ * `ContentBlock.location` (`JournalService.js:117-127`) writes the entry's **own** place out as
+ * a block, and `JournalEntryCard.renderContentBlock` has no case for it, so the card draws
+ * nothing for it. It is not a captured piece: it is `entry.location` duplicated, and
+ * `entry.location` is where that is read from.
+ *
+ * Left in, it goes wrong in both of the shapes that exist, and in opposite directions. The
+ * shape the phone really writes has top-level `lat`/`lng` and no `location`, so it becomes a
+ * piece **without** a place and the map says "1 piece without a place" about something
+ * invisible (FR-026). The shape `EntryGalleryModal.js:175` and `JournalEntryDetail.js:239`
+ * read -- `{ type: 'location', location: {…} }` -- becomes a piece **with** a place and is
+ * numbered, which puts a pin on the map pointing at a piece the card never draws: a tap that
+ * finds nothing (FR-023, FR-025).
+ *
+ * Deliberately one named type and not "anything the card does not render": a block of a kind
+ * this app has never heard of is still a piece somebody captured, and dropping those would
+ * lose part of a memory. `expand` keeps numbering those.
+ */
+const NON_PIECE_BLOCK_TYPES = new Set(['location']);
+
+/**
  * An ISO-8601 instant as a number of milliseconds, read the same way on every device.
  *
  * A value with a `Z` or an offset is unambiguous. A date-*time* without either is read as UTC
@@ -152,11 +174,30 @@ function expand(entry) {
 
   (entry?.contentBlocks || []).forEach((block, blockIndex) => {
     if (!block) return;
+    if (NON_PIECE_BLOCK_TYPES.has(block.type)) return;
 
     const mediaKind = MEDIA_BLOCK_KINDS.get(block.type);
 
     if (mediaKind) {
-      (block.media || []).forEach((item, mediaIndex) => {
+      // `Array.isArray`, not `|| []` (round-1 item 4). A `media` that is a single object rather
+      // than an array has no `forEach`, so this line would **throw** -- and since T050 put the
+      // map in `JournalEntryCard` it runs for every memory the Journal renders, with no error
+      // boundary anywhere in `src`, so one such row would take the whole Journal down for
+      // every memory including every pre-013 one (SC-008).
+      //
+      // No producer in this repository emits that shape -- every `media:` assignment outside
+      // tests is an array literal or a `.map` result, and `SocialService.adaptBlock` would
+      // itself throw on one, so the server route cannot deliver it. But
+      // `DatabaseService._normalizeContentBlocks` (`:406`) passes a non-array `media` through
+      // untouched, `ConflictResolver` (`:268`) merges server blocks into `content_blocks` with
+      // no media normalisation, and three live components still *tolerate* a single object
+      // (`EntryGalleryModal.js:174`, `.web.js:138`, `JournalEntryCard`'s audio case) -- so a
+      // historical SQLite row of that shape cannot be ruled out by reading code.
+      //
+      // Read as carrying **no media** rather than as one item: a `photos` or `video` block of
+      // that shape draws no tile at all (`PhotoBlock` reads `photos.length`), so numbering it
+      // would put a pin on the map with nothing in the card to find.
+      (Array.isArray(block.media) ? block.media : []).forEach((item, mediaIndex) => {
         if (!item) return;
         pieces.push({
           kind: mediaKind,

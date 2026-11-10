@@ -30,6 +30,38 @@ import { toNumberedPieces } from '../../utils/memoryPieces';
 /** The same height the native map takes, so the card lays out identically. */
 export const MEMORY_ROUTE_MAP_HEIGHT = 180;
 
+/**
+ * The slot's heights, repeated from the native file rather than shared -- as this folder's web
+ * siblings repeat their colours -- and compared with it key for key by a test, because
+ * `JournalEntryCard`'s import of them resolves to *this* file in a browser (round-1 item 1).
+ * If the two disagreed, a card would reserve one height on a phone and another on web, and the
+ * placeholder would stop being the height of the thing it stands in for.
+ *
+ * Every line carries an explicit `lineHeight` for the same reason it does on the native side:
+ * a line whose height is whatever the platform's font metrics make it cannot be reserved.
+ */
+const TITLE_LINE_HEIGHT = 20;
+const SUBTITLE_GAP = 2;
+const SUBTITLE_LINE_HEIGHT = 18;
+const FRAME_GAP = 8;
+const WITHOUT_PLACE_GAP = 8;
+const WITHOUT_PLACE_LINE_HEIGHT = 18;
+
+/** The gap above the whole slot, as on the native side. */
+export const MEMORY_ROUTE_MAP_GAP = 12;
+
+/** The height of the whole slot. The same arithmetic as the native file's. */
+export function memoryRouteMapSlotHeight({ withoutPlace = false } = {}) {
+  return (
+    TITLE_LINE_HEIGHT +
+    SUBTITLE_GAP +
+    SUBTITLE_LINE_HEIGHT +
+    FRAME_GAP +
+    MEMORY_ROUTE_MAP_HEIGHT +
+    (withoutPlace ? WITHOUT_PLACE_GAP + WITHOUT_PLACE_LINE_HEIGHT : 0)
+  );
+}
+
 /** "1 piece", "4 pieces" -- as the native file reads it. */
 const pieceCount = (count) => `${count} ${count === 1 ? 'piece' : 'pieces'}`;
 
@@ -60,7 +92,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt }) {
         {pieceCount(placedCount)}
       </Text>
 
-      <View style={styles.frame}>
+      <View testID="memory-route-map-frame" style={styles.frame}>
         <Ionicons name="map-outline" size={40} color="#C7C7CC" />
         <Text testID="memory-route-map-unsupported" style={styles.unsupported}>
           The map is only available on iOS and Android.
@@ -80,21 +112,23 @@ export default memo(MemoryRouteMap);
 
 const styles = StyleSheet.create({
   container: {
-    marginTop: 12,
+    marginTop: MEMORY_ROUTE_MAP_GAP,
   },
   title: {
     fontSize: 15,
+    lineHeight: TITLE_LINE_HEIGHT,
     fontWeight: '600',
     color: '#1C1C1E',
   },
   subtitle: {
     fontSize: 13,
+    lineHeight: SUBTITLE_LINE_HEIGHT,
     color: '#8E8E93',
-    marginTop: 2,
+    marginTop: SUBTITLE_GAP,
   },
   frame: {
     height: MEMORY_ROUTE_MAP_HEIGHT,
-    marginTop: 8,
+    marginTop: FRAME_GAP,
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: '#E8EEFF',
@@ -110,7 +144,8 @@ const styles = StyleSheet.create({
   },
   withoutPlace: {
     fontSize: 13,
+    lineHeight: WITHOUT_PLACE_LINE_HEIGHT,
     color: '#8E8E93',
-    marginTop: 8,
+    marginTop: WITHOUT_PLACE_GAP,
   },
 });

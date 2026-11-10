@@ -1158,10 +1158,21 @@ describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => 
     // is given. A pin can only be pressed on a mounted map, so the row is laid out -- but
     // there is no error boundary anywhere in `src`, so being wrong about that would take the
     // Journal down rather than miss a scroll. A no-op handler removes the cliff.
+    const warned = silenceWarnings();
     const { tree } = await render();
 
     expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
-    expect(() => list(tree).props.onScrollToIndexFailed({ index: 99, highestMeasuredFrameIndex: 1, averageItemLength: 100 })).not.toThrow();
+    expect(() =>
+      list(tree).props.onScrollToIndexFailed({
+        index: 99,
+        highestMeasuredFrameIndex: 1,
+        averageItemLength: 100,
+      }),
+    ).not.toThrow();
+    // Recorded rather than said: the person pressed a pin and the Journal did not move, which
+    // is self-evident on screen, and an alert over a memory would be worse than the missed
+    // scroll. The piece is still highlighted -- the card does that itself.
+    expect(warned).toHaveBeenCalled();
   });
 
   it('scrolls nowhere when a pin is pressed on a card nothing has measured', async () => {
