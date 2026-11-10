@@ -202,7 +202,6 @@ export const JournalComposeModal = ({
   onClose,
   onSave,
   entry = null, // For editing existing entry
-  initialMode = 'text', // 'text' | 'camera' | 'audio' | 'gallery'
   primaryColor = '#007AFF',
 }) => {
   // State
@@ -218,12 +217,11 @@ export const JournalComposeModal = ({
   const nextSeq = useCallback(() => { captureSeqRef.current += 1; return captureSeqRef.current; }, []);
   const [visibility, setVisibility] = useState(VisibilityOptions.PRIVATE);
   const [isSaving, setIsSaving] = useState(false);
-  const [activeMode, setActiveMode] = useState(initialMode);
-  const [showCamera, setShowCamera] = useState(initialMode === 'camera');
-  const [showAudioRecorder, setShowAudioRecorder] = useState(initialMode === 'audio');
+  const [showCamera, setShowCamera] = useState(false);
+  const [showAudioRecorder, setShowAudioRecorder] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [showLocationPicker, setShowLocationPicker] = useState(false);
-  const [showTextNoteInput, setShowTextNoteInput] = useState(initialMode === 'text-note');
+  const [showTextNoteInput, setShowTextNoteInput] = useState(false);
   const [pendingNote, setPendingNote] = useState('');
   const [locationSharing, setLocationSharing] = useState(LocationSharingOptions.PRIVATE);
 
@@ -253,17 +251,9 @@ export const JournalComposeModal = ({
         setVisibility(VisibilityOptions.PRIVATE);
         setSelectedLocation(null);
         setLocationSharing(LocationSharingOptions.PRIVATE);
-        
-        // Set initial mode
-        setShowCamera(initialMode === 'camera');
-        setShowAudioRecorder(initialMode === 'audio');
-        
-        if (initialMode === 'gallery') {
-          handlePickMedia();
-        }
       }
     }
-  }, [visible, entry, initialMode]);
+  }, [visible, entry]);
 
   // Silently seed a NEW entry with the device's current location as the default,
   // but only when location permission is ALREADY granted (never prompts on open).
@@ -546,7 +536,7 @@ export const JournalComposeModal = ({
               onChangeText={setText}
               multiline
               textAlignVertical="top"
-              autoFocus={initialMode === 'text'}
+              autoFocus
             />
 
             {/* Attached media */}

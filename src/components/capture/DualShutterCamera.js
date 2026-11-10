@@ -1,0 +1,871 @@
+/**
+ * DualShutterCamera (013 T026) -- the capture screen's camera.
+ *
+ * One screen, two shutters: a white Photo button and a red Video button side by side, and
+ * **no mode switch** (FR-008). Each tap of Photo takes one photo; Video starts on one tap and
+ * stops on the next; nothing is ever held down. Photo is unavailable while a video records,
+ * and a video is capped at 60 seconds. **Every photo and every video is its own piece**,
+ * handed up one at a time through `onShot` -- this component never batches them and never
+ * holds a memory together; the pieces list is `CaptureScreen`'s (T029/T030).
+ *
+ * It exists beside `src/components/media/CameraCapture.js`, which is the precedent for the
+ * expo-camera mechanics but cannot serve here: that one has a PHOTO/VIDEO mode switcher and a
+ * single shutter whose meaning depends on the mode, which is exactly what FR-008 removes.
+ *
+ * Checked against the **installed** expo-camera (57.0.4,
+ * `node_modules/expo-camera/build/CameraView.d.ts` and `Camera.types.d.ts`), not assumed:
+ *
+ *   - `recordAsync(options)` resolves to `{ uri } | undefined`, and only once `stopRecording()`
+ *     was invoked, `maxDuration`/`maxFileSize` was reached, or the preview stopped. It carries
+ *     **no duration and no dimensions**, so the length of a clip can only be measured here.
+ *   - `CameraRecordingOptions` is `{ maxDuration?, maxFileSize?, mirror?, codec? }`, and
+ *     `maxDuration` is "Maximum video duration in **seconds**". There is **no `quality`
+ *     recording option** in 57.0.4 -- `CameraCapture.js` passes one and it is simply ignored;
+ *     the supported control is the `videoQuality` *prop*, which is what is used below.
+ *   - The cap is therefore the camera's own: `recordAsync` is given `maxDuration: 60` and
+ *     resolves itself at the limit. No timer here races it. `CameraCapture.js` instead counts
+ *     seconds and stops itself one second early -- its `prev >= maxVideoDuration - 1` branch
+ *     freezes the counter at 59 and then stops, so a full-length clip there is reported as 59
+ *     seconds. A clip's length here is measured from the clock, which has neither the
+ *     off-by-one nor the one-second granularity -- and is clamped to the cap, because the
+ *     clock is read a tick after the camera resolved the recording, so a capped clip
+ *     measures a little *over* 60 and FR-008 says a video is limited to 60 seconds.
+ *   - `CameraView` renders no children (the lesson `CameraCapture.js` paid for in
+ *     expo-camera 16+), so every control is an absolutely-positioned sibling over the preview.
+ *
+ * The preview's `mode` prop follows the shutter being used and is invisible to the user: it is
+ * `picture` at rest and `video` only while recording, because `recordAsync` fails outright on a
+ * picture-mode camera. The switch happens a render *before* `recordAsync` is called -- that is
+ * what the `pendingRecordRef` + effect below are for -- so the native view has the right output
+ * configured by the time recording starts. This is not a mode switch in FR-008's sense: there
+ * is no control for it and no state the user can be left in.
+ *
+ * **A capture that produced nothing is signalled, never swallowed** (`onCaptureFailed`). The
+ * screen cannot report what it is never told, and this app has no crash reporting, so a
+ * `console.warn` reaches nobody: the shutters go back to idle, which is exactly what "you
+ * have not captured anything yet" looks like. It matters most on the design decision above --
+ * a rejected `recordAsync` on the first Video tap is the likeliest way the one-render-early
+ * `mode` flip fails on a device, and silent, it is indistinguishable from nothing happening.
+ * The prop is `VoiceRecorderBar`'s shape plus `kind`, so the capture screen has one handler
+ * for a lost capture rather than one per component. **It is also said inline, for the photo
+ * as well as the video**: this overlay is full screen, so the capture screen's own message is
+ * behind it and the callback alone puts nothing in front of the person holding the phone.
+ *
+ * A piece's `capturedAt` is the instant the capture **started** (research R8): the shutter tap
+ * for a photo, and the tap that *started* recording for a video -- never the tap that stopped
+ * it, which would misplace a long clip in capture order by its own length.
+ *
+ * `location` and `localId` are not this component's: `CaptureScreen` stamps each piece through
+ * `CaptureLocation.withLocation` as it adds it (T029/T030).
+ *
+ * What jest cannot prove: that a real camera takes a real picture and records a real clip, and
+ * that photo and video from one screen behave on a device as they do under the mock. Those are
+ * the owner's device checks (quickstart Q-D5).
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  Image,
+  TouchableOpacity,
+  StyleSheet,
+  Platform,
+  Linking,
+} from 'react-native';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import { Ionicons } from '@expo/vector-icons';
+
+/** FR-008: a video is limited to 60 seconds. In seconds, as expo-camera wants it. */
+export const MAX_VIDEO_SECONDS = 60;
+
+/** How often the on-screen recording time is refreshed. */
+const TICK_INTERVAL_MS = 500;
+
+/** The white Photo shutter and the red Video shutter (contracts/ui-contract.md). */
+export const PHOTO_SHUTTER_COLOR = '#FFFFFF';
+export const VIDEO_SHUTTER_COLOR = '#E5484D';
+
+/** m:ss, as the prototype's camera shows a clip's length. */
+export const formatSeconds = (seconds) => {
+  const total = Math.floor(Math.max(0, seconds));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}:${String(rest).padStart(2, '0')}`;
+};
+
+/**
+ * @param {object} props
+ * @param {(piece: {kind: 'photo'|'video', uri: string, capturedAt: string, width?: number,
+ *   height?: number, duration?: number}) => void} props.onShot
+ *   Called **once per photo and once per video** (FR-008), with `capturedAt` the ISO-8601 UTC
+ *   instant the capture started and, for a video, `duration` in seconds (data-model.md).
+ * @param {() => void} [props.onDone] Finished with the camera; the capture screen takes over.
+ * @param {() => void} [props.onClose] Left the camera without finishing.
+ * @param {(failure: {kind: 'photo'|'video',
+ *   reason: 'capture-failed'|'no-file'|'handler-failed', error: Error|null,
+ *   capturedAt: string|null, duration: number}) => void} [props.onCaptureFailed]
+ *   Called **instead of** `onShot` when a capture produced nothing, and **after** it when
+ *   the parent's own `onShot` threw. Every reason means *no piece was added*, so the screen
+ *   can treat them alike; `kind` says which shutter it was, `capturedAt` is the instant that
+ *   capture started and `duration` is in seconds (0 for a photo, which has none).
+ *
+ *   It is the same shape as `VoiceRecorderBar`'s `onCaptureFailed` plus `kind`, so
+ *   `CaptureScreen` has one handler for every lost capture rather than one per component.
+ *   `'capture-failed'` is this component's equivalent of that one's `'stop-failed'`: the
+ *   camera call itself rejected.
+ * @param {number} [props.maxVideoSeconds] The cap; defaults to 60 (FR-008).
+ * @param {boolean} [props.voiceRecording] A voice clip is recording on the screen below, so
+ *   **Video is unavailable** -- not Photo, which needs no microphone.
+ *
+ *   FR-007 is that switching between the three controls loses nothing. `recordAsync` asks for
+ *   the microphone, and the one audio session is already held by `VoiceRecorderBar`, so a Video
+ *   tap over a running clip interrupts it. `VoiceRecorderBar`'s interruption path finalises the
+ *   clip and keeps the part already recorded (US2-2), so nothing is lost -- but it is a silent
+ *   truncation caused by a tap in our own interface, which is worse than either case FR-007
+ *   names. `PieceList` was given the same signal for the same reason one level in: a playback
+ *   tap must not steal the session either.
+ *
+ *   Video only, deliberately. FR-008 makes two quick taps of Photo the designed use of this
+ *   camera, and a photograph cannot touch the recording, so disabling Photo would take away the
+ *   thing somebody opened the camera to do in order to protect something it cannot harm.
+ *
+ *   Defaults to false, so a caller that says nothing keeps today's camera exactly.
+ */
+export default function DualShutterCamera({
+  onShot,
+  onDone,
+  onClose,
+  onCaptureFailed,
+  maxVideoSeconds = MAX_VIDEO_SECONDS,
+  videoQuality = '720p',
+  voiceRecording = false,
+  style,
+}) {
+  const [permission, requestPermission] = useCameraPermissions();
+  // A video records sound, which is a separate grant from the camera itself. Without it
+  // recordAsync rejects on iOS rather than quietly producing a silent clip.
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
+
+  const [shots, setShots] = useState([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedMs, setRecordedMs] = useState(0);
+  const [micRefused, setMicRefused] = useState(false);
+  // A capture that produced nothing, said on screen as the refused microphone is, and by
+  // which shutter: `null | 'photo' | 'video'`. The callback tells the capture screen; this
+  // tells the person holding the phone, who would otherwise see the shutters go back to idle
+  // and read it as "nothing happened". It covers the photo as well as the recording, because
+  // a lost photo is exactly as invisible -- and the message says which, since "a capture
+  // failed" leaves somebody wondering which of the things they just did is missing.
+  const [lostCapture, setLostCapture] = useState(null);
+  // `photoInFlightRef` as render can see it, so the Video shutter can be disabled while a
+  // still capture is in flight -- the mirror of Photo being disabled while recording.
+  const [photoInFlight, setPhotoInFlight] = useState(false);
+
+  const cameraRef = useRef(null);
+  /** Set the render before `recordAsync` is called, so the preview is in video output first. */
+  const pendingRecordRef = useRef(false);
+  const startedAtRef = useRef(null);
+  const stoppedAtRef = useRef(null);
+  const capturedAtRef = useRef(null);
+  /** takePictureAsync must not overlap itself; a ref, because a tap cannot wait for a render. */
+  const photoInFlightRef = useRef(false);
+  /** The `voiceRecording` prop as a tap can read it, for the guard in `beginRecording`. */
+  const voiceRecordingRef = useRef(voiceRecording);
+  voiceRecordingRef.current = voiceRecording;
+  /**
+   * Whether the Video shutter is unavailable: a still capture in flight, or a voice clip
+   * recording below. Both are something already holding a resource a recording needs.
+   */
+  const videoBlocked = photoInFlight || voiceRecording;
+  const mountedRef = useRef(true);
+
+  /**
+   * One cleanup, so there is no ordering to get wrong between "we have gone" and "stop the
+   * camera": a recording left running would outlive the screen, and a piece arriving after
+   * the screen has gone has nowhere to go.
+   */
+  useEffect(() => {
+    // Set here, not only in `useRef(true)`: React Fast Refresh in development, and
+    // `StrictMode`, tear an effect down and set it up again on the same component. Without
+    // this line the flag stays `false` from then on and every video is silently discarded
+    // below -- a severe, confusing failure for one line of hardening.
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      if (cameraRef.current) {
+        try {
+          cameraRef.current.stopRecording();
+        } catch (error) {
+          // Nothing was recording; nothing to do.
+        }
+      }
+    };
+  }, []);
+
+  const openSettings = useCallback(() => {
+    Linking.openSettings?.();
+  }, []);
+
+  /**
+   * A capture that produced no piece, told to the screen rather than swallowed. There is no
+   * crash reporting in this app, so a `console.warn` reaches nobody: the shutters simply go
+   * back to idle, which is exactly what "you have not captured anything yet" looks like.
+   */
+  const reportFailure = useCallback(
+    (kind, reason, error, capturedAt, duration = 0) => {
+      onCaptureFailed?.({
+        kind,
+        reason,
+        error: error == null ? null : error instanceof Error ? error : new Error(String(error)),
+        capturedAt: capturedAt ?? null,
+        duration,
+      });
+    },
+    [onCaptureFailed],
+  );
+
+  const addShot = useCallback(
+    (piece) => {
+      // One call per piece: the capture screen adds it, stamps it with a place and keeps the
+      // order. Nothing is ever handed up as a batch.
+      //
+      // The parent first and the strip second: `onShot` is called, not awaited, so only a
+      // synchronous throw reaches us -- and a parent that threw has failed to keep the piece.
+      // A thumbnail for a piece the screen does not have is the same "it worked" lie the
+      // failure signal exists to stop.
+      try {
+        onShot?.(piece);
+      } catch (error) {
+        reportFailure(piece.kind, 'handler-failed', error, piece.capturedAt, piece.duration ?? 0);
+        return;
+      }
+      setShots((previous) => [...previous, piece]);
+    },
+    [onShot, reportFailure],
+  );
+
+  /**
+   * Held in a ref, as `VoiceRecorderBar` holds `finishClip`: a recording resolves long after
+   * it started, and by then the parent may have handed down a fresh `onShot`. Reading the
+   * latest one here means the piece cannot be delivered to a closure that has moved on.
+   */
+  const addShotRef = useRef(addShot);
+  useEffect(() => {
+    addShotRef.current = addShot;
+  }, [addShot]);
+
+  /** Held in a ref for the same reason, so a lost recording reaches the latest handler. */
+  const reportFailureRef = useRef(reportFailure);
+  useEffect(() => {
+    reportFailureRef.current = reportFailure;
+  }, [reportFailure]);
+
+  /** FR-008: each tap of Photo takes one photo. */
+  const takePhoto = useCallback(async () => {
+    if (isRecording || photoInFlightRef.current || !cameraRef.current) return;
+    photoInFlightRef.current = true;
+    setPhotoInFlight(true);
+    setLostCapture(null); // this photo's own outcome replaces the last one's
+
+    // Stamped at the tap, before the shutter is awaited (research R8).
+    const capturedAt = new Date().toISOString();
+
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.85,
+        exif: true,
+        skipProcessing: false,
+      });
+      if (photo?.uri) {
+        // The ref, not the closure: this `await` can outlive the `onShot` the tap closed
+        // over, exactly as the recording's longer await can.
+        addShotRef.current({
+          kind: 'photo',
+          uri: photo.uri,
+          width: photo.width,
+          height: photo.height,
+          capturedAt,
+        });
+      } else {
+        // A picture with no file is no picture. Nothing is added, and it is said so.
+        if (mountedRef.current) setLostCapture('photo');
+        reportFailureRef.current('photo', 'no-file', null, capturedAt);
+      }
+    } catch (error) {
+      if (mountedRef.current) setLostCapture('photo');
+      reportFailureRef.current('photo', 'capture-failed', error, capturedAt);
+    } finally {
+      photoInFlightRef.current = false;
+      if (mountedRef.current) setPhotoInFlight(false);
+    }
+  }, [isRecording]);
+
+  /** FR-008: Video starts on one tap. */
+  const beginRecording = useCallback(async () => {
+    // `photoInFlightRef` is in here for the mirror of the Photo-while-recording guard: the
+    // preview's `mode` flips `picture` -> `video` on this tap, and flipping it (and issuing
+    // `recordAsync`) while a still capture is in flight loses the photo, the recording, or
+    // both. On a device `takePictureAsync` takes hundreds of milliseconds, so a fast
+    // double-tap reaches it.
+    //
+    // `voiceRecordingRef` is the same shape of guard for the one audio session: the shutter is
+    // disabled while a voice clip is recording, and this is what makes "disabled" mean recording
+    // nothing rather than only looking dim (see `voiceRecording`). A ref, not the prop, so it
+    // holds for a tap that lands between the clip starting and this callback being rebuilt.
+    if (isRecording || pendingRecordRef.current || photoInFlightRef.current) return;
+    if (voiceRecordingRef.current) return;
+    // Set **before** the permission await, not after it: the state has not changed yet, so
+    // a second tap while the OS dialog is up would otherwise pass this same guard. Only a
+    // flag written synchronously can stop it.
+    pendingRecordRef.current = true;
+    setLostCapture(null); // this recording's own outcome replaces the last one's
+
+    if (!micPermission?.granted) {
+      let result = null;
+      try {
+        result = await requestMicPermission();
+      } catch (error) {
+        // An ask that threw is not an ask that was granted. It has to be caught here rather
+        // than left to reject: this is the one path on which the flag set above could be
+        // left set for good, and then every Video tap from here on is refused in silence.
+        result = null;
+      }
+      if (!result?.granted) {
+        // Said inline rather than swallowed; the photos keep working (UI contract).
+        pendingRecordRef.current = false;
+        setMicRefused(true);
+        return;
+      }
+      setMicRefused(false);
+    }
+
+    capturedAtRef.current = new Date().toISOString();
+    startedAtRef.current = Date.now();
+    stoppedAtRef.current = null;
+    setRecordedMs(0);
+    // Flips the preview to video output and disables Photo in the same render.
+    setIsRecording(true);
+  }, [isRecording, micPermission, requestMicPermission]);
+
+  /** FR-008: ... and stops on the next. */
+  const endRecording = useCallback(() => {
+    if (!isRecording || !cameraRef.current) return;
+    // Read here, not after the call: this is the instant the recording was ended.
+    const stoppedAt = Date.now();
+    try {
+      cameraRef.current.stopRecording();
+    } catch (error) {
+      // It can throw -- which is what the unmount cleanup's own catch concedes, and this is
+      // the same call from a press handler. The window is the camera's own cap resolving the
+      // recording natively a moment before `setIsRecording(false)` has committed. The piece
+      // is the effect's and nothing is lost, so the stamp is simply not taken: stamping from
+      // a stop that failed would understate the clip's length by the rest of the recording.
+      return;
+    }
+    stoppedAtRef.current = stoppedAt;
+  }, [isRecording]);
+
+  const handleVideoPress = useCallback(() => {
+    if (isRecording) endRecording();
+    else beginRecording();
+  }, [beginRecording, endRecording, isRecording]);
+
+  /**
+   * Starts the recording a render after the tap, once the preview is in video output.
+   * `recordAsync` resolves when the recording ends, however it ended -- a Video tap, the
+   * camera's own 60-second cap, or the preview stopping -- so there is one place that
+   * produces the piece and it cannot produce two.
+   */
+  useEffect(() => {
+    if (!isRecording || !pendingRecordRef.current) return;
+    pendingRecordRef.current = false;
+
+    (async () => {
+      let video;
+      let recordError = null;
+      try {
+        video = await cameraRef.current?.recordAsync({ maxDuration: maxVideoSeconds });
+      } catch (error) {
+        recordError = error;
+      }
+
+      const endedAt = stoppedAtRef.current ?? Date.now();
+      const startedAt = startedAtRef.current ?? endedAt;
+      // Seconds (data-model.md), and never more than the cap: the length is measured from
+      // the clock because `recordAsync` carries none, and the clock is read a tick after the
+      // camera's own cap resolved the recording -- so a capped clip measures a little over
+      // 60, which a reader of FR-008's "limited to 60 seconds" could reject.
+      const measured = Math.max(0, endedAt - startedAt) / 1000;
+      const duration = Math.min(measured, maxVideoSeconds);
+
+      startedAtRef.current = null;
+      stoppedAtRef.current = null;
+
+      const capturedAt = capturedAtRef.current;
+      capturedAtRef.current = null;
+
+      // The only await above is `recordAsync`, so this one check covers every `setState`
+      // below it, `setLostCapture('video')` included -- there is nothing awaited between
+      // here and the end of this function. The photo paths guard each `setState` inline
+      // instead because their `finally` has to run whether this component is still mounted
+      // or not, so they cannot return early here.
+      if (!mountedRef.current) return;
+
+      setIsRecording(false);
+      setRecordedMs(0);
+
+      // No file means nothing was recorded; a piece pointing at nothing is worse than none
+      // -- but it is **signalled**, not swallowed. The screen cannot report what it is never
+      // told, and `recordAsync` is declared `Promise<{uri} | undefined>`, so a resolution
+      // with no file is documented rather than theoretical.
+      if (video?.uri) {
+        addShotRef.current({
+          kind: 'video',
+          uri: video.uri,
+          duration,
+          capturedAt,
+        });
+      } else {
+        setLostCapture('video');
+        reportFailureRef.current(
+          'video',
+          recordError ? 'capture-failed' : 'no-file',
+          recordError,
+          capturedAt,
+          duration,
+        );
+      }
+    })();
+  }, [isRecording, maxVideoSeconds]);
+
+  /** The time on screen while recording. The cap itself is the camera's, not this timer's. */
+  useEffect(() => {
+    if (!isRecording) return undefined;
+
+    const handle = setInterval(() => {
+      if (startedAtRef.current != null) setRecordedMs(Date.now() - startedAtRef.current);
+    }, TICK_INTERVAL_MS);
+
+    return () => clearInterval(handle);
+  }, [isRecording]);
+
+  // Still being asked. Nothing is shown that could look like a camera that works.
+  if (!permission) {
+    return (
+      <View testID="camera-permission-checking" style={[styles.container, styles.centred, style]}>
+        <Text style={styles.checkingText}>Checking camera access…</Text>
+      </View>
+    );
+  }
+
+  // Refused: the inline message with Open Settings (UI contract). The capture screen's other
+  // buttons keep working -- Close goes straight back to them.
+  if (!permission.granted) {
+    return (
+      <View testID="camera-permission-denied" style={[styles.container, styles.centred, style]}>
+        <Ionicons name="camera-outline" size={56} color="#8E8E93" />
+        <Text testID="camera-permission-message" style={styles.deniedText}>
+          Footprint can’t use the camera. Turn it on in Settings to take photos and videos.
+        </Text>
+        {permission.canAskAgain && (
+          <TouchableOpacity
+            testID="camera-allow-button"
+            accessibilityRole="button"
+            accessibilityLabel="Allow camera access"
+            style={styles.primaryButton}
+            onPress={requestPermission}
+          >
+            <Text style={styles.primaryButtonText}>Allow camera access</Text>
+          </TouchableOpacity>
+        )}
+        <TouchableOpacity
+          testID="camera-open-settings-button"
+          accessibilityRole="button"
+          accessibilityLabel="Open Settings"
+          style={styles.secondaryButton}
+          onPress={openSettings}
+        >
+          <Text style={styles.secondaryButtonText}>Open Settings</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          testID="camera-close-button"
+          accessibilityRole="button"
+          accessibilityLabel="Close the camera"
+          style={styles.secondaryButton}
+          onPress={onClose}
+        >
+          <Text style={styles.secondaryButtonText}>Close</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.container, style]}>
+      <CameraView
+        ref={cameraRef}
+        style={styles.preview}
+        facing="back"
+        // Follows the shutter in use, with no control for it: recordAsync fails on a
+        // picture-mode camera, and this is set the render before recording starts.
+        mode={isRecording ? 'video' : 'picture'}
+        videoQuality={videoQuality}
+      />
+
+      {/* CameraView renders no children in expo-camera 16+, so the controls sit over it. */}
+      <View style={styles.overlay} pointerEvents="box-none">
+        <View style={styles.topRow}>
+          <TouchableOpacity
+            testID="camera-close-button"
+            accessibilityRole="button"
+            accessibilityLabel="Close the camera"
+            style={styles.topButton}
+            onPress={onClose}
+          >
+            <Ionicons name="close" size={26} color="#FFFFFF" />
+          </TouchableOpacity>
+
+          {isRecording && (
+            <View testID="camera-recording-indicator" style={styles.recordingPill}>
+              <View style={styles.recordingDot} />
+              <Text testID="camera-recording-time" style={styles.recordingTime}>
+                {formatSeconds(recordedMs / 1000)}
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity
+            testID="camera-done-button"
+            accessibilityRole="button"
+            accessibilityLabel="Done with the camera"
+            style={styles.doneButton}
+            onPress={onDone}
+          >
+            <Text style={styles.doneText}>Done</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* One wrapper, so the overlay keeps its three rows whether or not there is a
+            notice to show -- `space-between` over four children lays out differently. */}
+        {(micRefused || lostCapture || voiceRecording) && (
+          <View pointerEvents="box-none">
+            {/* A refused microphone costs the video, never the photos (UI contract). */}
+            {micRefused && (
+              <View testID="camera-microphone-denied" style={styles.notice}>
+                <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
+                <Text testID="camera-microphone-message" style={styles.noticeText}>
+                  Footprint can’t use the microphone, so it can’t record a video. Turn it on
+                  in Settings. Photos still work.
+                </Text>
+                <TouchableOpacity
+                  testID="camera-open-settings-button"
+                  accessibilityRole="button"
+                  accessibilityLabel="Open Settings"
+                  style={styles.noticeButton}
+                  onPress={openSettings}
+                >
+                  <Text style={styles.noticeButtonText}>Open Settings</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Why Video is dim. A disabled control with no explanation reads as a broken
+                camera, and the person is a tap away from the thing that actually truncates
+                their clip (FR-007, review Important 5).
+
+                ⚠ It says **close the camera** rather than "stop the voice note", because this
+                overlay fills the screen (`CaptureScreen`'s `cameraOverlay`: an opaque
+                `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but
+                covered and its Stop control cannot be reached from here. The first wording sent
+                somebody to a control they could not get at (fix round 2, item 2). The sequence
+                it names is the one that works: Done, then Stop, then back in for the video. */}
+            {voiceRecording && (
+              <View testID="camera-video-blocked" style={styles.notice}>
+                <Ionicons name="mic-outline" size={20} color="#FFFFFF" />
+                <Text testID="camera-video-blocked-message" style={styles.noticeText}>
+                  You’re recording a voice note, so a video would cut it short. Photos still
+                  work; to record a video, close the camera, stop the voice note, and come back.
+                </Text>
+              </View>
+            )}
+
+            {/* A capture that produced nothing. Said here as well as handed up, because
+                the shutters going back to idle is what "nothing happened" looks like. It
+                clears itself the moment the next capture of that kind is started. The words
+                are about the one capture that was not kept -- never about the memory, which
+                still has everything else in it. */}
+            {lostCapture && (
+              <View testID="camera-capture-failed" style={styles.notice}>
+                <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
+                <Text testID="camera-capture-failed-message" style={styles.noticeText}>
+                  {lostCapture === 'photo'
+                    ? 'That photo wasn’t saved, so it hasn’t been added. Try taking it again.'
+                    : 'That video wasn’t saved, so it hasn’t been added. Try recording it again.'}
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
+
+        <View style={styles.bottom}>
+          {shots.length > 0 && (
+            <View testID="camera-thumbnail-strip" style={styles.strip}>
+              {shots.map((shot, index) => (
+                <View
+                  key={`${shot.uri}-${index}`}
+                  testID={`camera-thumb-${index}`}
+                  accessibilityLabel={`${shot.kind === 'video' ? 'Video' : 'Photo'} ${index + 1}`}
+                  style={styles.thumb}
+                >
+                  {shot.kind === 'photo' ? (
+                    <Image
+                      testID={`camera-thumb-image-${index}`}
+                      source={{ uri: shot.uri }}
+                      style={styles.thumbImage}
+                    />
+                  ) : (
+                    <View style={[styles.thumbImage, styles.thumbVideo]}>
+                      <Ionicons name="videocam" size={16} color="#FFFFFF" />
+                      <Text testID={`camera-thumb-duration-${index}`} style={styles.thumbDuration}>
+                        {formatSeconds(shot.duration ?? 0)}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Side by side, with no mode switch between them (FR-008). */}
+          <View testID="camera-shutter-row" style={styles.shutterRow}>
+            <View style={styles.shutterColumn}>
+              <TouchableOpacity
+                testID="camera-photo-button"
+                accessibilityRole="button"
+                accessibilityLabel="Take a photo"
+                accessibilityState={{ disabled: isRecording }}
+                // FR-008: Photo is unavailable while a video is recording.
+                disabled={isRecording}
+                style={[styles.photoShutter, isRecording && styles.shutterDisabled]}
+                onPress={takePhoto}
+              >
+                <View style={styles.photoShutterInner} />
+              </TouchableOpacity>
+              <Text testID="camera-photo-label" style={styles.shutterLabel}>
+                Photo
+              </Text>
+            </View>
+
+            <View style={styles.shutterColumn}>
+              <TouchableOpacity
+                testID="camera-video-button"
+                accessibilityRole="button"
+                accessibilityLabel={isRecording ? 'Stop recording' : 'Record a video'}
+                accessibilityState={{ disabled: videoBlocked }}
+                // Two reasons it can be unavailable, and both are about something already
+                // using a resource a recording needs: a still capture in flight (the mirror
+                // of Photo being unavailable while recording -- starting a recording flips
+                // the preview out of picture output), and a voice clip recording on the
+                // screen below, whose audio session `recordAsync` would take (see
+                // `voiceRecording`).
+                disabled={videoBlocked}
+                style={[styles.videoShutter, videoBlocked && styles.shutterDisabled]}
+                onPress={handleVideoPress}
+              >
+                <View style={isRecording ? styles.videoShutterStop : styles.videoShutterInner} />
+              </TouchableOpacity>
+              <Text testID="camera-video-label" style={styles.shutterLabel}>
+                Video
+              </Text>
+            </View>
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  centred: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  preview: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
+  },
+  topRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: Platform.OS === 'ios' ? 50 : 20,
+    paddingHorizontal: 20,
+  },
+  topButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  recordingPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: VIDEO_SHUTTER_COLOR,
+  },
+  recordingTime: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  doneButton: {
+    height: 44,
+    paddingHorizontal: 18,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  doneText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#000000',
+  },
+  notice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 20,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  noticeText: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 13,
+  },
+  noticeButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+  },
+  noticeButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#000000',
+  },
+  bottom: {
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+  },
+  strip: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+  },
+  thumb: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
+  thumbImage: {
+    width: '100%',
+    height: '100%',
+  },
+  thumbVideo: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  thumbDuration: {
+    marginTop: 2,
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    fontVariant: ['tabular-nums'],
+  },
+  shutterRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    gap: 36,
+  },
+  shutterColumn: {
+    alignItems: 'center',
+  },
+  photoShutter: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: PHOTO_SHUTTER_COLOR,
+    borderWidth: 4,
+    borderColor: 'rgba(255,255,255,0.65)',
+  },
+  photoShutterInner: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: PHOTO_SHUTTER_COLOR,
+  },
+  shutterDisabled: {
+    opacity: 0.35,
+  },
+  videoShutter: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: VIDEO_SHUTTER_COLOR,
+    borderWidth: 4,
+    borderColor: 'rgba(255,255,255,0.65)',
+  },
+  videoShutterInner: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: '#FFFFFF',
+  },
+  videoShutterStop: {
+    width: 24,
+    height: 24,
+    borderRadius: 5,
+    backgroundColor: '#FFFFFF',
+  },
+  shutterLabel: {
+    marginTop: 8,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+});
+
+export { DualShutterCamera };

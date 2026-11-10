@@ -32,6 +32,9 @@ import { VideoView, useVideoPlayer } from 'expo-video';
 import { AudioPlayer } from '../components/media/AudioPlayer';
 import { VideoThumbnail } from '../components/media/VideoThumbnail';
 import { formatPeriodDate } from '../utils/periodDate';
+// The card's own words for a memory the server would not share, so this screen says the same
+// thing the card that opened it said (SC-010).
+import { NOT_SHARED_YET } from '../components/journal/shareLabels';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -230,9 +233,14 @@ export const JournalEntryDetail = ({
   const videos = entry.contentBlocks
     ?.filter(b => b.type === 'video')
     .flatMap(b => b.media) || [];
+  // The waveform sits on the **block**, not on the media item (`journalBlocks.js` writes
+  // `waveform` onto the audio block), so it is carried down here -- `AudioPlayer` takes it per
+  // player. Read off the item alone, as this used to be, every clip in the detail view drew a
+  // flat placeholder bar instead of its own levels (review fix, Minor 10). The item's own value
+  // wins where it has one, so a shape that ever carries it there is not overwritten.
   const audioItems = entry.contentBlocks
     ?.filter(b => b.type === 'audio')
-    .flatMap(b => b.media) || [];
+    .flatMap(b => (b.media || []).map(m => ({ ...m, waveform: m.waveform ?? b.waveform }))) || [];
   const location = entry.location || entry.contentBlocks?.find(b => b.type === 'location')?.location;
 
   const syncConfig = getSyncStatusConfig(entry.syncStatus);
@@ -426,18 +434,37 @@ export const JournalEntryDetail = ({
 
         {/* Metadata */}
         <View style={styles.metadataSection}>
-          {/* Visibility */}
-          {entry.visibility && (
+          {/* The audience, or -- when the server could not apply it -- "Not shared yet" in its
+              place (FR-011, SC-010).
+
+              SC-010 is worded about *memories*, not about cards: this is the screen a tap on a
+              Journal card opens, so a card that honestly reads "Not shared yet" opened a screen
+              that still read "Family" over a memory on nobody else's screen. The words are the
+              card's own, from `shareLabels`, so the two surfaces cannot drift apart.
+
+              Replaced for any truthy `shareState`, not only the two known values: saying less
+              than the truth is safe here, saying more is not (*sharing fails closed*).
+
+              The *tap* stays on the card. FR-011 gives the audience choice to its refused line,
+              and this screen's own entry points are T060's. */}
+          {entry.shareState ? (
             <View style={styles.metadataRow}>
-              <Ionicons 
-                name={entry.visibility === 'private' ? 'lock-closed-outline' : 'people-outline'} 
-                size={18} 
-                color="#8E8E93" 
-              />
-              <Text style={styles.metadataText}>
-                {entry.visibility.charAt(0).toUpperCase() + entry.visibility.slice(1)}
-              </Text>
+              <Ionicons name="eye-off-outline" size={18} color="#8E8E93" />
+              <Text style={styles.metadataText}>{NOT_SHARED_YET}</Text>
             </View>
+          ) : (
+            entry.visibility && (
+              <View style={styles.metadataRow}>
+                <Ionicons
+                  name={entry.visibility === 'private' ? 'lock-closed-outline' : 'people-outline'}
+                  size={18}
+                  color="#8E8E93"
+                />
+                <Text style={styles.metadataText}>
+                  {entry.visibility.charAt(0).toUpperCase() + entry.visibility.slice(1)}
+                </Text>
+              </View>
+            )
           )}
 
           {/* Sync status */}

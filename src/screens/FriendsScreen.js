@@ -947,9 +947,12 @@ const styles = StyleSheet.create({
   },
 
   // FAB
+  // bottom: 92 = 20 (this FAB's original clearance) + 56 (CaptureFab's height) + 16 (gap)
+  // -- CaptureFab now sits at every tab's fixed bottom-right spot (FR-001), so this one
+  // moves up to stay clear of it rather than being covered (013 fix round 1).
   fab: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 92,
     right: 20,
     width: 56,
     height: 56,

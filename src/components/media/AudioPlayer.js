@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { Ionicons } from '@expo/vector-icons';
+import WaveformStrip, { BARS_COMPACT, BARS_FULL } from './WaveformStrip';
 
 /**
  * Format duration in mm:ss
@@ -46,6 +47,10 @@ const PlaybackState = {
 export const AudioPlayer = ({
   uri,
   duration: initialDuration,
+  // The clip's recorded levels. `JournalEntryDetail` has always passed this; until 013 T054 it
+  // was never declared here, so the strip drew invented bars even for a clip that had real ones.
+  // (`MediaPreview`, the other caller, passes none and gets the fallback strip.)
+  waveformData,
   onPlaybackStart,
   onPlaybackEnd,
   onError,
@@ -240,39 +245,30 @@ export const AudioPlayer = ({
     seekTo(newPosition);
   };
 
-  // Render waveform visualization
+  /**
+   * Render waveform visualization.
+   *
+   * The strip itself is `WaveformStrip` (013 T054), shared with the Journal card's voice pill
+   * rather than copied into it. Two things it does better than the loop that used to be here:
+   * the fallback bars are derived from the clip's uri instead of `Math.random()` inside render,
+   * so the strip no longer reshuffles on every status update, and a tap seeks by the strip's
+   * measured width rather than by `getBoundingClientRect`, which is a web API and so always
+   * fell through to a hardcoded 200 px on a phone.
+   */
   const renderWaveform = () => {
     if (!showWaveform) return null;
 
-    // Generate static waveform bars (would ideally be from audio analysis)
-    const barCount = compact ? 30 : 50;
-    const bars = Array(barCount).fill(0).map(() => 0.2 + Math.random() * 0.6);
-    const progress = duration > 0 ? position / duration : 0;
-
     return (
-      <TouchableOpacity
+      <WaveformStrip
+        levels={waveformData}
+        seed={uri}
+        bars={compact ? BARS_COMPACT : BARS_FULL}
+        progress={duration > 0 ? position / duration : 0}
+        color={primaryColor}
+        barHeight={compact ? 24 : 40}
+        onSeek={(fraction) => seekTo(fraction * duration)}
         style={styles.waveformContainer}
-        activeOpacity={0.9}
-        onPress={handleProgressPress}
-      >
-        {bars.map((height, index) => {
-          const barProgress = index / barCount;
-          const isPlayed = barProgress <= progress;
-          
-          return (
-            <View
-              key={index}
-              style={[
-                styles.waveformBar,
-                {
-                  height: height * (compact ? 24 : 40),
-                  backgroundColor: isPlayed ? primaryColor : '#DDD',
-                },
-              ]}
-            />
-          );
-        })}
-      </TouchableOpacity>
+      />
     );
   };
 
@@ -443,17 +439,10 @@ const styles = StyleSheet.create({
     color: '#FF3B30',
     fontSize: 14,
   },
+  // The row and bar styles now live in `WaveformStrip`; this is only the space the strip
+  // occupies in this component's own stacked layout.
   waveformContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    height: 50,
     marginBottom: 12,
-  },
-  waveformBar: {
-    width: 3,
-    borderRadius: 2,
-    backgroundColor: '#DDD',
   },
   progressBarContainer: {
     marginBottom: 12,

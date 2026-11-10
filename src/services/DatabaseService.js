@@ -159,8 +159,8 @@ class DatabaseServiceClass {
         local_id, server_id, journal_id, user_id, date, date_precision, content_blocks,
         location_lat, location_lng, location_name, visibility, location_sharing,
         reactions_likes, reactions_liked_by, comments_count,
-        sync_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sync_status, share_state, server_updated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.localId,
         entry.serverId || null,
@@ -183,6 +183,16 @@ class DatabaseServiceClass {
         JSON.stringify(entry.reactions?.likedByUserIds || []),
         entry.commentsCount || 0,
         entry.syncStatus || SyncStatus.PENDING,
+        // What the server last said about the chosen audience, and the only record of it
+        // (research R15). Null for a memory nothing has been said about yet, which is every
+        // memory at the moment it is written.
+        entry.shareState || null,
+        // The server's own `updatedAt` from the copy this row came from, kept as the exact
+        // string it sent. A different fact from `updated_at` below, which is when this phone
+        // last wrote the row: this one is the reference the read-time piece-ordering rule
+        // compares a capture moment against (FR-029, research R2), and null means it has no
+        // threshold to apply.
+        entry.serverUpdatedAt || null,
         entry.createdAt || now,
         now,
       ]
@@ -193,10 +203,22 @@ class DatabaseServiceClass {
 
   /**
    * Update a journal entry
+   *
+   * `updated_at` is stamped with every call, because almost every call is a change the person
+   * made and that column is what says when they last made one. The one exception is
+   * bookkeeping about a push that has already happened -- `share_state` -- where stamping it
+   * is not merely redundant but can decide a conflict: `ConflictResolver._resolveLastWriteWins`
+   * compares this column against the server copy's `updatedAt`, so a write here on a memory
+   * still PENDING can tip an already-detected UPDATE_UPDATE toward the client and discard a
+   * newer server copy, including a narrower audience chosen on another device. Hence the
+   * opt-out, which defaults to today's behaviour so no existing caller changes.
+   *
    * @param {string} localId - Local ID of the entry
    * @param {object} updates - Fields to update
+   * @param {object} [options]
+   * @param {boolean} [options.touchUpdatedAt=true] - False to leave `updated_at` as it stands
    */
-  async updateEntry(localId, updates) {
+  async updateEntry(localId, updates, { touchUpdatedAt = true } = {}) {
     const db = await this.getDb();
     const now = Date.now();
 
@@ -229,6 +251,18 @@ class DatabaseServiceClass {
       fields.push('sync_status = ?');
       values.push(updates.syncStatus);
     }
+    // `!== undefined`, not a truthiness test: null is the value that clears a refusal once
+    // the server has accepted the memory, or once the person has chosen an audience again.
+    // Written here rather than by whoever holds the state in memory, because the card reads
+    // the stored row -- the same gap that left date_precision stored and never read back.
+    if (updates.shareState !== undefined) {
+      fields.push('share_state = ?');
+      values.push(updates.shareState);
+    }
+    if (updates.serverUpdatedAt !== undefined) {
+      fields.push('server_updated_at = ?');
+      values.push(updates.serverUpdatedAt);
+    }
     if (updates.syncedAt !== undefined) {
       fields.push('synced_at = ?');
       values.push(updates.syncedAt);
@@ -242,8 +276,15 @@ class DatabaseServiceClass {
       values.push(updates.commentsCount);
     }
 
-    fields.push('updated_at = ?');
-    values.push(now);
+    if (touchUpdatedAt) {
+      fields.push('updated_at = ?');
+      values.push(now);
+    }
+
+    // Nothing recognised and no timestamp to stamp: there is no statement to run, and
+    // `SET  WHERE local_id = ?` is not valid SQL.
+    if (fields.length === 0) return;
+
     values.push(localId);
 
     await db.runAsync(
@@ -419,6 +460,17 @@ class DatabaseServiceClass {
       },
       commentsCount: row.comments_count,
       syncStatus: row.sync_status,
+      // The two columns schema v8 added, under the camelCase names the app uses for every
+      // other column (`serverId`, `syncStatus`). Mapped as well as written: a column that is
+      // stored and never read back is this file's most repeated failure -- date_precision
+      // was, so every "sometime in 1998" came back out as 1 January, and the push path reads
+      // rows back through here, so an unmapped column never reaches the wire either.
+      //
+      // `shareState` is what the memory's card shows instead of an audience label while the
+      // server cannot apply the one that was chosen; `serverUpdatedAt` is the ordering
+      // reference. Both are null when the row has nothing to say, never undefined.
+      shareState: row.share_state ?? null,
+      serverUpdatedAt: row.server_updated_at ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       syncedAt: row.synced_at,

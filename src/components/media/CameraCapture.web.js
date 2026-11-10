@@ -23,7 +23,6 @@ export const CameraCapture = ({
   onCapture,
   onClose,
   mode = CameraMode.PHOTO,
-  allowModeSwitch = true,
   primaryColor = '#007AFF',
 }) => {
   return (

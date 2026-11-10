@@ -211,6 +211,17 @@ class ConflictResolverClass {
     await JournalRepository.applyServerUpdate(localEntry.localId, {
       contentBlocks: serverEntry.contentBlocks || [],
       visibility: serverEntry.visibility,
+      // The accepted copy's own `updatedAt`, which is the last save the server knows about
+      // and the reference a capture moment is judged against at read time (FR-029, research
+      // R2). This is the third place a server copy lands locally, beside the pull's
+      // `createFromServer` and `applyServerUpdate`, and it was the one that did not record it
+      // -- so a memory edited on another device kept the threshold it had from BEFORE the
+      // conflict, which is always earlier than the copy just accepted. An ordering reference
+      // that is too early drops genuine capture moments from the ordering; it can never be too
+      // late, so nothing is ever mis-shown, but the fact is lost. Passed straight through:
+      // `applyServerUpdate` writes it only when the copy carried one, so a partial copy cannot
+      // erase a threshold that is still valid.
+      updatedAt: serverEntry.updatedAt,
     });
 
     return {

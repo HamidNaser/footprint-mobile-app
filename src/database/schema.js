@@ -7,7 +7,7 @@
  */
 
 // Current schema version - increment when making breaking changes
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * SQL statements to create all tables
@@ -48,6 +48,16 @@ export const CREATE_TABLES = {
       reactions_liked_by TEXT,
       comments_count INTEGER DEFAULT 0,
       sync_status TEXT DEFAULT 'pending',
+      -- NULL | 'waiting' | 'refused'. The only record of what the server last said about the
+      -- chosen audience (research R15) -- a batch source_unavailable/do_not_resend or a
+      -- single-operation 503/422 audience refusal. No sync_queue conflict row is written for
+      -- it, so it is deliberately nullable rather than defaulted: a missing value means the
+      -- server has not refused anything, not "unknown".
+      share_state TEXT,
+      -- The server's updatedAt from the last server copy received (pull: createFromServer,
+      -- applyServerUpdate). The reference for the read-time piece-ordering rule; NULL means no
+      -- threshold applies (research R2), which is why this is nullable rather than defaulted.
+      server_updated_at TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       synced_at INTEGER,
@@ -122,6 +132,22 @@ export const CREATE_TABLES = {
       raw_metadata TEXT,
       created_at INTEGER NOT NULL,
       confirmed_at INTEGER
+    );
+  `,
+
+  /**
+   * The one unsaved memory per slot -- a new capture, or an edit of a saved one (FR-012,
+   * FR-013). Exactly two rows ever: id 'new' and id 'edit', `entry_local_id` naming the memory
+   * being edited (NULL for 'new'). Held only on the phone: never read by `SyncEngine`, never
+   * enqueued, and a row and its media folder are deleted once the save it describes resolves.
+   */
+  capture_drafts: `
+    CREATE TABLE IF NOT EXISTS capture_drafts (
+      id TEXT PRIMARY KEY,
+      entry_local_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      pieces_json TEXT NOT NULL
     );
   `,
 
@@ -243,6 +269,23 @@ export const SyncStatus = {
   CONFLICT: 'conflict',     // Sync conflict detected
   LOCAL_ONLY: 'local_only', // User chose not to sync (local-only mode)
   FAILED: 'failed',         // Sync failed after retries
+};
+
+/**
+ * What `journal_entries.share_state` may hold: the only record of what the server last said
+ * about a memory's chosen audience (research R15). `null` means it has said nothing, which is
+ * every memory until it has not.
+ *
+ * Here beside `SyncStatus`, and not in `SyncEngine.js`, because the column is this file's and
+ * the sync engine is only one of its readers: the memory's own card has to render these two
+ * states, and a component importing a card string out of the sync engine is a dependency
+ * pointing the wrong way.
+ */
+export const ShareState = {
+  /** The server could not work the audience out yet; the phone sends it again by itself. */
+  WAITING: 'waiting',
+  /** It never will, so the phone has stopped. Nothing about the memory is shared. */
+  REFUSED: 'refused',
 };
 
 /**

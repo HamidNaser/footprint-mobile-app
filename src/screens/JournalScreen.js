@@ -12,6 +12,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
+  Alert,
   View,
   Text,
   StyleSheet,
@@ -25,13 +26,22 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
 } from 'react-native';
+import { v4 as uuidv4 } from 'uuid';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 
 // Components
-import { JournalEntryCard } from '../components/journal/JournalEntryCard';
+// `isOwnMemory` is the card's own rule for whose memory a card shows, shared rather than
+// written out a second time here: it decides both whether Edit is offered on a card and
+// whether `openEdit` will open one, and those two must agree (round-1 Minor 3).
+import { JournalEntryCard, isOwnMemory } from '../components/journal/JournalEntryCard';
 import { ViewportFlatList } from '../components/media/ViewportLists';
+// The same viewability helper the media tiles use (007 FR-027), for the same reason: a card
+// off screen should not mount a native map view (013 research R10 *Lazy rendering*). Until the
+// list has reported anything every row counts as on screen, which is what makes the card's own
+// `isVisible` default of true and this screen agree.
+import { useViewableKeys } from '../hooks/mediaVisibility';
 import { JournalComposeModal } from '../components/journal/JournalComposeModal';
 import { JournalEntryDetail } from './JournalEntryDetail';
 import { ConnectionStatusIndicator } from '../components/common/ConnectionStatusIndicator';
@@ -62,6 +72,9 @@ import { useAuth } from '../context/AuthContext';
 
 // Services
 import { SettingsService } from '../services/SettingsService';
+import { JournalService } from '../services/JournalService';
+import CaptureDraftStore, { DraftSlot } from '../services/CaptureDraftStore';
+import CaptureLocation from '../services/CaptureLocation';
 
 // API
 import { ReactionsApi, CommentsApi } from '../api';
@@ -76,6 +89,48 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Primary color
 const PRIMARY_COLOR = '#4361ee';
+
+/**
+ * What the screen says while a typed note is still being kept.
+ *
+ * `QuickCaptureBar` clears its input and dismisses the keyboard the moment Send is tapped, and
+ * this screen then awaits a location fix before anything moves -- up to a few seconds on a cold
+ * GPS, in which the words are gone and nothing has happened. That reads as "my note vanished",
+ * so the screen says what it is doing instead.
+ *
+ * It is said here, and not in the bar: the Send button exists only while there is text
+ * (`{hasText ? <send> : <mic>}`), so by the time this screen is awaiting anything the control
+ * to disable is already gone. This screen owns the await, so this screen says so -- and the
+ * bar's contract is untouched.
+ */
+const KEEPING_NOTE = 'Keeping that note…';
+
+/** How much of an unsaved edit's first note the question that would discard it quotes. */
+const DRAFT_WORDS_LIMIT = 40;
+
+/**
+ * The first words of an unsaved edit, to name it in the question that would throw it away
+ * (FR-013) -- or **null** when it has none.
+ *
+ * `contracts/ui-contract.md` asks for "[title or first words]"; a memory in this app has no
+ * title, so the words are all there is, and an edit of photographs alone has not even those.
+ * A null is answered with a question that names no memory rather than with an empty pair of
+ * quotation marks, which reads as a defect at the one moment somebody is deciding whether to
+ * lose work.
+ *
+ * The draft's own pieces, not the memory's: `startEdit` is given the memory's pieces and the
+ * edit is kept on top of them, so these are the words as the person last left them.
+ */
+function draftFirstWords(draft) {
+  const note = draft?.pieces?.find(
+    (piece) => piece?.kind === 'text' && typeof piece.content === 'string' && piece.content.trim(),
+  );
+  if (!note) return null;
+  const words = note.content.trim().replace(/\s+/g, ' ');
+  return words.length > DRAFT_WORDS_LIMIT
+    ? `${words.slice(0, DRAFT_WORDS_LIMIT).trimEnd()}…`
+    : words;
+}
 
 /**
  * Date selector component
@@ -176,8 +231,15 @@ export default function JournalScreen({ navigation }) {
   
   // State
   const [selectedDate, setSelectedDate] = useState(new Date());
+  // The old composer. Nothing opens it any more -- T060 pointed its last opener, the detail
+  // view's Edit, at the capture screen -- so no user action ever flips this true. T068
+  // (which removed what this feature made dead elsewhere) left this mount and
+  // `handleSaveEntry` in place on purpose: `entryLocationSharing.journey.test.js` reaches
+  // them as `screen.root.findByType(JournalComposeModal).props.onSave(...)`, a backdoor into
+  // this screen's own createEntry/DB/wire wiring that has nothing to do with opening the
+  // modal. Removing the mount breaks that real regression coverage for no user-visible gain,
+  // so it stays until that test is rewritten to exercise the same wiring another way.
   const [showComposeModal, setShowComposeModal] = useState(false);
-  const [composeMode, setComposeMode] = useState('text');
   const [selectedEntry, setSelectedEntry] = useState(null);
   const [showEntryDetail, setShowEntryDetail] = useState(false);
   const [journalId, setJournalId] = useState(null);
@@ -196,6 +258,9 @@ export default function JournalScreen({ navigation }) {
   
   // Calendar picker state
   const [showCalendarPicker, setShowCalendarPicker] = useState(false);
+
+  // Whether a typed note is still being kept. See `handleSendMessage` and `KEEPING_NOTE`.
+  const [keepingNote, setKeepingNote] = useState(false);
 
   // Real-time context
   const { isConnected, unreadNotificationCount } = useRealtime();
@@ -540,28 +605,6 @@ export default function JournalScreen({ navigation }) {
   }, []);
 
   /**
-   * Handle sending a message directly from the input bar (WhatsApp-style)
-   */
-  const handleSendMessage = useCallback(async (text, visibility = 'private') => {
-    if (!text.trim()) return;
-    
-    console.log('[JournalScreen] Sending quick message:', text, 'visibility:', visibility);
-    
-    try {
-      const created = await createEntry({
-        userId: authUser?.id || 'local_user',
-        contentBlocks: [{ type: 'text', content: text }],
-        visibility: visibility,
-        date: new Date(),
-      });
-      revealEntry(created);
-      console.log('[JournalScreen] Quick message saved');
-    } catch (error) {
-      console.error('[JournalScreen] Failed to save quick message:', error);
-    }
-  }, [createEntry, authUser, revealEntry]);
-
-  /**
    * Move the screen to the day a just-created entry belongs to, so a save is
    * always visibly confirmed. No-op when already on that day.
    */
@@ -570,15 +613,94 @@ export default function JournalScreen({ navigation }) {
     if (key) setSelectedDate(parseDateKey(key));
   }, []);
 
-  const handleQuickCamera = useCallback(() => {
-    setComposeMode('camera');
-    setShowComposeModal(true);
-  }, []);
+  /**
+   * One tap from the quick bar into the capture screen, carrying the audience the bar's own
+   * picker was left on (FR-001).
+   *
+   * The same route `CaptureFab` sends from the "+" over every tab, so there is one capture
+   * screen and not two. The "+" carries no audience, because there is no picker beside it; all
+   * **three** of the bar's controls do, because the picker sits on the bar with them (fix round
+   * 2, item 3 -- it was Send alone, and a camera or microphone tap replaced the person's choice
+   * with the sheet's wider default).
+   *
+   * It is a pre-selection for the save sheet and nothing more: a memory is still saved only on
+   * an explicit choice there (FR-011).
+   *
+   * `typeof visibility === 'string'`, so a caller that hands this straight to a `TouchableOpacity`
+   * -- which calls its handler with a press **event** -- cannot send that object to the capture
+   * screen as a route parameter. `QuickCaptureBar` wraps all three of its controls so that does
+   * not happen today; this is what stops it mattering if one is ever unwrapped.
+   */
+  const openCapture = useCallback((visibility) => {
+    navigation.navigate('Capture', {
+      mode: 'new',
+      ...(typeof visibility === 'string' ? { audience: visibility } : null),
+    });
+  }, [navigation]);
 
-  const handleQuickMic = useCallback(() => {
-    setComposeMode('audio');
-    setShowComposeModal(true);
-  }, []);
+  /**
+   * The quick bar's typed note: the same one tap into the capture screen, with the note.
+   *
+   * `QuickCaptureBar` clears its input as it calls this, so by the time this runs the note
+   * exists nowhere else -- which is the defect this feature exists to remove, and it must not
+   * reappear here. The note is recorded in the unsaved memory first and the screen opened
+   * second: it goes into the `new` draft slot through the same stamp-then-record order every
+   * piece on the capture screen goes through (FR-004), so the capture screen's own mount reads
+   * it back, and so it survives the app being closed on the way (FR-012).
+   *
+   * Nothing is saved: a memory is saved only on an explicit choice in the capture screen's save
+   * sheet (FR-011). But the audience the bar's own picker was left on **is** carried, as the
+   * sheet's pre-selection (fix round 1 after the whole-branch review, Important 2). It used to be
+   * dropped here, which made that picker a dead control -- and worse than dead: somebody who
+   * opened it, picked **Only me**, and tapped Send reached a sheet pre-selecting **Family**, so
+   * the replacement for their discarded choice was *wider* than what they asked for. Of the two
+   * ways to be wrong about an audience, silently widening one is the unsafe one, which is this
+   * project's "sharing fails closed" rule in spirit. Carrying the choice is also the alternative
+   * to hiding the picker, which would take away something people have today.
+   *
+   * It stays a pre-selection: the save sheet still has to be tapped, and nothing about this
+   * value reaches the server unless it is. The bar's camera and microphone controls carry it
+   * too, for the same reason (fix round 2, item 3) -- see `openCapture`.
+   *
+   * A note that cannot be recorded is said back to the person, with the words in it, rather than
+   * logged to a console nobody is reading (FR-017).
+   *
+   * While that is happening the screen says so (`KEEPING_NOTE`). The stamping is the slow part
+   * -- a cold GPS fix, up to a few seconds, though `stampLocation` caches one for two minutes
+   * so this is the first send after the app has been idle -- and the bar has already taken the
+   * words off the screen. The flag is cleared in a `finally`, so the line does not outlive the
+   * attempt either way: a failure says what happened, and a spinner left under it would say
+   * the opposite.
+   */
+  const handleSendMessage = useCallback(async (text, visibility) => {
+    const note = text?.trim();
+    if (!note) return;
+
+    setKeepingNote(true);
+    try {
+      const stamped = await CaptureLocation.withLocation({
+        localId: uuidv4(),
+        kind: 'text',
+        content: note,
+        // An instant, exactly as the phone's clock reads it (research R8, Principle III) --
+        // never a civil date.
+        capturedAt: new Date().toISOString(),
+      });
+      await CaptureDraftStore.addPiece(DraftSlot.NEW, stamped);
+    } catch (error) {
+      console.warn('[JournalScreen] the typed note reached no draft', error);
+      Alert.alert(
+        'Could not keep that note',
+        'This note has not been kept, so nothing has been added to your memory. Here it is, ' +
+          `to write again:\n\n${note}`,
+      );
+      return;
+    } finally {
+      setKeepingNote(false);
+    }
+
+    openCapture(visibility);
+  }, [openCapture]);
 
   /**
    * Handle entry press
@@ -588,12 +710,212 @@ export default function JournalScreen({ navigation }) {
     setShowEntryDetail(true);
   }, []);
 
+  // ---------------------------------------------------------------------------------------
+  // Editing a memory in place (FR-013, FR-018)
+  // ---------------------------------------------------------------------------------------
+
   /**
-   * Handle save entry from compose modal
+   * Which memory the one unsaved edit belongs to, or null (FR-013).
+   *
+   * There is at most one `edit` draft slot and it names its memory, so this is one read for
+   * the whole list: the card whose `localId` this is says "Unfinished edit — continue", and
+   * every other card says nothing.
+   */
+  const [unfinishedEditOf, setUnfinishedEditOf] = useState(null);
+
+  /**
+   * Read the slot whenever the Journal comes into view.
+   *
+   * That is the moment that matters: the person has just closed the capture screen, and
+   * whether they saved, discarded, or simply left decides what their card should say. A read
+   * on mount alone would leave a card silent about an edit made seconds earlier until the app
+   * was restarted -- the same divergence `PlacesScreen` uses this hook to avoid.
+   *
+   * `load` is a read, and it is also the store's own cleanup: an `edit` slot whose memory has
+   * been deleted is discarded, folder and all, on the way past. So the line can never offer an
+   * edit of a memory that is no longer there.
+   *
+   * A failed read changes nothing, in either direction. It is not evidence that an edit exists
+   * and it is not evidence that one does not, and the slot is read again on the next visit.
+   * Recorded rather than said: the person has not asked this screen for anything, and an alert
+   * on arriving at the Journal would be noise over somebody's memories. Where a failure *is*
+   * said is `openEdit` below, which is an explicit action with something to lose.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+
+      (async () => {
+        try {
+          const draft = await CaptureDraftStore.load(DraftSlot.EDIT);
+          if (!cancelled) setUnfinishedEditOf(draft?.entryLocalId ?? null);
+        } catch (error) {
+          console.warn('[JournalScreen] could not tell which memory has an unsaved edit', error);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }, []),
+  );
+
+  /**
+   * Open the capture screen on a memory that is already saved (FR-018).
+   *
+   * One handler for every way in -- the ⋯ menu's Edit, the detail view's Edit, and the
+   * "Unfinished edit — continue" line -- because each of them has the same thing to protect.
+   *
+   * **There is at most one unsaved edit** (FR-013), and `CaptureDraftStore.startEdit` replaces
+   * the slot, so opening an edit of a *different* memory destroys the unsaved one the moment
+   * anything in the new one changes. The capture screen deliberately does not ask about that
+   * (T057/T058: "asking whether to discard it is the Journal's"), so if this does not ask,
+   * nobody does, and somebody's unsaved changes go without a word. It asks, names the memory
+   * the edit belongs to, and lets go of that edit itself when the person says to -- rather than
+   * leaving it to be deleted silently by the first keystroke in the next one, which would mean
+   * backing out of the new edit left the old one still sitting there after the person had
+   * agreed to lose it.
+   *
+   * Nothing is opened if either step fails. The read failing means the question cannot be asked
+   * at all; the discard failing means the slot still holds the old edit. In both cases opening
+   * anyway would put the capture screen one change away from deleting an edit nobody was asked
+   * about, so it fails closed and says so (FR-017).
+   */
+  const openEdit = useCallback(async (entry) => {
+    const entryLocalId = entry?.localId;
+
+    // Unreachable from the list -- every row is keyed by `localId` -- so this is the guard,
+    // not a case. A bare `return` would be a silent no-op immediately after somebody chose
+    // Edit, which is the one thing a refusal on this screen must never be.
+    if (!entryLocalId) {
+      Alert.alert(
+        'Could not open that edit',
+        'That memory could not be identified, so nothing has been opened and nothing has ' +
+          'been changed.',
+      );
+      return;
+    }
+
+    // Whose memory it is, tested **here** and not only where Edit is offered (round-1
+    // Important 1). This handler has three callers and the menu below is one of them: the
+    // card's "Unfinished edit — continue" is wired to every card, and the detail view's Edit
+    // comes from `JournalEntryDetail`'s own menu, which has no ownership test at all. Opening
+    // a memory that is not the reader's as an edit would take them through a whole edit and
+    // lose it at the far end, where `updateEntry` refuses the write -- so it is refused at the
+    // near end, where nothing has been done yet. The menu's gate stays what it is: the
+    // suppression of the *offer*, so a stranger's card shows no Edit rather than one that
+    // refuses.
+    if (!isOwnMemory(entry, authUser?.id)) {
+      Alert.alert(
+        'Could not open that edit',
+        'This memory was written by somebody else, so it cannot be edited here. Nothing has ' +
+          'been changed.',
+      );
+      return;
+    }
+
+    const open = () => {
+      // The detail view, if that is where Edit was chosen: the capture screen opens over the
+      // Journal, and coming back from it should land on the list the memory is in.
+      setShowEntryDetail(false);
+      navigation.navigate('Capture', { mode: 'edit', entryLocalId });
+    };
+
+    let other = null;
+    try {
+      const draft = await CaptureDraftStore.load(DraftSlot.EDIT);
+      // An unsaved edit of this very memory is not in the way: it *is* what opening this
+      // reopens (US2-7), and the capture screen reads it back for itself.
+      other = draft && draft.entryLocalId !== entryLocalId ? draft : null;
+    } catch (error) {
+      console.warn('[JournalScreen] could not tell whether another edit is unsaved', error);
+      Alert.alert(
+        'Could not open that edit',
+        'The phone could not check whether you have another edit that has not been saved, ' +
+          'so nothing has been opened and nothing has been changed. Please try again.',
+      );
+      return;
+    }
+
+    if (!other) {
+      open();
+      return;
+    }
+
+    const words = draftFirstWords(other);
+    Alert.alert(
+      words
+        ? `Discard your unsaved edit of “${words}”?`
+        : 'Discard your unsaved edit of your other memory?',
+      'Only one unsaved edit is kept at a time, so opening this one removes the changes you ' +
+        'have not saved. That memory itself stays exactly as it was.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Discard',
+          style: 'destructive',
+          // Returns its promise, so whatever drives this button can wait for the discard to
+          // land before the next screen is open. Its one failure is answered below.
+          onPress: async () => {
+            try {
+              await CaptureDraftStore.discard(DraftSlot.EDIT);
+            } catch (error) {
+              console.warn('[JournalScreen] the unsaved edit could not be discarded', error);
+              Alert.alert(
+                'Could not open that edit',
+                'Your unsaved edit of the other memory is still here, and nothing has been ' +
+                  'opened. Please try again.',
+              );
+              return;
+            }
+            // Said on the cards straight away, rather than at the next visit: the person
+            // agreed to lose that edit, so no card should still be offering it.
+            setUnfinishedEditOf(null);
+            open();
+          },
+        },
+      ],
+    );
+  }, [authUser?.id, navigation]);
+
+  /**
+   * The ⋯ on a card, which was wired to nothing at all before this: Edit, on the author's own
+   * memory (FR-018, FR-021).
+   *
+   * **Nothing at all on anybody else's.** There is nothing in another person's memory for the
+   * reader to edit -- an edit saves through `updateEntry`, which is their memory's to accept --
+   * so a menu here would be a menu of one thing that cannot work. This is the suppression of
+   * the *offer* only: `openEdit` applies the same rule itself, by the same `isOwnMemory`, so
+   * the two cannot disagree and the handler holds even for a caller that offers no menu.
+   *
+   * The cost of that rule, named: a memory saved while nobody was signed in carries
+   * `local_user` as its author and is not matched, so Edit is not offered on it. It is the same
+   * cost the card's own share line carries, for the same reason -- there is no other definition
+   * of "the author's own memory" available here -- and offering an edit that `updateEntry`
+   * would refuse is worse than not offering one.
+   */
+  const handleMenuPress = useCallback((entry) => {
+    if (!isOwnMemory(entry, authUser?.id)) return;
+
+    Alert.alert('Memory options', null, [
+      { text: 'Edit', onPress: () => openEdit(entry) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [authUser?.id, openEdit]);
+
+  /**
+   * Handle save entry from the compose modal, which **nothing on this screen now opens**: the
+   * detail view's Edit was its last opener and T060 re-points that at the capture screen. A new
+   * memory does not come through here either: it is captured and saved on `CaptureScreen`.
+   *
+   * T068 (removing what this feature made dead) checked `git grep` for a caller before
+   * removing this, and found one: `entryLocationSharing.journey.test.js` reaches this handler
+   * via `screen.root.findByType(JournalComposeModal).props.onSave(...)`, with nothing in the UI
+   * ever pressed to get there. That is not the dead path it is checking for -- it is real
+   * coverage of `createEntry`/the local DB/the wire serialiser -- so the mount and this handler
+   * stay until that test is rewritten to reach the same wiring another way.
    */
   const handleSaveEntry = useCallback(async (entryData) => {
-    console.log('[JournalScreen] Saving entry:', entryData);
-    
     try {
       const created = await createEntry({
         userId: authUser?.id || 'local_user',
@@ -614,10 +936,16 @@ export default function JournalScreen({ navigation }) {
       // date would otherwise drop the user back onto a screen that does not
       // contain what they just captured.
       revealEntry(created);
-      console.log('[JournalScreen] Entry saved successfully');
     } catch (error) {
-      console.error('[JournalScreen] Failed to save entry:', error);
-      // Error will be shown via the useJournal hook's error state
+      // This caught the rejection, logged it, and left the person looking at a screen that
+      // showed no memory and said nothing -- the comment here claimed the hook's error state
+      // would show it, and that state never reaches this screen. A failure is said, and the
+      // modal is left open with everything that was written still in it (FR-017).
+      console.warn('[JournalScreen] the memory could not be saved', error);
+      Alert.alert(
+        'Could not save',
+        'Your memory could not be saved and is still here. Try again.',
+      );
     }
   }, [createEntry, authUser, revealEntry]);
 
@@ -712,12 +1040,119 @@ export default function JournalScreen({ navigation }) {
   }, [allEntries, refresh]);
 
   /**
+   * The audience chosen again for a memory whose share the server would not apply (FR-011).
+   *
+   * The card offers the choice and reports it; the re-sharing itself is `reshareEntry`'s,
+   * which stores the audience, queues the memory once and only then clears the refusal. The
+   * card then stops saying "Not shared" because the service announces the change and this
+   * screen reloads the day.
+   *
+   * A failure is said, not logged: the refusal is still on the card, so silence would leave
+   * the person tapping a line that appears to do nothing (FR-017). Nothing is shared in that
+   * case -- `reshareEntry` leaves the refusal exactly as it was.
+   *
+   * One failure gets its own words. In the Local Only storage mode nothing is ever sent, so
+   * `reshareEntry` refuses rather than clear a refusal over a memory that can never go -- and
+   * "please try again" would be advice that cannot work. The person is told what would have to
+   * change instead.
+   */
+  const handleReshare = useCallback(async (entry, visibility) => {
+    const localId = entry?.localId;
+    // Unreachable from the Journal list -- `SaveAudienceSheet` reports an audience or nothing
+    // at all -- but it was a bare `return`, which is a silent no-op immediately after the
+    // person made an explicit choice. FR-011: a refusal is never silent, and that cuts both
+    // ways. Nothing is shared either way, and the card goes on saying so.
+    if (!localId || !visibility) {
+      Alert.alert(
+        'Could not share that memory',
+        'No audience came through with that choice, so nothing has changed: it is still on ' +
+          'this phone and still not shared with anyone. Please try again.',
+      );
+      return;
+    }
+
+    try {
+      await JournalService.reshareEntry(localId, visibility);
+      await refresh();
+    } catch (error) {
+      console.warn('[JournalScreen] the memory could not be shared again', error);
+      Alert.alert(
+        'Could not share that memory',
+        error?.code === 'local_only_storage'
+          ? 'Your storage is set to Local Only, so nothing is sent from this phone. This ' +
+              'memory is still here, and still not shared with anyone. Turn syncing back on ' +
+              'in Settings to share it.'
+          : 'It is still on this phone and still not shared with anyone. Please try again.',
+      );
+    }
+  }, [refresh]);
+
+  /**
+   * Key extractor
+   */
+  const keyExtractor = useCallback((item) => item.localId, []);
+
+  /**
+   * Which cards are on screen, and the list itself (013 T052).
+   *
+   * `MemoryRouteMap` mounts a native map view, and the Journal is a list of cards: one map per
+   * card would cost a map for every memory in a day whether anybody can see it or not. The
+   * list reports its viewable rows and each card is told, so an off-screen card holds the
+   * map's height open instead (research R10 *Lazy rendering*).
+   *
+   * `useViewableKeys` is the helper the media tiles already use, and its rule is the one this
+   * needs: until the list has reported anything every row counts as on screen, so nothing is
+   * held back before React Native has measured a thing. `ViewportFlatList` composes this
+   * callback with its own -- React Native forbids changing `onViewableItemsChanged` on a live
+   * list, and both are stable.
+   */
+  const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
+  const listRef = useRef(null);
+
+  /**
+   * Bring a piece into view, for a pin pressed on the card in row `index` (FR-025).
+   *
+   * The two halves of the measurement meet here. The card knows where the piece sits inside
+   * itself and hands up that offset; it cannot know where it sits in the *list*, because
+   * `FlatList` lays every card inside a cell of its own, so a card's own `onLayout` reports a
+   * position relative to that cell and not to the list's content. The row index supplies the
+   * rest, which is what `scrollToIndex`'s `viewOffset` is for: the row is placed `offset`
+   * points above the top of the screen, which brings the piece itself to the top.
+   *
+   * ⚠ A deliberate deviation from tasks.md's wording ("scrolls the list to the given offset").
+   * `scrollToOffset` would need the row's own position in the list's content, which no public
+   * API on `FlatList` reports.
+   *
+   * `scrollToIndex` only refuses an index the list has not laid out, and this row has been -- a
+   * pin can only be pressed on a map, and a card mounts its map only while the list says the
+   * card is on screen. `onScrollToIndexFailed` on the list below is there because being wrong
+   * about that would be a **crash** rather than a missed scroll: without `getItemLayout` and
+   * without that handler, `VirtualizedList` throws an invariant, and there is no error boundary
+   * anywhere in this app to contain it (round-1 item 5).
+   */
+  const scrollPieceIntoView = useCallback((index, offset) => {
+    listRef.current?.scrollToIndex({ index, viewOffset: -offset, animated: true });
+  }, []);
+
+  /**
+   * A row the list had not laid out after all: the memory stays where it is.
+   *
+   * Deliberately silent to the person. They pressed a pin and the Journal did not move, which
+   * is the honest outcome and is self-evident on screen; an alert over a memory would be worse
+   * than the missed scroll. The highlight on the piece still happens -- the card does that
+   * itself -- so the pin is not completely without an answer.
+   */
+  const handleScrollToIndexFailed = useCallback((info) => {
+    console.warn('[JournalScreen] could not scroll to a pressed pin’s piece', info);
+  }, []);
+
+  /**
    * Render entry card
    */
-  const renderEntry = useCallback(({ item }) => {
+  const renderEntry = useCallback(({ item, index: rowIndex }) => {
     // Get the appropriate user info for this entry
     const entryUser = getUserForEntry(item);
-    
+
     return (
       <JournalEntryCard
         entry={item}
@@ -732,15 +1167,17 @@ export default function JournalScreen({ navigation }) {
         }}
         onReact={handleReact}
         onAddResponse={handleAddResponse}
+        onReshare={handleReshare}
+        onMenuPress={handleMenuPress}
+        // The one unsaved edit belongs to one memory, so one card says so (FR-013).
+        hasUnfinishedEdit={unfinishedEditOf === item.localId}
+        onContinueEdit={openEdit}
+        isVisible={isViewable(item.localId)}
+        onRequestScrollTo={(offset) => scrollPieceIntoView(rowIndex, offset)}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse]);
-
-  /**
-   * Key extractor
-   */
-  const keyExtractor = useCallback((item) => item.localId, []);
+  }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare, handleMenuPress, unfinishedEditOf, openEdit, isViewable, scrollPieceIntoView]);
 
   // Show entry detail view
   if (showEntryDetail && selectedEntry) {
@@ -749,11 +1186,10 @@ export default function JournalScreen({ navigation }) {
       <JournalEntryDetail
         entry={selectedEntry}
         user={detailUser}
-        onEdit={(entry) => {
-          setShowEntryDetail(false);
-          setComposeMode('text');
-          setShowComposeModal(true);
-        }}
+        // Edit opens the capture screen on this very memory, and saving there updates it
+        // rather than creating a second one (FR-018). It used to open an *empty* composer,
+        // which saved a new memory and left the one being edited untouched.
+        onEdit={openEdit}
         onDelete={handleDeleteEntry}
         onBack={() => {
           setShowEntryDetail(false);
@@ -863,9 +1299,12 @@ export default function JournalScreen({ navigation }) {
           </View>
         ) : (
           <ViewportFlatList
+            ref={listRef}
             data={displayEntries}
             renderItem={renderEntry}
             keyExtractor={keyExtractor}
+            onViewableItemsChanged={onViewableItemsChanged}
+            onScrollToIndexFailed={handleScrollToIndexFailed}
             contentContainerStyle={styles.feedContent}
             showsVerticalScrollIndicator={false}
             refreshControl={
@@ -899,10 +1338,18 @@ export default function JournalScreen({ navigation }) {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
+        {/* The one sign that a sent note is still being dealt with. Above the bar rather than
+            inside it, because the bar has already cleared itself (see `KEEPING_NOTE`). */}
+        {keepingNote && (
+          <View style={styles.keepingNoteRow}>
+            <ActivityIndicator size="small" color={PRIMARY_COLOR} />
+            <Text style={styles.keepingNoteText}>{KEEPING_NOTE}</Text>
+          </View>
+        )}
         <QuickCaptureBar
           onSend={handleSendMessage}
-          onCameraPress={handleQuickCamera}
-          onMicPress={handleQuickMic}
+          onCameraPress={openCapture}
+          onMicPress={openCapture}
           placeholder="Message..."
           primaryColor={PRIMARY_COLOR}
         />
@@ -938,7 +1385,6 @@ export default function JournalScreen({ navigation }) {
         visible={showComposeModal}
         onClose={() => setShowComposeModal(false)}
         onSave={handleSaveEntry}
-        initialMode={composeMode}
         primaryColor={PRIMARY_COLOR}
       />
 
@@ -982,6 +1428,20 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F0F4FF',
+  },
+
+  // The transient row above the quick bar while a typed note is being kept.
+  keepingNoteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    backgroundColor: '#FFF',
+  },
+  keepingNoteText: {
+    fontSize: 13,
+    color: '#8E8E93',
   },
 
   // New entries banner

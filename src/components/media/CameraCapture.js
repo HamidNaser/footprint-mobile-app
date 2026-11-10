@@ -56,7 +56,6 @@ export const CameraCapture = ({
   onDone,
   captureCount = 0,
   initialMode = CameraMode.PHOTO,
-  allowModeSwitch = true,
   allowFlash = true,
   maxVideoDuration = 60, // seconds
   videoQuality = '720p',
@@ -67,7 +66,12 @@ export const CameraCapture = ({
   // Without it recordAsync fails on iOS rather than silently producing a
   // silent clip.
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
-  const [mode, setMode] = useState(initialMode);
+  // No setter: the toggle that used to change this mid-session is gone (T068, FR-008), so a
+  // mount is PHOTO or VIDEO for its whole life, fixed by whichever `initialMode` it was given.
+  // The video branch below (`startRecording`/`stopRecording`/the recording indicator/styles) is
+  // therefore reachable only through a caller that passes `initialMode={CameraMode.VIDEO}` --
+  // none does today.
+  const [mode] = useState(initialMode);
   const [facing, setFacing] = useState('back');
   const [flash, setFlash] = useState(FlashMode.OFF);
   const [isRecording, setIsRecording] = useState(false);
@@ -169,14 +173,6 @@ export const CameraCapture = ({
       default:
         return 'flash-off';
     }
-  };
-
-  /**
-   * Switch camera mode
-   */
-  const switchMode = (newMode) => {
-    if (isRecording) return;
-    setMode(newMode);
   };
 
   /**
@@ -336,7 +332,7 @@ export const CameraCapture = ({
 
       {/*
         Overlay, not children. CameraView stopped rendering its children in expo-camera 16+,
-        so everything below -- the shutter, the mode switcher, the close and flip buttons --
+        so everything below -- the shutter, the close and flip buttons --
         simply did not draw: the preview filled the screen with no way to take a picture.
         Rendered as an absolutely-positioned sibling over the preview instead, which is the
         supported arrangement.
@@ -387,42 +383,6 @@ export const CameraCapture = ({
 
         {/* Bottom controls */}
         <View style={styles.bottomControls}>
-          {/* Mode switcher */}
-          {allowModeSwitch && (
-            <View style={styles.modeSwitcher}>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === CameraMode.PHOTO && styles.modeButtonActive,
-                ]}
-                onPress={() => switchMode(CameraMode.PHOTO)}
-                disabled={isRecording}
-              >
-                <Text style={[
-                  styles.modeText,
-                  mode === CameraMode.PHOTO && styles.modeTextActive,
-                ]}>
-                  PHOTO
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modeButton,
-                  mode === CameraMode.VIDEO && styles.modeButtonActive,
-                ]}
-                onPress={() => switchMode(CameraMode.VIDEO)}
-                disabled={isRecording}
-              >
-                <Text style={[
-                  styles.modeText,
-                  mode === CameraMode.VIDEO && styles.modeTextActive,
-                ]}>
-                  VIDEO
-                </Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
           {/* Capture controls */}
           <View style={styles.captureControls}>
             {/* Spacer */}
@@ -564,27 +524,6 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-  },
-  modeSwitcher: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  modeButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-  },
-  modeButtonActive: {
-    // Active mode style
-  },
-  modeText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 13,
-    fontWeight: '600',
-    letterSpacing: 1,
-  },
-  modeTextActive: {
-    color: '#FFF',
   },
   captureControls: {
     flexDirection: 'row',

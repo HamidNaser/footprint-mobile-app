@@ -1,14 +1,55 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import { useUpcomingEvents } from '../hooks/useUpcomingEvents';
+import ComingUpCard from '../components/home/ComingUpCard';
 
 const PRIMARY_COLOR = '#4361ee';
 const BACKGROUND_COLOR = '#F0F4FF';
 
 export default function HomeScreen({ navigation }) {
   const { user } = useAuth();
+  // Home's "Coming up" card (FR-034, research R11) -- the hook's own behaviour (civil-date
+  // split, fail-closed error) is covered by its own test; here it only feeds the card.
+  const { upcoming, error: upcomingError, refresh: refreshUpcomingEvents } = useUpcomingEvents();
+
+  // Home is a bottom-tab screen that never unmounts, so the one load on mount would otherwise
+  // be the only load for the rest of the app session -- the same hazard `useUpcomingEvents`
+  // gained `refresh()` for, one task ago, on the Timeline pane; its own doc comment gives this
+  // exact scenario as the reason. A transient failure would strand the card on "Couldn't load
+  // upcoming events" indefinitely, and an event created afterwards would never appear.
+  //
+  // Retried quietly on focus, not with a button: FR-034 asks for a *quiet* line, and a visible
+  // "Try again" is a control the contract does not ask for. Only retried when there is an
+  // error to recover from -- an ordinary tab switch must not refetch on every visit.
+  //
+  // Fix round 2, Critical: `upcomingError` must NOT sit in the focus callback's own dependency
+  // array. `useUpcomingEvents.refresh()` sets a *new* `error` object on every failed load, even
+  // for an identical repeated failure -- and React Navigation's `useFocusEffect`
+  // (`@react-navigation/core/useFocusEffect.tsx`) re-invokes its callback immediately, without
+  // a real focus/blur transition, whenever the callback's own identity changes while the screen
+  // is already focused. Depending on `upcomingError` directly made the callback's identity
+  // change on every failure, which retried immediately, which failed again, unbounded -- a
+  // retry storm against the network on the app's landing screen, worst during exactly the
+  // outage this retry exists to recover from. `PlacesScreen.js`'s own `useFocusEffect` avoids
+  // this by depending only on a stable callback, never on error/result state; matched here as
+  // closely as the extra "only when there is an error" condition allows -- by reading the
+  // latest error through a ref (kept current by a plain effect) instead of through the
+  // callback's closure, so the focus callback's identity depends only on the already-stable
+  // `refreshUpcomingEvents`.
+  const upcomingErrorRef = useRef(upcomingError);
+  useEffect(() => {
+    upcomingErrorRef.current = upcomingError;
+  }, [upcomingError]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (upcomingErrorRef.current) refreshUpcomingEvents();
+    }, [refreshUpcomingEvents])
+  );
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -46,6 +87,12 @@ export default function HomeScreen({ navigation }) {
           </View>
           <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
         </TouchableOpacity>
+
+        <ComingUpCard
+          upcoming={upcoming}
+          error={upcomingError}
+          onPress={() => navigation.navigate('Timeline', { view: 'events' })}
+        />
       </View>
     </SafeAreaView>
   );

@@ -19,6 +19,7 @@ import { SyncEngine } from './SyncEngine';
 import { NetworkMonitor } from './NetworkMonitor';
 import { DatabaseService } from '../services/DatabaseService';
 import { SettingsService } from '../services/SettingsService';
+import * as CaptureDraftStore from '../services/CaptureDraftStore';
 
 let _started = false;
 
@@ -68,6 +69,10 @@ async function ensureFreshLocalStore(userId) {
         previousOwner,
         userId,
       });
+      // The unsaved memories first: they are the one piece of local data a *screen* reads
+      // straight back and offers to save, so they are the one that cannot be left behind.
+      // See `clearLocalDrafts`.
+      await clearLocalDrafts();
       await DatabaseService.clearLocalData();
       // Drop the previous account's journal id + sync cursor as well.
       await SettingsService.clearSettings(true);
@@ -122,12 +127,42 @@ export function stopSync() {
 }
 
 /**
+ * Let go of every unsaved memory -- the `capture_drafts` rows, the media under
+ * `documentDirectory/capture-drafts/`, and the copies `CaptureDraftStore` holds in memory.
+ *
+ * Both wipe paths need it, and neither of them got it. `DatabaseService.clearLocalData()` drops
+ * tables and knows nothing about the filesystem, and until this was written its table list was
+ * seven names kept by hand that `capture_drafts` was never added to -- so a sign-out left one
+ * person's unsaved note, photographs and voice clip on the phone, rows and media both. The next
+ * person to sign in and tap **+** had every piece of it restored on screen by
+ * `CaptureScreen`'s mount, with Save enabled, and saving it wrote the entry under *their* user
+ * id. That is FR-014 ("an unsaved memory MUST remain private to the phone") inverted.
+ *
+ * The `edit` slot self-heals -- `CaptureDraftStore.load` discards an edit whose memory is no
+ * longer in `journal_entries`, and the wipe takes those rows -- but the `new` slot has no memory
+ * to check against and is the slot that always exists.
+ *
+ * Guarded and warned about rather than thrown, like every other step of a sign-out: a logout
+ * that refuses to complete leaves the person signed in on a phone they are trying to hand over,
+ * which is worse than a wipe that reports what it could not finish. It runs **before** the table
+ * drop, so an in-flight draft write cannot land in the freshly-rebuilt table afterwards.
+ */
+async function clearLocalDrafts() {
+  try {
+    await CaptureDraftStore.clearAllDrafts();
+  } catch (error) {
+    console.warn('[SyncBootstrap] clearAllDrafts failed:', error?.message);
+  }
+}
+
+/**
  * Tear down the local offline store on logout so the next account starts clean
  * and no journal data bleeds across sessions. Every step is guarded so logout
  * can never fail here.
  */
 export async function teardownLocalData() {
   stopSync();
+  await clearLocalDrafts();
   try {
     await DatabaseService.clearLocalData();
   } catch (error) {

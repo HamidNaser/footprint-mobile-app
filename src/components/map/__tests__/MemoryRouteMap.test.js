@@ -1,0 +1,616 @@
+/**
+ * MemoryRouteMap (013 T047) -- the "Where this happened" map under a saved memory.
+ *
+ * The map draws what `toNumberedPieces` decided (T046) and nothing of its own: one
+ * `NumberedPin` per group, in number order, joined by a dashed line once there are two
+ * groups, under a heading and above a line counting the pieces that have no place
+ * (FR-022 to FR-026). So these tests drive it with real entries and read the real pins,
+ * rather than with hand-built groups -- a group's shape is `toNumberedPieces`' own suite's
+ * business, and a map test that invented its own groups could agree with itself while
+ * disagreeing with the numbers the card puts on the pieces.
+ *
+ * `react-native-maps` is native and cannot load under jest, so it is mocked to string
+ * elements the way `EntryMarker.test.js` and `NumberedPin.test.js` mock it; the props the
+ * real `MapView`, `Polyline` and `Marker` would receive are then readable on the tree.
+ * `NumberedPin` itself is **not** mocked -- it is the thing being arranged on the map, and
+ * mocking it would leave the pin's number, its coordinate and its press untested here.
+ *
+ * Two of these tests exist because of what this component must *not* become. It renders its
+ * own `MapView` rather than `JournalMapView` (round-3 M2), and `JournalMapView` asks for the
+ * user's location on mount (`:233-237`); so the location service and `expo-location` are
+ * mocked and asserted untouched. And the coordinate a pin is drawn on must be the one the
+ * server sent for this viewer, never the rounded merging key, because the server has already
+ * coarsened it to the precision this viewer may see (FR-026).
+ */
+import React from 'react';
+import renderer, { act } from 'react-test-renderer';
+import { Platform, StyleSheet } from 'react-native';
+
+jest.mock('react-native-maps', () => ({
+  __esModule: true,
+  default: 'MapView',
+  Marker: 'Marker',
+  Polyline: 'Polyline',
+  PROVIDER_GOOGLE: 'google',
+}));
+
+jest.mock('../../../services/LocationService', () => {
+  const service = {
+    checkPermissions: jest.fn(),
+    requestPermissions: jest.fn(),
+    getCurrentLocation: jest.fn(),
+  };
+  return { __esModule: true, LocationService: service, default: service, PermissionStatus: {} };
+});
+
+jest.mock('expo-location', () => ({
+  requestForegroundPermissionsAsync: jest.fn(),
+  getForegroundPermissionsAsync: jest.fn(),
+  getCurrentPositionAsync: jest.fn(),
+}));
+
+import fs from 'fs';
+import path from 'path';
+import * as ExpoLocation from 'expo-location';
+import LocationService from '../../../services/LocationService';
+import { PIN_COLOURS } from '../NumberedPin';
+import MemoryRouteMap, { MEMORY_ROUTE_MAP_HEIGHT } from '../MemoryRouteMap';
+import MemoryRouteMapWeb, {
+  MEMORY_ROUTE_MAP_HEIGHT as WEB_HEIGHT,
+} from '../MemoryRouteMap.web';
+
+global.IS_REACT_ACT_ENVIRONMENT = true;
+
+// Two spots on the same street, 0.0009 degrees of latitude apart -- about 100 m, which the
+// 5-decimal merging grid keeps as two places (round-2 H2).
+const BUS = { lat: 51.5001, lng: -0.1401 };
+const PLATFORM = { lat: 51.501, lng: -0.1401 };
+// Within a metre of the bus stop: both coordinates round to the same 5-decimal key, so these
+// two share one marker (FR-023).
+const BESIDE_THE_BUS = { lat: 51.500104, lng: -0.140097 };
+const THIRD_PLACE = { lat: 51.502, lng: -0.1401 };
+// Far enough away that a viewport still centred on the bus stop could not contain it, which is
+// what makes a stale viewport visible to a test.
+const ANOTHER_CITY = { lat: 48.8584, lng: 2.2945 };
+
+const text = (content, { at = null, location = null } = {}) => ({
+  type: 'text',
+  content,
+  capturedAt: at,
+  location,
+});
+
+const photos = (media) => ({ type: 'photos', media });
+
+const photo = (id, { at = null, location = null } = {}) => ({ id, capturedAt: at, location });
+
+const renderWith = (Component, props) => {
+  let tree;
+  act(() => {
+    tree = renderer.create(<Component entry={{ contentBlocks: [] }} {...props} />);
+  });
+  return tree;
+};
+
+const render = (props) => renderWith(MemoryRouteMap, props);
+
+/**
+ * Awaited, for the web sibling and for the pair tests that cover it: `@expo/vector-icons`
+ * loads its font asynchronously and sets state when it resolves, which outside `act` would add
+ * a warning to this suite's output. `SaveAudienceSheet.test.js` renders this way for the same
+ * reason. The native component draws no icon and so needs no await.
+ */
+const mount = async (Component, props) => {
+  let tree;
+  await act(async () => {
+    tree = renderer.create(<Component entry={{ contentBlocks: [] }} {...props} />);
+  });
+  return tree;
+};
+
+const map = (tree) => tree.root.findByType('MapView');
+const maps = (tree) => tree.root.findAllByType('MapView');
+const markers = (tree) => tree.root.findAllByType('Marker');
+const polylines = (tree) => tree.root.findAllByType('Polyline');
+
+// `{ deep: false }` matters: a `<Text testID="x">` is both a composite instance and the host
+// instance it renders to, and the default deep search returns both, so a tree with one pin
+// would read as two. This stops at the outermost match, as `findByProps` itself does.
+const allWith = (tree, testID) =>
+  tree.root.findAll((node) => node.props.testID === testID, { deep: false });
+
+const labels = (tree) => allWith(tree, 'numbered-pin-label').map((node) => node.props.children);
+const textAt = (tree, testID) => {
+  const found = allWith(tree, testID);
+  return found.length === 0 ? null : found[0].props.children;
+};
+const press = (marker) => act(() => marker.props.onPress());
+
+describe('a memory with no places', () => {
+  it('draws nothing at all, so the card looks exactly as it does today', () => {
+    // FR-022: when no piece has a place, no map is shown -- not an empty map, and not a
+    // heading over nothing (SC-008).
+    const tree = render({
+      entry: { contentBlocks: [text('got the bus'), photos([photo('m1')])] },
+    });
+
+    expect(tree.toJSON()).toBeNull();
+  });
+
+  it('draws nothing for a memory with no pieces either', () => {
+    expect(render({ entry: { contentBlocks: [] } }).toJSON()).toBeNull();
+  });
+});
+
+describe('its heading', () => {
+  it('is "Where this happened"', () => {
+    const tree = render({ entry: { contentBlocks: [text('here', { location: BUS })] } });
+
+    expect(textAt(tree, 'memory-route-map-title')).toBe('Where this happened');
+  });
+
+  it('counts the pieces that are on the map, which is the highest number on it', () => {
+    // The subtitle is "n pieces". n is the number of pieces the map shows -- the placed ones,
+    // which are numbered 1…n with no gaps -- so a viewer can check it against the last pin.
+    // The pieces with no place are counted on their own line below instead (FR-026), so
+    // neither line counts a piece the other one counts.
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          text('a', { location: BUS }),
+          text('b', { location: PLATFORM }),
+          text('c'),
+        ],
+      },
+    });
+
+    expect(textAt(tree, 'memory-route-map-subtitle')).toBe('2 pieces');
+  });
+
+  it('says "1 piece" of a single piece, not "1 pieces"', () => {
+    const tree = render({ entry: { contentBlocks: [text('only one', { location: BUS })] } });
+
+    expect(textAt(tree, 'memory-route-map-subtitle')).toBe('1 piece');
+  });
+});
+
+describe('the map it draws on', () => {
+  it('is one map of its own', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(maps(tree)).toHaveLength(1);
+  });
+
+  it('uses Google on Android, as every other map in the app does', () => {
+    const original = Platform.OS;
+    Platform.OS = 'android';
+    try {
+      const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+      expect(map(tree).props.provider).toBe('google');
+    } finally {
+      Platform.OS = original;
+    }
+  });
+
+  it('leaves the provider to the platform elsewhere', () => {
+    expect(Platform.OS).toBe('ios');
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(map(tree).props.provider).toBeUndefined();
+  });
+
+  it('never asks where the viewer is', () => {
+    // Round-3 M2: this map shows where a memory happened, which needs no permission at all.
+    // `JournalMapView` requests one on mount, which is the reason this component is its own
+    // map rather than built on that one.
+    render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(LocationService.checkPermissions).not.toHaveBeenCalled();
+    expect(LocationService.requestPermissions).not.toHaveBeenCalled();
+    expect(LocationService.getCurrentLocation).not.toHaveBeenCalled();
+    expect(ExpoLocation.requestForegroundPermissionsAsync).not.toHaveBeenCalled();
+    expect(ExpoLocation.getForegroundPermissionsAsync).not.toHaveBeenCalled();
+    expect(ExpoLocation.getCurrentPositionAsync).not.toHaveBeenCalled();
+  });
+
+  it('shows nothing of the viewer on the map', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(map(tree).props.showsUserLocation).toBe(false);
+    expect(map(tree).props.showsMyLocationButton).toBe(false);
+  });
+
+  it('opens over its pins', () => {
+    const tree = render({
+      entry: {
+        contentBlocks: [text('a', { location: BUS }), text('b', { location: PLATFORM })],
+      },
+    });
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = map(tree).props.region;
+
+    [BUS, PLATFORM].forEach((place) => {
+      expect(Math.abs(place.lat - latitude)).toBeLessThan(latitudeDelta / 2);
+      expect(Math.abs(place.lng - longitude)).toBeLessThan(longitudeDelta / 2);
+    });
+  });
+
+  it('follows its pins when the memory changes under it, having no other way back', () => {
+    // A real `MapView` applies `initialRegion` **once**, at mount, and this map takes no
+    // gestures (see below), so a viewport left behind by an edit could not be recovered -- the
+    // pins would sit off-screen with no pan and no zoom to find them. Editing a saved memory
+    // in place is part of this feature (FR-018), and a refetched entry re-renders this card
+    // without unmounting it.
+    //
+    // The prop *name* is what this test asserts, deliberately. The mocked map here is a plain
+    // host element, so it would happily report a recomputed `initialRegion` that a real map
+    // would have ignored -- the mount-once rule is the native side's and jest cannot model it.
+    // `region` is the prop a map re-applies; `initialRegion` must therefore be absent.
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    act(() => {
+      tree.update(
+        <MemoryRouteMap entry={{ contentBlocks: [text('a', { location: ANOTHER_CITY })] }} />,
+      );
+    });
+
+    const { latitude, longitude, latitudeDelta, longitudeDelta } = map(tree).props.region;
+
+    expect(map(tree).props.initialRegion).toBeUndefined();
+    expect(Math.abs(ANOTHER_CITY.lat - latitude)).toBeLessThan(latitudeDelta / 2);
+    expect(Math.abs(ANOTHER_CITY.lng - longitude)).toBeLessThan(longitudeDelta / 2);
+  });
+
+  it('opens close in on a memory that happened in one spot', () => {
+    // A single pin has no span to fit, and a region of zero degrees is the whole world on
+    // some providers and an error on others.
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+    const { latitudeDelta, longitudeDelta } = map(tree).props.region;
+
+    expect(latitudeDelta).toBeGreaterThan(0);
+    expect(longitudeDelta).toBeGreaterThan(0);
+    expect(latitudeDelta).toBeLessThan(0.05);
+  });
+
+  it('does not take the card away from the list it scrolls in', () => {
+    // A pannable map inside a scrolling list swallows every vertical drag over it, as
+    // `PlaceMapPreview` already avoids. Pin presses are unaffected.
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(map(tree).props.scrollEnabled).toBe(false);
+    expect(map(tree).props.zoomEnabled).toBe(false);
+  });
+});
+
+describe('one pin per group', () => {
+  it('draws one pin, showing its number, for a memory with one place', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(markers(tree)).toHaveLength(1);
+    expect(labels(tree)).toEqual(['1']);
+  });
+
+  it('numbers the places in capture order, with no gaps', () => {
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          text('a', { location: BUS }),
+          text('no place here'),
+          text('b', { location: PLATFORM }),
+          text('c', { location: THIRD_PLACE }),
+        ],
+      },
+    });
+
+    expect(labels(tree)).toEqual(['1', '2', '3']);
+  });
+
+  it('merges the pieces within a metre into one marker showing how many it holds', () => {
+    // The spec's burst of photos: three photos at practically the same spot become one marker
+    // reading "3", and the note down the road keeps its own number (FR-023).
+    //
+    // The burst is deliberately *not* the first thing in the memory, and is three pieces and
+    // not two. It therefore holds numbers 2, 3 and 4, so the count it must show -- 3 -- is
+    // neither the first number it holds nor the last: a marker showing any one of its numbers
+    // instead of how many there are reads differently here. With a burst of two starting at 1,
+    // the count and the last number are both "2" and this test could not tell them apart.
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          text('on the platform', { location: PLATFORM }),
+          photos([
+            photo('m1', { location: BUS }),
+            photo('m2', { location: BESIDE_THE_BUS }),
+            photo('m3', { location: BUS }),
+          ]),
+        ],
+      },
+    });
+
+    expect(markers(tree)).toHaveLength(2);
+    expect(labels(tree)).toEqual(['1', '3']);
+  });
+
+  it('keeps two places about 100 m apart as two pins', () => {
+    // Round-2 H2: the merging grid is about a metre, not `JournalMapView`'s 1.1 km, which
+    // would fold a whole walk into one marker.
+    const tree = render({
+      entry: {
+        contentBlocks: [text('a', { location: BUS }), text('b', { location: PLATFORM })],
+      },
+    });
+
+    expect(markers(tree)).toHaveLength(2);
+    expect(labels(tree)).toEqual(['1', '2']);
+  });
+
+  it('draws each pin exactly where the server put it, never on the rounded merging key', () => {
+    // FR-026: the server has already reduced this coordinate to the precision this viewer may
+    // see. Drawing the 5-decimal grouping key instead would show one viewer a place more
+    // precisely than they are allowed and another less precisely than they are.
+    const exact = { lat: 51.5001234, lng: -0.1409876 };
+    const tree = render({ entry: { contentBlocks: [text('a', { location: exact })] } });
+
+    expect(markers(tree)[0].props.coordinate).toEqual({
+      latitude: 51.5001234,
+      longitude: -0.1409876,
+    });
+  });
+});
+
+describe('the route line', () => {
+  const twoPlacesInReverse = {
+    // Stored the other way round from how they were captured: the ordering rule puts the bus
+    // first, so a line following stored order would run backwards.
+    contentBlocks: [
+      text('on the platform', { at: '2026-03-01T10:05:00Z', location: PLATFORM }),
+      text('got the bus', { at: '2026-03-01T10:00:00Z', location: BUS }),
+    ],
+    serverUpdatedAt: '2026-03-01T11:00:00Z',
+  };
+
+  it('is not drawn to a single marker', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(polylines(tree)).toHaveLength(0);
+  });
+
+  it('is not drawn when every piece is in the same spot', () => {
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          photos([photo('m1', { location: BUS }), photo('m2', { location: BESIDE_THE_BUS })]),
+        ],
+      },
+    });
+
+    expect(markers(tree)).toHaveLength(1);
+    expect(polylines(tree)).toHaveLength(0);
+  });
+
+  it('joins two or more places in capture order, not in stored order', () => {
+    const tree = render({
+      entry: { contentBlocks: twoPlacesInReverse.contentBlocks },
+      serverUpdatedAt: twoPlacesInReverse.serverUpdatedAt,
+    });
+
+    expect(polylines(tree)).toHaveLength(1);
+    expect(polylines(tree)[0].props.coordinates).toEqual([
+      { latitude: BUS.lat, longitude: BUS.lng },
+      { latitude: PLATFORM.lat, longitude: PLATFORM.lng },
+    ]);
+  });
+
+  it('runs through every place once, in number order', () => {
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          text('a', { location: BUS }),
+          photos([photo('m1', { location: BESIDE_THE_BUS })]),
+          text('b', { location: PLATFORM }),
+          text('c', { location: THIRD_PLACE }),
+        ],
+      },
+    });
+
+    expect(polylines(tree)[0].props.coordinates).toEqual([
+      { latitude: BUS.lat, longitude: BUS.lng },
+      { latitude: PLATFORM.lat, longitude: PLATFORM.lng },
+      { latitude: THIRD_PLACE.lat, longitude: THIRD_PLACE.lng },
+    ]);
+  });
+
+  it('is dashed', () => {
+    const tree = render({
+      entry: {
+        contentBlocks: [text('a', { location: BUS }), text('b', { location: PLATFORM })],
+      },
+    });
+    const { lineDashPattern } = polylines(tree)[0].props;
+
+    expect(Array.isArray(lineDashPattern)).toBe(true);
+    expect(lineDashPattern.length).toBeGreaterThanOrEqual(2);
+    lineDashPattern.forEach((segment) => expect(segment).toBeGreaterThan(0));
+  });
+});
+
+describe('the pieces with no place', () => {
+  const withUnplaced = (count) => ({
+    contentBlocks: [
+      text('placed', { location: BUS }),
+      ...Array.from({ length: count }, (_unused, index) => text(`unplaced ${index}`)),
+    ],
+  });
+
+  it('are counted under the map', () => {
+    // The spec's own wording for this line (FR-026, *Edge Cases*).
+    expect(textAt(render({ entry: withUnplaced(2) }), 'memory-route-map-without-place')).toBe(
+      '2 pieces without a place',
+    );
+  });
+
+  it('are counted in the singular when there is one', () => {
+    expect(textAt(render({ entry: withUnplaced(1) }), 'memory-route-map-without-place')).toBe(
+      '1 piece without a place',
+    );
+  });
+
+  it('are not mentioned when every piece has a place', () => {
+    expect(textAt(render({ entry: withUnplaced(0) }), 'memory-route-map-without-place')).toBeNull();
+  });
+});
+
+describe('pressing a pin', () => {
+  const entry = {
+    contentBlocks: [
+      photos([photo('m1', { location: BUS }), photo('m2', { location: BESIDE_THE_BUS })]),
+      text('on the platform', { location: PLATFORM }),
+    ],
+  };
+
+  it('hands back the number of the piece it stands for', () => {
+    const onPinPress = jest.fn();
+    const tree = render({ entry, onPinPress });
+
+    press(markers(tree)[1]);
+
+    expect(onPinPress).toHaveBeenCalledWith([3]);
+  });
+
+  it('hands back every number a merged marker holds, so all of its pieces light up', () => {
+    // FR-025, round-2 M1: the card highlights all of them and scrolls to the first, which it
+    // can only do if it is told all of them.
+    const onPinPress = jest.fn();
+    const tree = render({ entry, onPinPress });
+
+    press(markers(tree)[0]);
+
+    expect(onPinPress).toHaveBeenCalledWith([1, 2]);
+  });
+
+  it('is pressable with no handler given', () => {
+    const tree = render({ entry });
+
+    expect(() => press(markers(tree)[0])).not.toThrow();
+  });
+});
+
+describe('a pin keeps its kind colour', () => {
+  const bubbleColour = (tree, index) =>
+    StyleSheet.flatten(allWith(tree, 'numbered-pin')[index].props.style).backgroundColor;
+
+  it('so a lone pin is the colour of its piece', () => {
+    const tree = render({
+      entry: { contentBlocks: [photos([photo('m1', { location: BUS })])] },
+    });
+
+    expect(bubbleColour(tree, 0)).toBe(PIN_COLOURS.photo);
+  });
+
+  it('and a merged marker is the colour of its first-numbered piece', () => {
+    // Nothing in the spec or research R10 says what a marker holding more than one *kind*
+    // should look like, so T047 decides: it keeps `groups[].kind`, the kind of its first
+    // piece. A merged marker already stands for several pieces and says so with a count
+    // instead of a number, so no colour could identify them; and a fifth, neutral colour for
+    // "mixed" is one the prototype's legend -- Note | Voice | Photo | Video -- cannot explain.
+    // Recorded here so that changing it is a decision and not an accident.
+    const tree = render({
+      entry: {
+        contentBlocks: [
+          photos([photo('m1', { location: BUS })]),
+          text('a note at the same stop', { location: BESIDE_THE_BUS }),
+        ],
+      },
+    });
+
+    expect(markers(tree)).toHaveLength(1);
+    expect(labels(tree)).toEqual(['2']);
+    expect(bubbleColour(tree, 0)).toBe(PIN_COLOURS.photo);
+  });
+});
+
+/**
+ * `react-native-maps` is native-only, and every one of the seven files in this app that import
+ * it has a `.web.js` sibling -- `MediaExplorerSheet`, `EntryGalleryModal`, `EntryMarker`,
+ * `JournalMapView`, `LocationPicker`, `PlaceMapPreview` and now these two. Without one, the
+ * card that mounts this component (T050) would pull a native module into the web bundle.
+ *
+ * What the sibling owes the card is the part of this component that is not the map: the
+ * heading, the count of what would be on it, the line counting the pieces with no place, the
+ * height the card reserves, and -- above all -- drawing **nothing at all** for a memory with no
+ * places, so FR-022 holds on web too. Those are asserted against **both** files at once, in the
+ * `.each` style `hostSiblingActions.test.js` and `VideoThumbnail.test.js` use for a native and
+ * web pair, so neither can drift from the other without a failure here.
+ */
+describe('its web sibling', () => {
+  const bothPlatforms = [
+    ['native', MemoryRouteMap],
+    ['web', MemoryRouteMapWeb],
+  ];
+
+  const placedAndUnplaced = {
+    contentBlocks: [
+      text('a', { location: BUS }),
+      text('b', { location: PLATFORM }),
+      text('no place here'),
+    ],
+  };
+
+  describe.each(bothPlatforms)('%s', (_platform, Component) => {
+    it('draws nothing at all for a memory with no places', async () => {
+      const tree = await mount(Component, {
+        entry: { contentBlocks: [text('got the bus'), photos([photo('m1')])] },
+      });
+
+      expect(tree.toJSON()).toBeNull();
+    });
+
+    it('is headed "Where this happened"', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-title')).toBe('Where this happened');
+    });
+
+    it('counts the pieces that have a place', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-subtitle')).toBe('2 pieces');
+    });
+
+    it('counts the pieces that have none', async () => {
+      const tree = await mount(Component, { entry: placedAndUnplaced });
+
+      expect(textAt(tree, 'memory-route-map-without-place')).toBe('1 piece without a place');
+    });
+  });
+
+  it('draws no map, no line and no pins, because there is no map on web', async () => {
+    const tree = await mount(MemoryRouteMapWeb, { entry: placedAndUnplaced });
+
+    expect(maps(tree)).toHaveLength(0);
+    expect(markers(tree)).toHaveLength(0);
+    expect(polylines(tree)).toHaveLength(0);
+  });
+
+  it('says why there is no map, rather than leaving an empty frame', async () => {
+    const tree = await mount(MemoryRouteMapWeb, { entry: placedAndUnplaced });
+
+    expect(textAt(tree, 'memory-route-map-unsupported')).toBe(
+      'The map is only available on iOS and Android.',
+    );
+  });
+
+  it('reserves the height the native one does, so a card lays out the same either way', () => {
+    expect(WEB_HEIGHT).toBe(MEMORY_ROUTE_MAP_HEIGHT);
+  });
+
+  it('does not import the native-only module', () => {
+    // The point of the sibling. Asserted on the file itself rather than on a mock, because a
+    // mocked `react-native-maps` loads perfectly well under jest and would hide exactly the
+    // import that breaks the web bundle. The doc comments in both files name the module in
+    // prose, as the existing stubs do, so it is the import that is forbidden, not the word.
+    const source = fs.readFileSync(path.join(__dirname, '..', 'MemoryRouteMap.web.js'), 'utf8');
+
+    expect(source).not.toMatch(/['"]react-native-maps(\/|['"])/);
+  });
+});

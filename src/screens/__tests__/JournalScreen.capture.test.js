@@ -1,0 +1,1911 @@
+/**
+ * 013 T031 — the Journal tab's own quick bar is a way *into* the capture screen, not a second,
+ * lossy composer beside it.
+ *
+ * FR-001 is "a + on every one of the six tabs that opens the capture screen in one tap". The +
+ * itself is T012/T013's and is covered by `src/navigation/__tests__/AppNavigator.capture.test.js`.
+ * What is pinned here is the Journal screen's *other* way in — the WhatsApp-style bar along the
+ * bottom, whose three actions (type, mic, camera) each opened the old `JournalComposeModal` or
+ * saved a memory outright. After T032 all three are one tap into `Capture` with `{ mode: 'new' }`,
+ * the same route and the same parameters the + uses, so there is one capture screen and not two.
+ *
+ * FR-017 is "a save failure is never silent". Its *Try again* button belongs to T039/T040 on
+ * `CaptureScreen`; what it means **here** is narrower, and is the second half of T032: the old
+ * `handleSaveEntry` on this screen caught a failed `createEntry`, logged it to the console and
+ * left the person looking at a screen that showed no memory and said nothing. A new memory must
+ * no longer be saved by this screen at all, and nothing left on it may swallow a save failure.
+ *
+ * Three things this file is deliberately careful about:
+ *
+ *   1. **"The compose modal is not opened" has to be an assertion about something.** A test that
+ *      only checks `visible === false` would keep passing if the modal were deleted from the
+ *      screen outright, or renamed, or never rendered — it would assert nothing. So the first
+ *      case in that block finds the modal in the tree and checks it is *closed*, and every
+ *      later case finds it the same way: `findByType` throws when it is gone, so this file fails
+ *      loudly rather than quietly if T060 or T068 removes it without revisiting these
+ *      expectations.
+ *   2. **Nothing typed may be thrown away.** `QuickCaptureBar` clears its input the moment it
+ *      calls `onSend`, so routing that action to `Capture` and ignoring its argument would lose
+ *      the note — the very defect this feature exists to remove (`JournalComposeModal` threw
+ *      typed text away when the microphone opened). The typed note therefore has to reach the
+ *      unsaved memory, through the same `CaptureDraftStore.addPiece` + `CaptureLocation`
+ *      stamping every piece on `CaptureScreen` goes through (FR-004, FR-012), and a note that
+ *      *cannot* be kept has to be said rather than logged.
+ *   3. **The bar's audience is carried, and it is still only a pre-selection.** `onSend` hands up
+ *      the audience its little picker was left on. That used to be dropped here, which made the
+ *      picker a dead control — and worse than dead: somebody who opened it, picked **Only me**,
+ *      and tapped Send reached a save sheet pre-selecting **Family**, so the replacement for
+ *      their discarded choice was *wider* than what they asked for. Of the two ways to be wrong
+ *      about an audience, silently widening one is the unsafe one (this project's "sharing fails
+ *      closed" rule in spirit), so it is carried as the sheet's pre-selection — fix round 1 after
+ *      the whole-branch review, Important 2. FR-011 is untouched by that: a memory is still saved
+ *      only on an explicit tap in the sheet, and this screen still saves nothing itself. The
+ *      navigation parameters are still asserted with `toEqual`, so nothing *else* can be
+ *      smuggled alongside.
+ *
+ *      **All three of the bar's controls carry it**, not only Send — fix round 2, item 3. The
+ *      camera and the microphone were left out of the first fix, which was the same defect
+ *      through another door: the picker sits on the same bar as them, so somebody who set it to
+ *      "Only me" and then tapped the camera still had their choice replaced by the sheet's wider
+ *      default. The "+" over every tab carries nothing, because there is no picker beside it.
+ *
+ * `JournalComposeModal` is **not** removed by T032 and is not expected to be gone here. plan.md's
+ * Structure Decision keeps it "only for any remaining non-capture callers"; its one remaining
+ * opener on this screen was the detail view's Edit (`JournalScreen.js`'s `JournalEntryDetail`
+ * block), which T060 re-points at `Capture`. T068 (removing what this feature made dead)
+ * confirmed nothing opens the mount any more, but left it and `handleSaveEntry` in place:
+ * `entryLocationSharing.journey.test.js` reaches both directly by `findByType`, exercising this
+ * screen's own `createEntry`/DB/wire wiring with nothing in the UI ever pressed. So the last
+ * block below still pins that its remaining save path carries every field it is handed —
+ * `locationSharing` above all, which `entryLocationSharing.journey.test.js` exists because it
+ * was once dropped — and that it now *reports* a failure instead of swallowing it.
+ *
+ * Since 013 T059 this file also covers the Journal's two reachable ways **into** an edit — the
+ * ⋯ menu's Edit and the "Unfinished edit — continue" line — and the question it asks before an
+ * unsaved edit is lost. The detail view's Edit is re-pointed at the same handler by T060 but
+ * cannot be driven from this screen at all; the block at the foot of the file says why.
+ *
+ * The first mount transforms this screen and everything React Native pulls in behind it.
+ */
+
+jest.setTimeout(30000);
+
+// ---------------------------------------------------------------------------
+// Native modules that cannot load under jest (the set `entryLocationSharing.journey.test.js`
+// needs, for the same screen).
+// ---------------------------------------------------------------------------
+
+/**
+ * `expo-audio` is stubbed once in `jest.setup.js` (it cannot be imported under jest at all --
+ * it touches `AudioModule.AudioPlayer.prototype` at module scope). The per-file mock that used
+ * to sit here shadowed it and carried no `useAudioPlayer`/`useAudioPlayerStatus`, so the first
+ * fixture with a voice clip in it would have failed with "useAudioPlayer is not a function" and
+ * read like a `VoicePlayer` bug (013 T054, fix round 1).
+ */
+
+jest.mock('expo-video', () => {
+  const React = require('react');
+  const { View } = require('react-native');
+  return {
+    VideoView: (props) => React.createElement(View, props, props.children),
+    useVideoPlayer: jest.fn(() => ({ play: jest.fn(), pause: jest.fn(), release: jest.fn() })),
+  };
+});
+
+jest.mock('react-native-maps', () => {
+  const React = require('react');
+  const { View } = require('react-native');
+  const Stub = (props) => React.createElement(View, props, props.children);
+  // `Polyline` since 013 T050: the card now renders `MemoryRouteMap`, which draws the dashed
+  // route between two or more places (FR-024), and an unexported name renders as undefined.
+  return {
+    __esModule: true,
+    default: Stub,
+    Marker: Stub,
+    Callout: Stub,
+    Polyline: Stub,
+    PROVIDER_GOOGLE: 'google',
+  };
+});
+
+jest.mock('expo-media-library', () => ({
+  requestPermissionsAsync: jest.fn().mockResolvedValue({ granted: true }),
+  getAssetInfoAsync: jest.fn().mockResolvedValue({}),
+  getAssetsAsync: jest.fn().mockResolvedValue({ assets: [] }),
+  MediaType: { photo: 'photo', video: 'video' },
+  SortBy: { creationTime: 'creationTime' },
+}));
+
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  __esModule: true,
+  default: {
+    getItem: jest.fn().mockResolvedValue(null),
+    setItem: jest.fn().mockResolvedValue(undefined),
+    removeItem: jest.fn().mockResolvedValue(undefined),
+    multiRemove: jest.fn().mockResolvedValue(undefined),
+    getAllKeys: jest.fn().mockResolvedValue([]),
+  },
+}));
+
+// The local database is never reached in this file: the journal hook and the draft store are
+// both stand-ins. Stubbed so that nothing behind the screen opens a real connection.
+jest.mock('../../database', () => {
+  const schema = require('../../database/schema');
+  const connection = {
+    execAsync: jest.fn(async () => {}),
+    runAsync: jest.fn(async () => {}),
+    getFirstAsync: jest.fn(async () => null),
+    getAllAsync: jest.fn(async () => []),
+    closeAsync: jest.fn(async () => {}),
+  };
+  return {
+    ...schema,
+    getDatabase: jest.fn(async () => connection),
+    initializeDatabase: jest.fn(async () => connection),
+    clearDatabase: jest.fn(async () => {}),
+    closeDatabase: jest.fn(async () => {}),
+    getDatabaseStats: jest.fn(async () => ({})),
+  };
+});
+
+// ---------------------------------------------------------------------------
+// The screen's surroundings.
+// ---------------------------------------------------------------------------
+
+jest.mock('../../api', () => ({
+  ReactionsApi: { likeEntry: jest.fn(async () => ({})), unlikeEntry: jest.fn(async () => ({})) },
+  CommentsApi: { addComment: jest.fn(async () => ({})) },
+}));
+
+jest.mock('../../sync/SyncEngine', () => ({
+  SyncEngine: { addListener: jest.fn(() => () => {}), syncNow: jest.fn(async () => ({})) },
+  SyncEvent: { SYNC_COMPLETED: 'sync_completed' },
+}));
+
+jest.mock('../../services/SettingsService', () => {
+  const service = {
+    getOrCreateDefaultJournal: jest.fn(async () => 'journal-1'),
+    getDefaultJournalId: jest.fn(async () => 'journal-1'),
+    getStorageMode: jest.fn(async () => 'cloud_sync'),
+    isSyncEnabled: jest.fn(async () => true),
+    get: jest.fn(async () => null),
+  };
+  return {
+    __esModule: true,
+    SettingsService: service,
+    StorageMode: { LOCAL_ONLY: 'local_only', CLOUD_SYNC: 'cloud_sync' },
+    default: service,
+  };
+});
+
+jest.mock('../../context', () => ({
+  useRealtime: () => ({ isConnected: true, unreadNotificationCount: 0, notifications: [] }),
+  useSync: () => ({ pendingCount: 0, failedCount: 0, isSyncing: false, isOnline: true }),
+  SyncState: { IDLE: 'idle' },
+}));
+
+jest.mock('../../context/AuthContext', () => ({
+  __esModule: true,
+  useAuth: () => ({ user: { id: 'user-1', name: 'Sam' }, isAuthenticated: true }),
+}));
+
+jest.mock('../../hooks/useJournalRealtime', () => ({
+  useJournalRealtime: () => ({}),
+}));
+
+/**
+ * `useFocusEffect` runs, rather than being a `jest.fn()` that swallows what it is given.
+ *
+ * 013 T059: the screen asks the draft store what is unsaved whenever the Journal comes into
+ * view, which is how a memory's card comes to say "Unfinished edit — continue" (FR-013). The
+ * moment that matters is the person **coming back** from the capture screen, so a no-op mock
+ * would mean this file could never see that read happen at all, in either direction.
+ * `PlacesScreen` uses the hook the same way and for the same reason.
+ *
+ * The mock runs the effect on mount, as React Navigation does on focus, and `__refocus()`
+ * runs it again for every mounted screen — the journey a test cannot otherwise reach: close
+ * the capture screen, come back, and find the Journal saying something new.
+ *
+ * **Each effect's latest cleanup is the one that is kept** (round-1 Minor 4). `__refocus` runs
+ * the previous cleanup before running the effect again, which is blur-then-focus as React
+ * Navigation does it, and then holds the new effect's cleanup for the unmount. Running the old
+ * cleanup *after* the new effect would cancel the new read; dropping both would leave a read
+ * in flight that no unmount can cancel, free to resolve onto a tree the harness has already
+ * taken down.
+ */
+jest.mock('@react-navigation/native', () => {
+  const React = require('react');
+  /** The cleanup each mounted focus effect last returned, by effect. */
+  const focused = new Map();
+  return {
+    useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
+    useFocusEffect: (effect) => {
+      React.useEffect(() => {
+        focused.set(effect, effect());
+        return () => {
+          const cleanup = focused.get(effect);
+          focused.delete(effect);
+          if (typeof cleanup === 'function') cleanup();
+        };
+      }, [effect]);
+    },
+    __refocus: () => {
+      focused.forEach((cleanup, effect) => {
+        if (typeof cleanup === 'function') cleanup();
+        focused.set(effect, effect());
+      });
+    },
+  };
+});
+
+jest.mock('../../services/LocationService', () => ({
+  __esModule: true,
+  default: {
+    checkPermissions: jest.fn(async () => ({ foreground: 'granted' })),
+    getCurrentLocation: jest.fn(async () => ({ latitude: 48.8809, longitude: 2.3553 })),
+    reverseGeocode: jest.fn(async () => ({ formattedAddress: 'Gare du Nord' })),
+    extractLocationFromExif: jest.fn(() => null),
+  },
+}));
+
+/**
+ * The journal hook, with `createEntry` watchable. It is the one route by which this screen can
+ * save a memory, so "a new memory no longer saves through JournalScreen" is a statement about
+ * this mock not being called.
+ */
+jest.mock('../../hooks/useJournal', () => {
+  const createEntry = jest.fn(async () => ({ localId: 'entry-1', date: '2026-11-08' }));
+  const refresh = jest.fn(async () => {});
+  // The feed the screen is given. Held in a box rather than closed over as a constant so a
+  // test can put a memory in it (T036's re-share needs a card on screen) and the harness can
+  // empty it again afterwards.
+  const feed = { entries: [] };
+  return {
+    __esModule: true,
+    useJournal: jest.fn(() => ({
+      entries: feed.entries,
+      loading: false,
+      error: null,
+      refreshing: false,
+      hasMore: false,
+      refresh,
+      loadMore: jest.fn(async () => {}),
+      createEntry,
+      deleteEntry: jest.fn(async () => {}),
+    })),
+    __createEntry: createEntry,
+    __refresh: refresh,
+    __setEntries: (entries) => {
+      feed.entries = entries;
+    },
+  };
+});
+
+/**
+ * The service behind the card's re-share (T036). Mocked so that "the Journal screen re-shares
+ * the memory" is a statement about `reshareEntry` being called with the person's choice, and
+ * so no database is reached from here.
+ */
+jest.mock('../../services/JournalService', () => {
+  const service = {
+    reshareEntry: jest.fn(async () => ({ localId: 'local-refused', shareState: null })),
+    on: jest.fn(() => () => {}),
+  };
+  return { __esModule: true, JournalService: service, default: service };
+});
+
+/**
+ * The draft store, modelled on its own contract: `addPiece` returns the piece **as stored**,
+ * with any media moved somewhere durable first (rule 1). A note has no file, so it comes back
+ * as it went in.
+ */
+jest.mock('../../services/CaptureDraftStore', () => {
+  const slotDirectory = (slot) => `file:///documents/capture-drafts/${slot}/`;
+  const store = {
+    DraftSlot: { NEW: 'new', EDIT: 'edit' },
+    TEXT_DEBOUNCE_MS: 500,
+    slotDirectory,
+    load: jest.fn(async () => null),
+    addPiece: jest.fn(async (slot, piece) =>
+      piece?.uri ? { ...piece, uri: `${slotDirectory(slot)}${piece.localId}` } : piece,
+    ),
+    removePiece: jest.fn(async () => null),
+    updateText: jest.fn(() => null),
+    flush: jest.fn(async () => {}),
+    startEdit: jest.fn(async () => null),
+    getEditFor: jest.fn(async () => null),
+    discard: jest.fn(async () => {}),
+    clearAfterSave: jest.fn(async () => {}),
+  };
+  return { __esModule: true, ...store, default: store };
+});
+
+jest.mock('../../services/CaptureLocation', () => {
+  /** Where the phone thinks it is. The real one adds no `location` key when it has none. */
+  const place = { lat: 51.5308, lng: -0.1238, accuracy: 12 };
+  const api = {
+    withLocation: jest.fn(async (capture, existing = null) =>
+      existing?.lat != null
+        ? { ...capture, location: existing }
+        : { ...capture, location: place },
+    ),
+    stampLocation: jest.fn(async () => place),
+    setCaptureEnabled: jest.fn(),
+    isCaptureEnabled: jest.fn(() => true),
+    clearCachedLocation: jest.fn(),
+  };
+  return { __esModule: true, ...api, default: api };
+});
+
+import React from 'react';
+import { act, create } from 'react-test-renderer';
+import { Alert, FlatList, Text, TextInput, TouchableOpacity } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+import { __refocus } from '@react-navigation/native';
+import JournalScreen from '../JournalScreen';
+import { QuickCaptureBar } from '../../components/journal';
+import { JournalComposeModal } from '../../components/journal/JournalComposeModal';
+import CaptureDraftStore from '../../services/CaptureDraftStore';
+import CaptureLocation from '../../services/CaptureLocation';
+import {
+  __createEntry as createEntry,
+  __refresh as refreshFeed,
+  __setEntries as setFeedEntries,
+} from '../../hooks/useJournal';
+import { JournalService } from '../../services/JournalService';
+import { JournalEntryCard } from '../../components/journal/JournalEntryCard';
+import SaveAudienceSheet from '../../components/capture/SaveAudienceSheet';
+import { toDateKey } from '../../utils/journalDate';
+import { ShareState } from '../../database/schema';
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+const mounted = [];
+
+/** The screen, with a watchable navigator. Mounted inside `act`: the icon font resolves late. */
+async function render() {
+  const navigate = jest.fn();
+  let tree;
+  await act(async () => {
+    tree = create(<JournalScreen navigation={{ navigate, goBack: jest.fn() }} />);
+  });
+  mounted.push(tree);
+  return { tree, navigate };
+}
+
+/**
+ * The screen logs a line of its own on each failure path it alerts about. Deliberate, and kept
+ * — but it belongs in a production console, not in this suite's output, where a real warning
+ * is what a reader should notice. Silenced per test, and the spy is handed back so a test can
+ * still assert the failure was recorded rather than swallowed.
+ */
+/** Every string the screen renders, flattened — children may be an array of fragments. */
+const textsAnywhere = (node) =>
+  node
+    .findAllByType(Text)
+    .map((t) => (Array.isArray(t.props.children) ? t.props.children.join('') : t.props.children))
+    .filter((value) => typeof value === 'string');
+
+const silencedWarnings = [];
+const silenceWarnings = () => {
+  const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  silencedWarnings.push(spy);
+  return spy;
+};
+
+afterEach(() => {
+  while (mounted.length) {
+    const tree = mounted.pop();
+    try {
+      act(() => {
+        tree.unmount();
+      });
+    } catch {
+      /* already gone */
+    }
+  }
+  while (silencedWarnings.length) {
+    silencedWarnings.pop().mockRestore();
+  }
+  // Back to an empty feed, so a test that puts a memory on screen cannot leak it into the
+  // next one (`jest.clearAllMocks` does not touch the box it is held in).
+  setFeedEntries([]);
+  jest.clearAllMocks();
+});
+
+/**
+ * `QuickCaptureBar` is wrapped in `memo`, and React gives a simple memo component's fiber the
+ * *inner* function as its type — so `findByType` has to be handed that, not the wrapper.
+ */
+const QuickBarComponent = QuickCaptureBar.type ?? QuickCaptureBar;
+
+const quickBar = (tree) => tree.root.findByType(QuickBarComponent);
+
+/** The compose modal as the screen renders it. Throws if the screen stopped rendering it. */
+const composeModal = (tree) => tree.root.findByType(JournalComposeModal);
+
+const iconsIn = (node) => node.findAllByType(Ionicons).map((icon) => icon.props.name);
+
+/**
+ * The innermost control in the quick bar carrying this icon — the button itself, not a row
+ * around it. A real tap, so what is proven is that the control a thumb reaches is wired, and
+ * that reaching the capture screen from it costs **one** of them.
+ */
+function barControl(tree, icon) {
+  const matches = quickBar(tree)
+    .findAllByType(TouchableOpacity)
+    .filter((node) => iconsIn(node).includes(icon));
+  if (matches.length === 0) {
+    throw new Error(`No control in the quick capture bar carries the "${icon}" icon`);
+  }
+  return matches[matches.length - 1];
+}
+
+const tap = async (control) => {
+  await act(async () => {
+    control.props.onPress();
+  });
+};
+
+/** Type into the bar. Its Send button exists only once there is something to send. */
+const typeInBar = async (tree, text) => {
+  await act(async () => {
+    quickBar(tree).findByType(TextInput).props.onChangeText(text);
+  });
+};
+
+/** The three ways in, each as the tap that reaches it. */
+const tapCamera = async (tree) => tap(barControl(tree, 'camera-outline'));
+const tapMic = async (tree) => tap(barControl(tree, 'mic-outline'));
+const tapSend = async (tree, note) => {
+  await typeInBar(tree, note);
+  await tap(barControl(tree, 'send'));
+};
+
+/** Every string rendered under a node, so an option can be found by the label a thumb reads. */
+const labelsIn = (node) =>
+  node
+    .findAllByType(Text)
+    .flatMap((n) => (Array.isArray(n.props.children) ? n.props.children : [n.props.children]))
+    .filter((child) => typeof child === 'string');
+
+/**
+ * Choose an audience on the bar's own "Who can see this?" picker, the way a person does: open
+ * the menu, then tap the option by its label. Driven through the controls rather than by calling
+ * `onSend` with a second argument, so what is proven is that the picker a thumb can reach is
+ * what travels — which is the whole of Important 2.
+ */
+const pickAudienceInBar = async (tree, label) => {
+  const bar = quickBar(tree);
+  // The picker is the bar's first control; its icon follows the current choice, so it cannot be
+  // found by a fixed icon name.
+  await tap(bar.findAllByType(TouchableOpacity)[0]);
+
+  // The *innermost* control carrying the label, as `barControl` does. The menu's dismiss
+  // backdrop is a `TouchableOpacity` wrapping every option, so it contains all four labels and
+  // comes first in tree order: taking the first match taps the backdrop, closes the menu and
+  // changes nothing — which passes by coincidence for whichever audience the bar already shows.
+  const matches = quickBar(tree)
+    .findAllByType(TouchableOpacity)
+    .filter((node) => labelsIn(node).includes(label));
+  if (matches.length === 0) {
+    throw new Error(`The quick bar audience menu offers no option labelled "${label}"`);
+  }
+  await tap(matches[matches.length - 1]);
+};
+
+const NOTE = 'on the 34 bus, 8:41';
+
+// ---------------------------------------------------------------------------
+// FR-001 — the quick bar is a way into the capture screen, in one tap
+// ---------------------------------------------------------------------------
+
+describe('the Journal quick bar opens the capture screen in one tap (FR-001)', () => {
+  /**
+   * `'private'` is where `QuickCaptureBar` starts (`defaultVisibility`), and it is the lock icon
+   * the bar is showing when any of its three controls is tapped. Carrying it means the save
+   * sheet offers what the bar showed; it is also the narrower of the two, so a person who never
+   * touched the picker is never offered a wider audience than the one in front of them.
+   */
+  const BAR_DEFAULT = { mode: 'new', audience: 'private' };
+
+  it('opens Capture when the camera control is tapped, carrying the audience the bar is showing', async () => {
+    const { tree, navigate } = await render();
+
+    await tapCamera(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
+  });
+
+  it('opens Capture when the mic control is tapped, carrying the audience the bar is showing', async () => {
+    const { tree, navigate } = await render();
+
+    await tapMic(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
+  });
+
+  it('opens Capture when a typed note is sent, carrying the audience the bar is showing', async () => {
+    const { tree, navigate } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
+  });
+
+  it('costs one tap and goes nowhere else — the same route and parameters as the + (FR-001)', async () => {
+    // `toEqual`, not `objectContaining`: nothing may be smuggled alongside. All three controls
+    // now carry the bar's audience as the save sheet's pre-selection and nothing more — the
+    // camera and the microphone were added in fix round 2, because the picker sits on the same
+    // bar as them and a tap on either used to replace the choice with a wider one.
+    for (const [name, action] of [
+      ['camera', tapCamera],
+      ['mic', tapMic],
+      ['text', (tree) => tapSend(tree, NOTE)],
+    ]) {
+      const { tree, navigate } = await render();
+
+      await action(tree);
+
+      // One assertion carrying the action's name, so a failure says which of the three it
+      // was, and `toEqual` on the whole call list so an extra hop or an extra parameter
+      // fails here.
+      expect({ action: name, navigated: navigate.mock.calls }).toEqual({
+        action: name,
+        navigated: [['Capture', BAR_DEFAULT]],
+      });
+    }
+  });
+});
+
+/**
+ * Important 2 of the whole-branch review: the bar's audience picker was a dead control, and it
+ * failed **wider** than the person chose.
+ *
+ * `QuickCaptureBar` renders a "Who can see this?" menu and hands the choice up as `onSend`'s
+ * second argument. `handleSendMessage` took one argument and ignored it, so somebody who opened
+ * that menu, picked **Only me**, and tapped Send was taken to a capture screen whose save sheet
+ * pre-selected **Family** — their choice discarded and the replacement wider than what they
+ * asked for. Ruled: carry the choice rather than hide the control.
+ *
+ * These cases drive the picker through its own controls, so they fail if the bar's menu stops
+ * reaching `onSend` just as surely as if this screen stops reading it.
+ */
+describe('the quick bar audience picker travels with the note (review fix, Important 2)', () => {
+  it('sends Only me as the audience when Only me is what the person picked', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Only Me');
+    await tapSend(tree, NOTE);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+  });
+
+  it('never replaces the choice with a wider one: each of the four arrives as itself', async () => {
+    // One label per audience, read off `VISIBILITY_CONFIG`. The discriminating case is Friends
+    // and Family & Friends as much as Only me: before the fix every one of them became Family.
+    for (const [label, audience] of [
+      ['Only Me', 'private'],
+      ['Family', 'family'],
+      ['Friends', 'friends'],
+      ['Family & Friends', 'family_friends'],
+    ]) {
+      const { tree, navigate } = await render();
+
+      await pickAudienceInBar(tree, label);
+      await tapSend(tree, NOTE);
+
+      expect({ label, navigated: navigate.mock.calls }).toEqual({
+        label,
+        navigated: [['Capture', { mode: 'new', audience }]],
+      });
+    }
+  });
+
+  /**
+   * Fix round 2, item 3 -- ruled: carry it on the camera and the microphone too.
+   *
+   * It is the same defect through another door. The picker sits on the same bar as those two
+   * controls, so somebody who set it to **Only me** and then tapped the camera had their choice
+   * silently replaced by **Family** on the save sheet, and silently widening an audience is the
+   * unsafe way to be wrong. `QuickCaptureBar` now hands its current visibility up on all three
+   * of its controls, not only with the text.
+   */
+  it('carries the picked audience on the camera control too', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Only Me');
+    await tapCamera(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+  });
+
+  it('carries the picked audience on the mic control too', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapMic(tree);
+
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'friends' });
+  });
+
+  it('never widens on any of the three controls: every audience, every way in', async () => {
+    // The whole grid, so one control cannot be fixed while another still widens, and so a
+    // single hard-coded value cannot satisfy it.
+    for (const [label, audience] of [
+      ['Only Me', 'private'],
+      ['Friends', 'friends'],
+      ['Family & Friends', 'family_friends'],
+    ]) {
+      for (const [name, action] of [
+        ['camera', tapCamera],
+        ['mic', tapMic],
+        ['text', (tree) => tapSend(tree, NOTE)],
+      ]) {
+        const { tree, navigate } = await render();
+
+        await pickAudienceInBar(tree, label);
+        await action(tree);
+
+        expect({ label, action: name, navigated: navigate.mock.calls }).toEqual({
+          label,
+          action: name,
+          navigated: [['Capture', { mode: 'new', audience }]],
+        });
+      }
+    }
+  });
+
+  it('still saves nothing itself — the choice is a pre-selection, not a save (FR-011)', async () => {
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapSend(tree, NOTE);
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('carries no audience when the note could not be kept, because nothing is opened at all', async () => {
+    CaptureDraftStore.addPiece.mockRejectedValueOnce(new Error('disk full'));
+    const { tree, navigate } = await render();
+
+    await pickAudienceInBar(tree, 'Friends');
+    await tapSend(tree, NOTE);
+
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The old composer is no longer opened for a new memory
+// ---------------------------------------------------------------------------
+
+describe('JournalComposeModal is no longer opened for a new memory', () => {
+  it('is still mounted by the screen, and closed, before anything is tapped', async () => {
+    // The guard that stops the three cases below asserting nothing. `findByType` throws if the
+    // screen no longer renders the modal at all, so if this is ever removed, this file fails
+    // here and is revisited rather than passing vacuously. T068 looked at removing it and kept
+    // it instead: plan.md keeps the modal for "any remaining non-capture callers", and
+    // `entryLocationSharing.journey.test.js` is a real one, reaching it by `findByType` the
+    // same way this test does.
+    const { tree } = await render();
+
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+
+  it('stays closed when the camera control is tapped', async () => {
+    const { tree } = await render();
+
+    await tapCamera(tree);
+
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+
+  it('stays closed when the mic control is tapped', async () => {
+    const { tree } = await render();
+
+    await tapMic(tree);
+
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+
+  it('stays closed when a typed note is sent', async () => {
+    // This one already holds before T032 — the old text action saved the note outright instead
+    // of opening the composer. It is kept because the composer is the *other* thing this action
+    // could be pointed at, and pointing it there would be a two-step route into capture with a
+    // composer that throws typed text away the moment the microphone opens. Read with the case
+    // above (the modal is really there) and the block below (the note is really kept), it says
+    // something: the text action goes to `Capture` and to nothing else.
+    const { tree } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-017 (narrow) — this screen no longer saves a new memory, and swallows nothing
+// ---------------------------------------------------------------------------
+
+describe('a new memory is no longer saved by the Journal screen (FR-017)', () => {
+  it('saves nothing when a typed note is sent', async () => {
+    // The old path called `createEntry` here and caught its rejection with a `console.error`:
+    // a memory that never arrived, on a screen that said nothing. Saving is the capture
+    // screen's, behind the audience sheet, where a failure is shown and retried (T039/T040).
+    const { tree } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(createEntry).not.toHaveBeenCalled();
+  });
+
+  it('saves nothing when the camera or the mic control is tapped', async () => {
+    // Already true before T032 (both only opened the composer), and it has to stay true: the
+    // obvious wrong way to "route the quick bar" is to save a stub memory and then open the
+    // capture screen on it, which would publish a memory nobody had chosen an audience for.
+    for (const action of [tapCamera, tapMic]) {
+      const { tree } = await render();
+
+      await action(tree);
+
+      expect(createEntry).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps the typed note in the unsaved memory rather than throwing it away', async () => {
+    // `QuickCaptureBar` clears its input as it calls `onSend`, so the note exists nowhere else
+    // by the time this runs. It goes into the `new` draft slot, through the same `addPiece` the
+    // capture screen uses — which is what makes it survive the app being closed (FR-012) and
+    // what the capture screen's own mount then reads back.
+    const { tree } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(CaptureDraftStore.addPiece).toHaveBeenCalledTimes(1);
+    const [slot, piece] = CaptureDraftStore.addPiece.mock.calls[0];
+    expect(slot).toBe('new');
+    expect(piece).toEqual(
+      expect.objectContaining({
+        kind: 'text',
+        content: NOTE,
+        localId: expect.any(String),
+        capturedAt: expect.any(String),
+      }),
+    );
+    expect(piece.localId.length).toBeGreaterThan(0);
+    // An instant, exactly as the phone's clock reads it (research R8, Principle III) — never a
+    // civil date.
+    expect(piece.capturedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    expect(Number.isNaN(Date.parse(piece.capturedAt))).toBe(false);
+  });
+
+  it('stamps the typed note with where it was written, before recording it (FR-004)', async () => {
+    const { tree } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(CaptureLocation.withLocation).toHaveBeenCalledTimes(1);
+    const [stamped] = CaptureDraftStore.addPiece.mock.calls[0].slice(1);
+    expect(stamped.location).toEqual({ lat: 51.5308, lng: -0.1238, accuracy: 12 });
+  });
+
+  it('keeps the note the person wrote, not a trimmed-to-nothing stand-in', async () => {
+    // Whitespace around a note is trimmed by the bar itself before `onSend`; what must not
+    // happen is the content being dropped, or replaced by a placeholder, on the way to the
+    // draft.
+    const { tree } = await render();
+
+    await tapSend(tree, 'the arcade on the corner');
+
+    expect(CaptureDraftStore.addPiece.mock.calls[0][1].content).toBe('the arcade on the corner');
+  });
+
+  it('says so when a typed note cannot be kept, and opens nothing (FR-017)', async () => {
+    // The one way this route can lose words: the draft write fails (a full disk), and the bar
+    // has already cleared the input. Silence here would be the old defect in a new place, so
+    // the note is said back to the person and the screen does not move on as though it had
+    // been kept.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
+    CaptureDraftStore.addPiece.mockRejectedValueOnce(new Error('no space left on device'));
+
+    const { tree, navigate } = await render();
+
+    await tapSend(tree, NOTE);
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    const said = alert.mock.calls[0].slice(0, 2).join(' ');
+    expect(said).toContain(NOTE);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(warned).toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What is left of the compose path, which T060 re-points and T068 kept in place
+// ---------------------------------------------------------------------------
+
+describe('the compose modal’s remaining save path', () => {
+  const composed = {
+    contentBlocks: [{ type: 'text', content: 'the clinic on rue de Maubeuge' }],
+    visibility: 'private',
+    location: { latitude: 48.8809, longitude: 2.3553 },
+    locationSharing: 'private',
+    date: new Date('2026-11-08T09:07:00.000Z'),
+  };
+
+  it('still carries every field it is handed, locationSharing included', async () => {
+    // Already true before T032, and the reason it is pinned here rather than left to
+    // `entryLocationSharing.journey.test.js` alone: that file's hop 2 runs through this very
+    // handler, and this is the task that rewrites it. `locationSharing` was once the one field
+    // this handler dropped, which shared an exact location with everyone who could see the
+    // memory while the person believed they had narrowed it.
+    const { tree } = await render();
+
+    await act(async () => {
+      await composeModal(tree).props.onSave(composed);
+    });
+
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(createEntry.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        userId: 'user-1',
+        contentBlocks: composed.contentBlocks,
+        visibility: 'private',
+        location: composed.location,
+        locationSharing: 'private',
+        date: composed.date,
+      }),
+    );
+  });
+
+  it('reports a failed save instead of swallowing it (FR-017)', async () => {
+    // What `:594-621` did: `catch (error) { console.error(...) }`. Nothing on screen, nothing
+    // saved, and the comment said the hook's error state would show it — it does not reach
+    // this screen. Whatever is left of this path, a failure has to be said.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
+    createEntry.mockRejectedValueOnce(new Error('disk full'));
+
+    const { tree } = await render();
+
+    await act(async () => {
+      await composeModal(tree).props.onSave(composed);
+    });
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(warned).toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+
+  // Deliberately not asserted here: which outcomes leave the modal open. This harness calls
+  // `onSave` on a modal it never opened, so `visible` is false whatever the handler does —
+  // measured, by deleting the handler's `setShowComposeModal(false)` and watching all of this
+  // file stay green. Opening the modal for real means an entry in the feed, a card tap and the
+  // detail view's Edit; that is the journey T060 rewrites, and it is where the expectation
+  // belongs. Until then the handler's own shape is the guarantee: it closes the modal only
+  // after a resolved `createEntry`, and says so on a rejected one.
+});
+
+// ---------------------------------------------------------------------------
+// FR-011, US1-8 — a memory the server would not share is shared again from the Journal
+// ---------------------------------------------------------------------------
+
+/**
+ * T036 wires the card's `onReshare` on this screen. What the card does on its own — the two
+ * lines, "Not shared yet" in place of the audience label, and opening `SaveAudienceSheet` — is
+ * `JournalEntryCard.share.test.js`. What is here is the one thing only the screen can do:
+ * turn the person's choice into a re-share, and say so if that fails.
+ *
+ * It is driven through a real card in the real list, by tapping, because that is the last
+ * stretch of US1 and the checkpoint is "US1 works end to end in jest". The memory is dated
+ * today so the screen's own day filter shows it without relying on its jump-to-the-newest
+ * effect.
+ */
+describe('a refused memory is shared again from the Journal screen (US1-8)', () => {
+  const refused = {
+    localId: 'local-refused',
+    id: 'local-refused',
+    userId: 'user-1',
+    journalId: 'journal-1',
+    date: toDateKey(new Date()),
+    createdAt: Date.now(),
+    visibility: 'family',
+    syncStatus: 'pending',
+    shareState: ShareState.REFUSED,
+    contentBlocks: [{ type: 'text', content: 'the arcade on the corner' }],
+  };
+
+  const REFUSED_LINE = 'Not shared — tap to choose who can see it';
+
+  const CardComponent = JournalEntryCard.type ?? JournalEntryCard;
+
+  const textsIn = (node) =>
+    node
+      .findAllByType(Text)
+      .map((t) => (Array.isArray(t.props.children) ? t.props.children.join('') : t.props.children))
+      .filter((value) => typeof value === 'string');
+
+  /** The card for the refused memory, as the list really renders it. */
+  const card = (tree) => tree.root.findByType(CardComponent);
+
+  const refusedLine = (tree) => {
+    const matches = card(tree)
+      .findAllByType(TouchableOpacity)
+      .filter((node) => typeof node.props?.onPress === 'function' && textsIn(node).includes(REFUSED_LINE));
+    if (matches.length === 0) {
+      throw new Error('No control on the card carries the refused-share line');
+    }
+    return matches[matches.length - 1];
+  };
+
+  const audienceOption = (tree, value) =>
+    tree.root.findAll(
+      (node) =>
+        node.props?.testID === `audience-option-${value}` &&
+        typeof node.props?.onPress === 'function',
+    )[0];
+
+  const chooseFriends = async (tree) => {
+    await tap(refusedLine(tree));
+    await tap(audienceOption(tree, 'friends'));
+  };
+
+  beforeEach(() => {
+    setFeedEntries([refused]);
+  });
+
+  it('shows the memory with its refusal, and no audience label (SC-010)', async () => {
+    // The guard that stops the cases below asserting nothing: if the card were not on screen,
+    // `refusedLine` would throw, and this says why.
+    const { tree } = await render();
+
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+    expect(textsIn(card(tree))).toContain('Not shared yet');
+    expect(textsIn(card(tree))).not.toContain('Family');
+  });
+
+  it('re-shares the memory with the audience the person chose', async () => {
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(JournalService.reshareEntry).toHaveBeenCalledTimes(1);
+    expect(JournalService.reshareEntry).toHaveBeenCalledWith('local-refused', 'friends');
+  });
+
+  it('reloads the day so the card stops saying the memory is not shared', async () => {
+    const { tree } = await render();
+    refreshFeed.mockClear();
+
+    await chooseFriends(tree);
+
+    expect(refreshFeed).toHaveBeenCalled();
+  });
+
+  it('shares nothing when the sheet is dismissed', async () => {
+    const { tree } = await render();
+
+    await tap(refusedLine(tree));
+    await act(async () => {
+      tree.root.findByType(SaveAudienceSheet).props.onDismiss();
+    });
+
+    expect(JournalService.reshareEntry).not.toHaveBeenCalled();
+  });
+
+  it('says so when the re-share fails, rather than leaving it looking shared (FR-017)', async () => {
+    // The refusal is still on the card — `reshareEntry` clears it only once the memory is
+    // queued — so silence here would leave the person tapping a line that does nothing.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    const warned = silenceWarnings();
+    JournalService.reshareEntry.mockRejectedValueOnce(new Error('queue is unavailable'));
+
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+    expect(warned).toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+
+  it('says what Local Only means for this memory, rather than "try again"', async () => {
+    // `reshareEntry` refuses outright while storage is Local Only: nothing drains the queue
+    // there, so clearing the refusal would leave the card looking shared over a memory that
+    // can never be sent. The person tapped an explicit choice, so they are told — and told
+    // something they can act on, because trying again changes nothing until cloud sync is
+    // back on.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    silenceWarnings();
+    JournalService.reshareEntry.mockRejectedValueOnce(
+      Object.assign(new Error('Storage is Local Only'), { code: 'local_only_storage' }),
+    );
+
+    const { tree } = await render();
+
+    await chooseFriends(tree);
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    const said = alert.mock.calls[0].slice(0, 2).join(' ');
+    expect(said).toContain('Local Only');
+    expect(said).not.toMatch(/try again/i);
+    // And the memory still says what is true of it.
+    expect(textsIn(card(tree))).toContain(REFUSED_LINE);
+
+    alert.mockRestore();
+  });
+
+  it('says so when a choice arrives with no audience in it, rather than doing nothing', async () => {
+    // Unreachable from the Journal list today — `SaveAudienceSheet` reports a value or nothing
+    // at all — so this is the handler's own guard, which until now was a bare `return`: a
+    // silent no-op immediately after the person made an explicit choice, which is the one
+    // thing FR-011 says a refusal must never be. Nothing is shared either way.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+    const { tree } = await render();
+
+    for (const [entry, visibility] of [
+      [refused, undefined],
+      [{ ...refused, localId: null }, 'friends'],
+    ]) {
+      await act(async () => {
+        await card(tree).props.onReshare(entry, visibility);
+      });
+    }
+
+    expect(alert).toHaveBeenCalledTimes(2);
+    expect(JournalService.reshareEntry).not.toHaveBeenCalled();
+
+    alert.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The seconds between sending a typed note and the capture screen (round-1 finding 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * A regression this feature introduces, and the only one on this path. Before it,
+ * `handleSendMessage` awaited `createEntry` — a local database write, tens of milliseconds —
+ * and the feedback was the memory appearing in the list. Now the bar clears the input and
+ * dismisses the keyboard the moment Send is tapped (`QuickCaptureBar.handleSend` calls
+ * `onSend` and then `setText('')` synchronously), and this screen then awaits
+ * `CaptureLocation.withLocation` before anything moves. On a cold fix that is up to about four
+ * seconds in which the words are gone from the input, the keyboard is gone, and nothing has
+ * happened — which reads as "my note vanished".
+ *
+ * It is not every send: `stampLocation` caches a fix for two minutes, so this is the first
+ * send after the app has been idle. And nothing is lost in any case — the note reaches the
+ * draft, and a note that cannot be kept is said back with its words in it. What was missing is
+ * any sign that the phone is still working on it.
+ *
+ * The indication lives on **this** screen, not in the bar: the Send button exists only while
+ * there is text (`{hasText ? <send> : <mic>}`), so by the time this screen is awaiting
+ * anything the control to disable is already gone and the input is already empty. This screen
+ * owns the await and renders the bar, so it is the one that can say so — and `QuickCaptureBar`
+ * keeps its contract exactly as it is.
+ */
+describe('a typed note that takes a moment to keep says so', () => {
+  const KEEPING_NOTE = 'Keeping that note…';
+
+  /** A stamping that has not finished yet, and the handle that finishes it. */
+  const deferStamping = () => {
+    let release;
+    CaptureLocation.withLocation.mockImplementationOnce(
+      (capture) =>
+        new Promise((resolve, reject) => {
+          release = { resolve: () => resolve({ ...capture, location: null }), reject };
+        }),
+    );
+    return {
+      finish: async () => {
+        await act(async () => {
+          release.resolve();
+        });
+      },
+      fail: async () => {
+        await act(async () => {
+          release.reject(new Error('no fix, and no draft'));
+        });
+      },
+    };
+  };
+
+  const allTexts = (tree) => textsAnywhere(tree.root);
+
+  it('says nothing until something is sent', async () => {
+    const { tree } = await render();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+  });
+
+  it('says it is keeping the note while the note is still being kept', async () => {
+    const stamping = deferStamping();
+
+    const { tree, navigate } = await render();
+    await tapSend(tree, NOTE);
+
+    expect(allTexts(tree)).toContain(KEEPING_NOTE);
+    // The honesty of the line: the capture screen has not opened yet, which is exactly the
+    // stretch the person was looking at nothing.
+    expect(navigate).not.toHaveBeenCalled();
+
+    await stamping.finish();
+  });
+
+  it('stops saying it once the note is kept', async () => {
+    const stamping = deferStamping();
+
+    const { tree } = await render();
+    await tapSend(tree, NOTE);
+    await stamping.finish();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+  });
+
+  it('stops saying it when the note could not be kept either', async () => {
+    // The line must not outlive the attempt. The alert says what happened; a spinner left
+    // spinning under it would say the opposite.
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    silenceWarnings();
+    const stamping = deferStamping();
+
+    const { tree } = await render();
+    await tapSend(tree, NOTE);
+    await stamping.fail();
+
+    expect(allTexts(tree)).not.toContain(KEEPING_NOTE);
+    expect(alert).toHaveBeenCalledTimes(1);
+
+    alert.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-022, FR-025, research R10 — the list tells each card whether it is on screen, and
+// scrolls when a pin asks it to
+// ---------------------------------------------------------------------------
+
+/**
+ * T051 wires the Journal's own half of the map on a card. The card's half — the badges, the
+ * placeholder, the highlight and the measurement — is `JournalEntryCard.map.test.js`. What only
+ * the screen can do is the two things here.
+ *
+ * **Which cards are on screen.** `MemoryRouteMap` mounts a native map view, and the Journal is a
+ * list of cards; mounting one per card would cost a map for every memory in a day whether or not
+ * anybody can see it. So the list reports its viewable rows and each card is told, and a card
+ * that is not told anything shows its map as before (research R10 *Lazy rendering*, round-2 M10).
+ * The assertion is on the map view itself, not on the heading: a mounted-but-hidden map would
+ * still cost one.
+ *
+ * **Scrolling to a piece.** Only a list can scroll, and only the card knows where a piece sits
+ * inside itself, so the two halves meet here: the card reports the piece's offset from its own
+ * top and the list supplies the row (FR-025). `scrollToIndex` is spied on `FlatList`'s own
+ * prototype, so what is proven is that the real list was really asked to move — not that a
+ * handler of ours was called.
+ *
+ * Driven through a real card, a real map and a real pin in the real list, because the checkpoint
+ * for this story is that the map works in jest end to end. This file already mocks
+ * `react-native-maps` to views, so a marker's props — its coordinate and its press — are
+ * readable on the tree.
+ */
+describe('the Journal list drives the map on its cards (FR-022, FR-025)', () => {
+  // Two spots on the same street, about 100 m apart, which the 5-decimal merging grid keeps as
+  // two places — so the first memory has two pins to tell apart.
+  const BUS = { lat: 51.5001, lng: -0.1401 };
+  const PLATFORM = { lat: 51.501, lng: -0.1401 };
+
+  const note = (content, location) => ({ type: 'text', content, location, capturedAt: null });
+
+  const memory = (localId, contentBlocks) => ({
+    localId,
+    id: localId,
+    userId: 'user-1',
+    journalId: 'journal-1',
+    date: toDateKey(new Date()),
+    createdAt: Date.now(),
+    visibility: 'private',
+    syncStatus: 'synced',
+    contentBlocks,
+  });
+
+  const WALK = memory('local-walk', [
+    note('on the 34 bus', BUS),
+    note('on the platform', PLATFORM),
+  ]);
+  const KIOSK = memory('local-kiosk', [note('the kiosk', BUS)]);
+
+  const CardComponent = JournalEntryCard.type ?? JournalEntryCard;
+
+  /** The cards the list rendered, in the order it rendered them — so index 1 is the second row. */
+  const cards = (tree) => tree.root.findAllByType(CardComponent);
+
+  /**
+   * React Native's `View` is itself a component that passes `testID` straight through to a host
+   * `View`, so a single test id matches two instances. Only the host element is taken.
+   */
+  const isHost = (node) => typeof node.type === 'string';
+
+  const hostsWithTestId = (node, testID) =>
+    node.findAll((candidate) => isHost(candidate) && candidate.props?.testID === testID);
+
+  /**
+   * The map views actually mounted. Found by a prop only a map carries -- and the one that says
+   * this map never asks for the user's location (research R10) -- rather than by the stubbed
+   * module's identity, so it counts real mounted maps and not test doubles.
+   */
+  const mapViews = (tree) =>
+    tree.root.findAll((node) => isHost(node) && node.props?.showsUserLocation === false);
+
+  /** The list, as the screen really renders it. */
+  const list = (tree) => tree.root.findByType(FlatList);
+
+  /** Tell the list which rows are on screen, as React Native's viewability checker would. */
+  const reportViewable = async (tree, entries) => {
+    await act(async () => {
+      list(tree).props.onViewableItemsChanged({
+        viewableItems: entries.map((entry, index) => ({ key: entry.localId, item: entry, index })),
+        changed: [],
+      });
+    });
+  };
+
+  /** Every marker on this card's map, with the digits on it and its press. */
+  const pins = (card) =>
+    card
+      .findAll((node) => node.props?.coordinate && typeof node.props?.onPress === 'function')
+      .map((marker) => ({
+        label: hostsWithTestId(marker, 'numbered-pin-label')[0]?.props?.children,
+        press: marker.props.onPress,
+      }));
+
+  /** Report a layout, as React Native would once the view is measured. */
+  const layout = async (node, y) => {
+    await act(async () => {
+      node.props.onLayout({ nativeEvent: { layout: { x: 0, y, width: 320, height: 100 } } });
+    });
+  };
+
+  let scrollToIndex;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+    scrollToIndex = jest.spyOn(FlatList.prototype, 'scrollToIndex').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    scrollToIndex.mockRestore();
+  });
+
+  it('renders both memories, so the cases below are about something', async () => {
+    const { tree } = await render();
+
+    expect(cards(tree).map((card) => card.props.entry.localId)).toEqual([
+      'local-walk',
+      'local-kiosk',
+    ]);
+  });
+
+  it('shows every card its map until the list has reported anything', async () => {
+    // `isVisible` defaults to true and the list has measured nothing yet, so nothing is held
+    // back before React Native has said what is on screen.
+    const { tree } = await render();
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, true]);
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(2);
+  });
+
+  it('passes isVisible from onViewableItemsChanged, card by card', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, false]);
+  });
+
+  it('mounts no map at all on the card that scrolled off, and holds its height open', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(1);
+    expect(hostsWithTestId(tree.root, 'memory-route-map-placeholder')).toHaveLength(1);
+    // The map view itself, which is the cost the placeholder exists to avoid: one mounted, for
+    // the card the list says is on screen.
+    expect(mapViews(tree)).toHaveLength(1);
+  });
+
+  it('shows the map again when the card comes back into view', async () => {
+    const { tree } = await render();
+
+    await reportViewable(tree, [WALK]);
+    await reportViewable(tree, [WALK, KIOSK]);
+
+    expect(cards(tree).map((card) => card.props.isVisible)).toEqual([true, true]);
+    expect(hostsWithTestId(tree.root, 'memory-route-map')).toHaveLength(2);
+  });
+
+  it('scrolls the list to the offset a card asks for, on that card’s row', async () => {
+    // The narrow contract: the card reports an offset from its own top, and the row it is in
+    // supplies the rest. A positive offset moves the piece up to the top of the screen, so the
+    // row is placed that far above it.
+    const { tree } = await render();
+
+    await act(async () => {
+      cards(tree)[1].props.onRequestScrollTo(160);
+    });
+
+    expect(scrollToIndex).toHaveBeenCalledTimes(1);
+    expect(scrollToIndex).toHaveBeenCalledWith({ index: 1, viewOffset: -160, animated: true });
+  });
+
+  it('brings a piece into view when its pin is pressed, end to end (FR-025, SC-006)', async () => {
+    const { tree } = await render();
+    const walk = cards(tree)[0];
+
+    // The card as React Native would have measured it: the piece list 40 points down the card,
+    // the note on the platform 120 points down the list.
+    await layout(hostsWithTestId(walk, 'memory-pieces')[0], 40);
+    await layout(hostsWithTestId(walk, 'memory-piece-2')[0], 120);
+
+    const pin = pins(walk).find((candidate) => candidate.label === '2');
+    expect(pin).toBeDefined();
+    await act(async () => {
+      pin.press();
+    });
+
+    expect(scrollToIndex).toHaveBeenCalledWith({ index: 0, viewOffset: -160, animated: true });
+    // And the piece the pin points at is lit while the list moves.
+    expect(hostsWithTestId(walk, 'piece-highlight-2')).toHaveLength(1);
+  });
+
+  it('gives the list a scroll-to-index fallback, so a missed row is not a crash', async () => {
+    // Round-1 item 5. `VirtualizedList.scrollToIndex` fires an invariant when the index is
+    // past the cells it has laid out and neither `getItemLayout` nor `onScrollToIndexFailed`
+    // is given. A pin can only be pressed on a mounted map, so the row is laid out -- but
+    // there is no error boundary anywhere in `src`, so being wrong about that would take the
+    // Journal down rather than miss a scroll. A no-op handler removes the cliff.
+    const warned = silenceWarnings();
+    const { tree } = await render();
+
+    expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
+    expect(() =>
+      list(tree).props.onScrollToIndexFailed({
+        index: 99,
+        highestMeasuredFrameIndex: 1,
+        averageItemLength: 100,
+      }),
+    ).not.toThrow();
+    // Recorded rather than said: the person pressed a pin and the Journal did not move, which
+    // is self-evident on screen, and an alert over a memory would be worse than the missed
+    // scroll. The piece is still highlighted -- the card does that itself.
+    expect(warned).toHaveBeenCalled();
+  });
+
+  it('scrolls nowhere when a pin is pressed on a card nothing has measured', async () => {
+    // A guessed offset would move the memory away from the person who just pressed a pin on it.
+    const { tree } = await render();
+    const pin = pins(cards(tree)[0]).find((candidate) => candidate.label === '2');
+
+    await act(async () => {
+      pin.press();
+    });
+
+    expect(scrollToIndex).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 013 T059 — the ways into an edit, and the unsaved edit that is waiting
+// (FR-018, FR-013)
+// ---------------------------------------------------------------------------
+
+/**
+ * Editing a memory is one screen — the capture screen, in `{ mode: 'edit', entryLocalId }` —
+ * and this is the screen that must send people there. Three things only it can do:
+ *
+ *   1. **The ⋯ on a card** offers Edit on the author's own memory and offers no way into an
+ *      edit of anybody else's (FR-018). It was wired to nothing at all before this task.
+ *   2. **The unsaved edit is asked about before it is lost.** There is at most one (FR-013),
+ *      so starting an edit of a *different* memory would take the unsaved one with it the
+ *      moment anything changed — `CaptureDraftStore.startEdit` replaces the slot. The capture
+ *      screen deliberately does not ask (T057/T058: "asking whether to discard it is the
+ *      Journal's"), so if this screen does not ask, nobody does, and four photographs put into
+ *      an edit vanish without a word.
+ *   3. **The memory with the unsaved edit says so on its card**, which is how it is found
+ *      again (US2-7). The slot names one memory, so the screen reads the slot once and tells
+ *      each card; the card's half of that line is `JournalEntryCard.share.test.js`.
+ *
+ * `JournalEntryDetail`'s Edit is re-pointed at the same handler by T060 — and it is **not**
+ * driven end to end here, because it cannot be: `handleEntryPress`, the only thing that sets
+ * `showEntryDetail`, is wired to no control on this screen (`git grep handleEntryPress` finds
+ * its definition and nothing else; `JournalEntryCard` takes no whole-card `onPress`, and no
+ * navigator registers the detail screen). That gap is pre-existing and is recorded in the
+ * task's report rather than closed here. What the detail's Edit calls is the same `openEdit`
+ * everything below drives.
+ *
+ * The draft store is a stand-in (see its mock above) and the `edit` slot is set per test, so
+ * "there is an unsaved edit of this memory" is a statement about the slot's contents — the
+ * same question `CaptureDraftStore.getEditFor` answers for the capture screen.
+ */
+
+/** The card component React gives a fiber for — `memo`'s inner function, as elsewhere here. */
+const EntryCard = JournalEntryCard.type ?? JournalEntryCard;
+
+/** The words a person reads, verbatim from `contracts/ui-contract.md`. */
+const UNFINISHED_LINE = 'Unfinished edit — continue';
+
+const ownMemory = (localId, content) => ({
+  localId,
+  id: localId,
+  userId: 'user-1',
+  journalId: 'journal-1',
+  // Today, so the screen's own day filter shows it without relying on the jump-to-newest
+  // effect.
+  date: toDateKey(new Date()),
+  createdAt: Date.now(),
+  visibility: 'family',
+  syncStatus: 'synced',
+  contentBlocks: [{ type: 'text', content }],
+});
+
+const WALK = ownMemory('local-walk', 'on the 34 bus');
+const KIOSK = ownMemory('local-kiosk', 'the kiosk on the corner');
+const THEIRS = {
+  ...ownMemory('local-theirs', 'their morning, not mine'),
+  userId: 'someone-else',
+  authorId: 'someone-else',
+  author: { name: 'Mo' },
+};
+
+/** The cards the list rendered. */
+const entryCards = (tree) => tree.root.findAllByType(EntryCard);
+
+/** The card for one memory, as the list really renders it. */
+const cardFor = (tree, localId) => {
+  const match = entryCards(tree).find((candidate) => candidate.props.entry.localId === localId);
+  if (!match) {
+    throw new Error(`The Journal is not showing the memory ${localId}`);
+  }
+  return match;
+};
+
+/** The innermost control inside `node` carrying this line — the tappable line itself. */
+const lineControlIn = (node, line) => {
+  const matches = node.findAll(
+    (candidate) =>
+      candidate.type === TouchableOpacity &&
+      typeof candidate.props?.onPress === 'function' &&
+      textsAnywhere(candidate).includes(line),
+  );
+  return matches[matches.length - 1];
+};
+
+/** The ⋯ on a card. */
+const menuControl = (card) => {
+  const matches = card
+    .findAllByType(TouchableOpacity)
+    .filter((node) => iconsIn(node).includes('ellipsis-horizontal'));
+  if (matches.length === 0) {
+    throw new Error('No control on the card carries the ⋯ icon');
+  }
+  return matches[matches.length - 1];
+};
+
+/** Every button the screen has put in front of the person, in the order it offered them. */
+const offered = (alert) =>
+  alert.mock.calls.flatMap(([, , buttons]) => (Array.isArray(buttons) ? buttons : []));
+
+const offeredTexts = (alert) => offered(alert).map((button) => button.text);
+
+/** Everything the screen has said, titles and messages together. */
+const said = (alert) =>
+  alert.mock.calls.map((call) => call.slice(0, 2).filter(Boolean).join(' ')).join(' | ');
+
+/** Press a button the screen offered, by the words on it. */
+const pressOffered = async (alert, text) => {
+  const button = offered(alert).find((candidate) => candidate.text === text);
+  expect({ text, offered: !!button }).toEqual({ text, offered: true });
+  await act(async () => {
+    await button.onPress?.();
+  });
+};
+
+/** The `edit` slot, holding an unsaved edit of one memory with one note in it. */
+const unsavedEditOf = (entryLocalId, content) => {
+  CaptureDraftStore.load.mockImplementation(async (slot) =>
+    slot === 'edit'
+      ? {
+          id: 'edit',
+          entryLocalId,
+          createdAt: '2026-11-10T08:00:00.000Z',
+          updatedAt: '2026-11-10T08:05:00.000Z',
+          pieces: [{ localId: 'piece-1', kind: 'text', content }],
+        }
+      : null,
+  );
+};
+
+/** The slot as the mock factory leaves it: nothing unsaved, and nothing that fails. */
+const resetDraftStore = () => {
+  CaptureDraftStore.load.mockImplementation(async () => null);
+  CaptureDraftStore.discard.mockImplementation(async () => {});
+};
+
+/** Come back to the Journal, as closing the capture screen does. */
+const comeBack = async () => {
+  await act(async () => {
+    __refocus();
+  });
+};
+
+describe('Edit opens the capture screen on the memory itself (FR-018)', () => {
+  let alert;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK, THEIRS]);
+    alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    alert.mockRestore();
+    resetDraftStore();
+  });
+
+  it('shows the three memories, so the cases below are about something', async () => {
+    const { tree } = await render();
+
+    expect(entryCards(tree).map((card) => card.props.entry.localId)).toEqual([
+      'local-walk',
+      'local-kiosk',
+      'local-theirs',
+    ]);
+  });
+
+  it('offers Edit when the ⋯ on the author’s own memory is tapped', async () => {
+    const { tree } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+
+    expect(offeredTexts(alert)).toContain('Edit');
+  });
+
+  it('opens Capture with { mode: "edit", entryLocalId } and goes nowhere else', async () => {
+    // `toEqual` on the whole call list: an edit is one hop, to one route, carrying the memory
+    // it is an edit of and nothing else. An extra parameter here is what would let the capture
+    // screen think it was something other than an edit of this memory.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+  });
+
+  it('edits the memory whose ⋯ was tapped, not the first one on screen', async () => {
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-kiosk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-kiosk',
+    });
+  });
+
+  it('saves nothing and opens no second composer (FR-018)', async () => {
+    // FR-018's "it MUST NOT create a second memory" where this screen could still break it:
+    // `createEntry` is the one route by which it can save, and the old composer — which always
+    // called `createEntry`, never `updateEntry` — is the one thing Edit used to open.
+    const { tree } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(composeModal(tree).props.visible).toBe(false);
+  });
+
+  it('offers no way into an edit of somebody else’s memory (FR-018)', async () => {
+    // Not an assertion about an absent call: the ⋯ is found and really tapped, and then
+    // **every** button the screen offered is pressed. Whatever it put on screen, none of it
+    // reaches an edit of a memory that is not the reader's.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-theirs')));
+    expect(offeredTexts(alert)).not.toContain('Edit');
+
+    for (const button of offered(alert)) {
+      await act(async () => {
+        await button.onPress?.();
+      });
+    }
+
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an edit of somebody else’s memory however it is asked for (FR-018)', async () => {
+    // Round-1 Important 1. The case above is the ⋯ *not offering* Edit; this is the handler
+    // itself refusing. They are different things, and the second is the one that matters,
+    // because `openEdit` has three callers and only one of them is that menu: the card's
+    // "Unfinished edit — continue" (wired to every card, driven here) and the detail view's
+    // Edit, which `JournalEntryDetail` offers from its own menu with no ownership test of its
+    // own. Opening a stranger's memory as an edit loses the person's work at the far end,
+    // where `updateEntry` refuses the write -- which is the loss Edit is withheld to prevent,
+    // arriving by the one route the withholding does not cover.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-theirs').props.onContinueEdit(THEIRS);
+    });
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+  });
+
+  it('still opens an edit of a memory the reader wrote, through the same caller', async () => {
+    // The other half of that gate: refusing somebody else's memory must not have refused
+    // everybody's. The same prop, on the reader's own card, opens the edit.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-walk').props.onContinueEdit(WALK);
+    });
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it('says so when a memory arrives with no local id, rather than opening nothing', async () => {
+    // Unreachable from the list — every row is keyed by `localId` — so this is the handler's
+    // own guard. A bare `return` here would be a silent no-op immediately after the person
+    // chose Edit, which is the shape FR-017 rules out everywhere else on this screen.
+    const { tree, navigate } = await render();
+
+    await act(async () => {
+      await cardFor(tree, 'local-walk').props.onContinueEdit({ ...WALK, localId: null });
+    });
+
+    expect(alert).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('an unsaved edit of another memory is asked about first (FR-013)', () => {
+  let alert;
+
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+    alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    // The person has an edit of "on the 34 bus" that has never been saved.
+    unsavedEditOf('local-walk', 'on the 34 bus');
+  });
+
+  afterEach(() => {
+    alert.mockRestore();
+    resetDraftStore();
+  });
+
+  /** Ask to edit the *other* memory — the one the unsaved edit does not belong to. */
+  const editTheKiosk = async (tree) => {
+    await tap(menuControl(cardFor(tree, 'local-kiosk')));
+    await pressOffered(alert, 'Edit');
+  };
+
+  it('asks before opening it, naming the memory whose edit it would throw away', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+
+    expect(said(alert)).toContain('Discard your unsaved edit of');
+    // The first words of the edit itself, so the question is about a memory the person
+    // recognises rather than about "a draft".
+    expect(said(alert)).toContain('on the 34 bus');
+    // And nothing has happened yet: not the opening, and above all not the discarding.
+    expect(navigate).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+  });
+
+  it('throws the unsaved edit away and then opens the new one, when the person says so', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Discard');
+
+    expect(CaptureDraftStore.discard).toHaveBeenCalledTimes(1);
+    expect(CaptureDraftStore.discard).toHaveBeenCalledWith('edit');
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-kiosk',
+    });
+  });
+
+  it('keeps the unsaved edit, and opens nothing, when the person backs out', async () => {
+    const { tree, navigate } = await render();
+
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Keep it');
+
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+    // The property, not the absent call: the edit is still in the slot, and the Journal still
+    // says which memory it belongs to — as it would after coming back to the screen.
+    await comeBack();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('asks nothing when the unsaved edit is this very memory’s, and reopens it (US2-7)', async () => {
+    // The whole point of the one-edit rule: continuing your own unfinished edit is not a
+    // discard, and being asked to throw away the thing you are about to open would be absurd.
+    const { tree, navigate } = await render();
+
+    await tap(menuControl(cardFor(tree, 'local-walk')));
+    await pressOffered(alert, 'Edit');
+
+    expect(said(alert)).not.toContain('Discard');
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith('Capture', {
+      mode: 'edit',
+      entryLocalId: 'local-walk',
+    });
+  });
+
+  it('opens nothing when the phone cannot tell what is unsaved — it fails closed', async () => {
+    // The one read that decides whether to ask. If it fails, opening the edit anyway would let
+    // the first change in it delete an unsaved edit nobody was asked about: the loss FR-013
+    // exists to prevent, in the one case where it happens silently. So nothing opens, nothing
+    // is discarded, and the person is told.
+    const warned = silenceWarnings();
+    CaptureDraftStore.load.mockImplementation(async () => {
+      throw new Error('the database is locked');
+    });
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(warned).toHaveBeenCalled();
+  });
+
+  it('opens nothing when the unsaved edit could not be thrown away', async () => {
+    // The order the two steps have to be in. The person agreed to lose one edit, not to open
+    // the next one on top of it — and the slot still holds the old edit, so opening would put
+    // the capture screen one keystroke away from deleting it unasked.
+    const warned = silenceWarnings();
+    CaptureDraftStore.discard.mockImplementation(async () => {
+      throw new Error('the folder would not go');
+    });
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+    await pressOffered(alert, 'Discard');
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(said(alert)).toContain('Could not open that edit');
+    expect(warned).toHaveBeenCalled();
+    // And the edit the person agreed to lose is still there, still named on its card.
+    await comeBack();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('names the memory even when the unsaved edit has no words in it', async () => {
+    // A photographs-only edit: there are no "first words" to quote, and a question with an
+    // empty pair of quotation marks in it reads as a bug. It still says what it is about.
+    CaptureDraftStore.load.mockImplementation(async (slot) =>
+      slot === 'edit'
+        ? { id: 'edit', entryLocalId: 'local-walk', pieces: [{ localId: 'p1', kind: 'photo' }] }
+        : null,
+    );
+
+    const { tree, navigate } = await render();
+    await editTheKiosk(tree);
+
+    expect(said(alert)).toContain('Discard your unsaved edit');
+    expect(said(alert)).not.toContain('“”');
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('the memory with an unsaved edit says so on its card (FR-013, US2-7)', () => {
+  beforeEach(() => {
+    setFeedEntries([WALK, KIOSK]);
+  });
+
+  afterEach(() => {
+    resetDraftStore();
+  });
+
+  it('asks the draft store which memory the unsaved edit belongs to', async () => {
+    // The guard for everything below: one read of the one slot, for the whole list, rather
+    // than a read per card.
+    await render();
+
+    expect(CaptureDraftStore.load).toHaveBeenCalledWith('edit');
+  });
+
+  it('shows the line on that memory’s card and on no other', async () => {
+    unsavedEditOf('local-walk', 'on the 34 bus');
+
+    const { tree } = await render();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+    expect(textsAnywhere(cardFor(tree, 'local-kiosk'))).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('says nothing of the kind while nothing is unsaved', async () => {
+    const { tree } = await render();
+
+    expect(textsAnywhere(tree.root)).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('says so as soon as the person comes back from the capture screen', async () => {
+    // The journey US2-7 is about: edit a memory, leave without saving, and find it again. The
+    // Journal is already on screen, so a read on mount alone would say nothing until the app
+    // was restarted.
+    const { tree } = await render();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).not.toContain(UNFINISHED_LINE);
+
+    unsavedEditOf('local-walk', 'on the 34 bus');
+    await comeBack();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+  });
+
+  it('stops saying it once the edit has been saved or discarded', async () => {
+    // The other direction, and the one that would leave a dead control on a card: the slot is
+    // empty after a save (`clearAfterSave`) or a discard, and the line has to go with it.
+    unsavedEditOf('local-walk', 'on the 34 bus');
+    const { tree } = await render();
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).toContain(UNFINISHED_LINE);
+
+    CaptureDraftStore.load.mockImplementation(async () => null);
+    await comeBack();
+
+    expect(textsAnywhere(cardFor(tree, 'local-walk'))).not.toContain(UNFINISHED_LINE);
+  });
+
+  it('opens the edit again when the line is tapped', async () => {
+    unsavedEditOf('local-walk', 'on the 34 bus');
+
+    const { tree, navigate } = await render();
+    await tap(lineControlIn(cardFor(tree, 'local-walk'), UNFINISHED_LINE));
+
+    expect(navigate.mock.calls).toEqual([
+      ['Capture', { mode: 'edit', entryLocalId: 'local-walk' }],
+    ]);
+  });
+
+  it('claims no unfinished edit when the slot cannot be read', async () => {
+    // A failed read is not evidence of an unsaved edit, and a line offering an edit that is
+    // not there would open the capture screen on the memory as saved and call it a draft.
+    const warned = silenceWarnings();
+    CaptureDraftStore.load.mockImplementation(async () => {
+      throw new Error('the database is locked');
+    });
+
+    const { tree } = await render();
+
+    expect(textsAnywhere(tree.root)).not.toContain(UNFINISHED_LINE);
+    expect(warned).toHaveBeenCalled();
+  });
+});
