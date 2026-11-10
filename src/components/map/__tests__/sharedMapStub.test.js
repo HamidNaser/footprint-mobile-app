@@ -39,6 +39,51 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const SRC = path.join(__dirname, '..', '..', '..');
 
+/**
+ * The app source files this guard reads the import list out of.
+ *
+ * Extracted from the assertion below so the guard's own *reach* can be asserted too: the comment
+ * at the top of this file promises that a new name imported from the module fails here, and a
+ * list built inline inside the one assertion that consumes it can never be checked against that
+ * promise.
+ */
+function appSourceFiles() {
+  return ['components/journal/MediaExplorerSheet.js', 'components/map'].flatMap((entry) => {
+    const target = path.join(SRC, entry);
+    return fs.statSync(target).isDirectory()
+      ? fs
+          .readdirSync(target)
+          .filter((name) => name.endsWith('.js'))
+          .map((name) => path.join(target, name))
+      : [target];
+  });
+}
+
+/**
+ * The names one source file pulls out of `react-native-maps` by name.
+ *
+ * `MapView` is the default export, under whatever local name a file gives it, so it is not in
+ * here -- the default is asserted on the stub directly.
+ */
+function namesImportedFrom(source) {
+  const names = new Set();
+  const match = source.match(/import\s+(?:\w+\s*,\s*)?\{([^}]*)\}\s+from\s+'react-native-maps'/);
+  if (match) match[1].split(',').map((name) => name.trim()).filter(Boolean).forEach((name) => names.add(name));
+  return names;
+}
+
+/** Every name the app pulls out of the module by name, across every file scanned. */
+function namesImportedAcrossSrc() {
+  const named = new Set();
+  for (const file of appSourceFiles()) {
+    namesImportedFrom(fs.readFileSync(file, 'utf8')).forEach((name) => named.add(name));
+  }
+  return named;
+}
+
+/** A repo-relative path with forward slashes, so an assertion reads the same on every platform. */
+const relative = (file) => path.relative(SRC, file).split(path.sep).join('/');
+
 describe('the shared react-native-maps stub', () => {
   it('loads at all, which is the whole point of it', () => {
     expect(MapView).toBeDefined();
@@ -68,29 +113,53 @@ describe('the shared react-native-maps stub', () => {
     error.mockRestore();
   });
 
+  it('scans every app file under src, not just the map folder and the explorer sheet', () => {
+    const scanned = appSourceFiles().map(relative);
+
+    // The file that found this guard wanting (round-2 finding B). `EntryGalleryModal.js:61-62`
+    // pulls the default export and `{ Marker }` and sits in neither of the two places the scan
+    // looked, so the promise at the top of this file -- that a new name fails "in one obvious
+    // place" -- did not hold for it.
+    expect(scanned).toContain('components/journal/EntryGalleryModal.js');
+    expect(scanned).toContain('components/journal/MediaExplorerSheet.js');
+    expect(scanned).toContain('components/map/NumberedPin.js');
+    // Not the test folders: a suite that declares its own `jest.mock` does not rely on the
+    // shared stub, so its imports must not be allowed to drive the stub's contract.
+    expect(scanned.filter((file) => file.includes('__tests__'))).toEqual([]);
+  });
+
+  it('reads a name out of a require, not only out of an import', () => {
+    // `EntryGalleryModal.js:62`, verbatim. The module is native-only, so that file requires it
+    // lazily inside its native branch rather than importing it at the top -- a form an
+    // import-only pattern cannot see.
+    const source = "  const { Marker } = require('react-native-maps');";
+
+    expect([...namesImportedFrom(source)]).toEqual(['Marker']);
+  });
+
+  it('reads every statement in a file, not just the first one it finds', () => {
+    // `EntryGalleryModal.js:61-62` is two statements, and nothing stops a file having two
+    // imports. A single non-global match stops at the first and the rest are invisible.
+    const source = [
+      "import MapView, { Marker } from 'react-native-maps';",
+      "import { Callout } from 'react-native-maps';",
+      'const Lazy = require("react-native-maps").default;',
+      "const { Polyline, PROVIDER_GOOGLE } = require('react-native-maps');",
+    ].join('\n');
+
+    expect([...namesImportedFrom(source)].sort()).toEqual(
+      ['Callout', 'Marker', 'PROVIDER_GOOGLE', 'Polyline'].sort(),
+    );
+  });
+
   it('stubs every name this app imports from the module, and no more', () => {
-    // Read from the imports themselves, so a new one has to be added here too. `MapView` is
-    // the default import, under whatever local name a file gives it.
-    const sources = ['components/journal/MediaExplorerSheet.js', 'components/map']
-      .flatMap((entry) => {
-        const target = path.join(SRC, entry);
-        return fs.statSync(target).isDirectory()
-          ? fs
-              .readdirSync(target)
-              .filter((name) => name.endsWith('.js'))
-              .map((name) => path.join(target, name))
-          : [target];
-      })
-      .map((file) => fs.readFileSync(file, 'utf8'));
-
-    const named = new Set();
-    for (const source of sources) {
-      const match = source.match(/import\s+(?:\w+\s*,\s*)?\{([^}]*)\}\s+from\s+'react-native-maps'/);
-      if (match) match[1].split(',').map((name) => name.trim()).filter(Boolean).forEach((name) => named.add(name));
-    }
-
-    // Everything the map folder and the explorer sheet ask for, and nothing invented here.
-    expect([...named].sort()).toEqual(['Callout', 'Marker', 'PROVIDER_GOOGLE', 'Polyline']);
+    // Everything src asks for by name, and nothing invented here.
+    expect([...namesImportedAcrossSrc()].sort()).toEqual([
+      'Callout',
+      'Marker',
+      'PROVIDER_GOOGLE',
+      'Polyline',
+    ]);
 
     const stub = require('react-native-maps');
     expect(Object.keys(stub).sort()).toEqual([

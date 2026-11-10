@@ -668,6 +668,14 @@ describe('merging pins at practically the same spot', () => {
  * as a piece **with** a place and numbered, which would put a pin on the map pointing at a
  * piece the card does not draw at all. Neither is a piece of the memory: it is the entry's
  * single place, duplicated as a block, and `entry.location` is where that is read from.
+ *
+ * **And that block has a third, typeless shape (round-2 finding A).** Before
+ * `ContentBlockType.LOCATION` existed, `ContentBlock.location` referenced a missing constant and
+ * emitted `type: undefined` (`schema.js:308-312`, `JournalService.js:122`). `JSON.stringify` drops
+ * an undefined key, so the stored row has no `type` property at all and a check on the type alone
+ * cannot see it. It is recognised by what only that builder puts at the top level of a block --
+ * `lat` and `lng` -- because "typeless" on its own is too wide: `ContentBlock.image` had the same
+ * defect (`JournalService.js:44-47`), so a typeless block holding real photos is in history too.
  */
 describe('block shapes that are stored but are not pieces', () => {
   it('reads a block whose media is a single object as carrying no media, rather than throwing', () => {
@@ -724,6 +732,59 @@ describe('block shapes that are stored but are not pieces', () => {
     expect(result.pieces[0].number).toBe(1);
     expect(result.distinctPlaceCount).toBe(1);
     expect(result.groups[0].numbers).toEqual([1]);
+  });
+
+  it('leaves out the legacy location block that was stored with no type at all', () => {
+    // Before `ContentBlockType.LOCATION` existed, `ContentBlock.location` referenced a missing
+    // constant and emitted `type: undefined` -- `schema.js:308-312` and `JournalService.js:122`
+    // both say so. `JSON.stringify` drops an undefined key, so the row that reached SQLite and
+    // the server has **no** `type` property, and `JSON.parse` gives it back that way. Built
+    // through that round trip here rather than hand-written, so the shape is the stored one and
+    // not an assumption about it.
+    const stored = JSON.parse(JSON.stringify({
+      id: 'b2',
+      type: undefined,
+      lat: HERE.lat,
+      lng: HERE.lng,
+      name: 'Gare du Nord',
+      address: null,
+      order: 1,
+    }));
+    expect('type' in stored).toBe(false);
+
+    const entry = entryOf(text(SAVED, HERE), stored);
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    // Length, not just the kinds: `toEqual` reads a trailing `undefined` in an array as absent,
+    // so a kind-only assertion would not see the extra piece at all.
+    expect(result.pieces).toHaveLength(1);
+    expect(result.pieces[0].kind).toBe('text');
+    // Counted, it would make the map say "1 piece without a place" about a block the card draws
+    // nothing for (FR-026) -- the same defect as the typed shape above, on a historical row.
+    expect(result.withoutPlaceCount).toBe(0);
+    expect(result.distinctPlaceCount).toBe(1);
+  });
+
+  it('still numbers a typeless block that carries no coordinate of its own', () => {
+    // Why the rule above is "typeless **and** has top-level lat/lng" and not just "typeless".
+    // `ContentBlock.image` carried the identical defect -- it referenced `ContentBlockType.IMAGE`,
+    // which never existed (`JournalService.js:44-47`) -- so a typeless block holding real photos
+    // is in history too, and so is any typeless block some other writer stored. Those are pieces
+    // somebody captured, and dropping them would lose part of a memory.
+    const entry = entryOf(JSON.parse(JSON.stringify({
+      id: 'b1',
+      type: undefined,
+      capturedAt: SAVED,
+      location: HERE,
+      media: [{ localId: 'm0', localPath: 'file:///tmp/a.jpg' }],
+    })));
+
+    const result = toNumberedPieces(entry, SAVED);
+
+    expect(result.pieces).toHaveLength(1);
+    expect(result.pieces[0].number).toBe(1);
+    expect(result.distinctPlaceCount).toBe(1);
   });
 
   it('still numbers a block of a kind it does not know, which is not the same thing', () => {
