@@ -91,6 +91,19 @@ const press = async (node) => {
   });
 };
 
+/**
+ * The switch's active style is the second element of its `style` array
+ * (`[styles.viewSwitchBtn, active && styles.viewSwitchBtnActive]`) -- `false` when inactive,
+ * the actual style object (truthy) when active. Reading that off the real rendered props,
+ * rather than re-deriving it from `TimelineScreen`'s own (unexported) `styles`, is what lets
+ * this assert "Timeline looks selected, Events does not" without duplicating the component's
+ * styling logic.
+ */
+function activeFlagOf(pressable) {
+  const style = pressable.props.style;
+  return Array.isArray(style) ? style[1] : undefined;
+}
+
 function mockUpcomingEvents(overrides) {
   useUpcomingEvents.mockReturnValue({
     upcoming: [],
@@ -133,9 +146,19 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
 
     expect(shows(tree, /^Timeline$/)).toBe(true);
     expect(shows(tree, /^Events$/)).toBe(true);
-    // Timeline is the default pane: its own content is on screen, the Events pane's is not.
-    expect(shows(tree, /^Lifeline$/)).toBe(true);
-    expect(shows(tree, /^Coming up$/)).toBe(false);
+
+    // Discriminating: "Lifeline" (the header brand) and an empty "Coming up" both render
+    // regardless of which pane is active (the header is common chrome; the mocked
+    // `useUpcomingEvents` returns empty lists either way), so neither tells the default pane
+    // apart on its own. "Photos & Videos" (Timeline's media zone) only renders on the Timeline
+    // pane, and "No events yet" (the Events pane's own empty state) only on the Events pane --
+    // together they pin which one is showing.
+    expect(shows(tree, /Photos & Videos/)).toBe(true);
+    expect(shows(tree, /^No events yet/)).toBe(false);
+
+    // And the control itself reads as selected on "Timeline", not "Events".
+    expect(activeFlagOf(pressableByText(tree, /^Timeline$/))).toBeTruthy();
+    expect(activeFlagOf(pressableByText(tree, /^Events$/))).toBe(false);
   });
 
   it('tapping "Events" opens the Events pane; tapping back to "Timeline" restores it', async () => {
@@ -151,6 +174,43 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
 
   it("opens straight into the Events pane when the route param is { view: 'events' }", async () => {
     const tree = await mount({ route: { params: { view: 'events' } } });
+
+    expect(shows(tree, /^No events yet/)).toBe(true);
+    expect(shows(tree, /Photos & Videos/)).toBe(false);
+  });
+
+  // Important 2: `TimelineScreen` is a bottom-tab screen (`AppNavigator.js`) with no
+  // `unmountOnBlur` -- React Navigation keeps it mounted for the app's lifetime, unlike the
+  // stack screens (`EventDetail`, `EventForm`, ...) that remount fresh per `navigate`. A second
+  // visit from Home's "See all ›" (T066, `navigate('Timeline', { view: 'events' })`) only
+  // updates `route.params` on the already-mounted screen -- it does not remount it, so a
+  // `useState` initializer alone would silently ignore every visit after the first. This case
+  // re-renders the *same* tree with a changed `route` prop, the same way React Navigation would.
+  it('follows route.params.view on an already-mounted screen (a tab, not a remounting stack screen)', async () => {
+    let tree;
+    getLifeline.mockResolvedValue(OVERVIEW);
+    getLifelineYear.mockResolvedValue(DETAIL);
+    await act(async () => {
+      tree = create(
+        <TimelineScreen navigation={{ navigate: jest.fn() }} route={{ params: { view: 'timeline' } }} />
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(shows(tree, /Photos & Videos/)).toBe(true);
+
+    await act(async () => {
+      tree.update(
+        <TimelineScreen navigation={{ navigate: jest.fn() }} route={{ params: { view: 'events' } }} />
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     expect(shows(tree, /^No events yet/)).toBe(true);
     expect(shows(tree, /Photos & Videos/)).toBe(false);
@@ -207,6 +267,27 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
       expect(shows(tree, /Sign in to see your events\./)).toBe(true);
       expect(shows(tree, /No events yet/)).toBe(false);
     });
+
+    // Important 4: the Lifeline overview (`years.length === 0`) is Timeline-only data. A
+    // brand-new user -- every one of them, on their very first visit -- has no Lifeline years
+    // yet, and must still be able to reach the Events pane rather than have the "your timeline
+    // is empty" branch swallow it.
+    it('renders even when the person has no Lifeline years at all (every brand-new user)', async () => {
+      getLifeline.mockReset();
+      getLifeline.mockResolvedValue({ person: { personId: 'p1', isSelf: true }, years: [], lineage: [] });
+      let tree;
+      await act(async () => {
+        tree = create(
+          <TimelineScreen navigation={{ navigate: jest.fn() }} route={{ params: { view: 'events' } }} />
+        );
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(shows(tree, /^No events yet/)).toBe(true);
+      expect(shows(tree, /Your timeline is empty/)).toBe(false);
+    });
   });
 
   describe('the existing Timeline content is unchanged', () => {
@@ -214,8 +295,7 @@ describe('TimelineScreen (T065 -- Timeline | Events)', () => {
       const tree = await mount();
 
       expect(shows(tree, /^Lifeline$/)).toBe(true);
-      expect(shows(tree, /Your 1st year/)).toBe(true);
-      expect(shows(tree, /1990/)).toBe(true);
+      expect(shows(tree, /^Your 1st year · 1990$/)).toBe(true);
       expect(shows(tree, /Photos & Videos/)).toBe(true);
       expect(shows(tree, /No media for this year yet\./)).toBe(true);
     });

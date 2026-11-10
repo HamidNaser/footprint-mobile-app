@@ -28,7 +28,7 @@
  * button to nothing.
  */
 
-import React, { memo } from 'react';
+import React, { memo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -49,8 +49,19 @@ const TAB_EMPTY = {
   drafts: { icon: 'document-outline', title: 'No drafts', hint: 'Saved-but-unsent events live here.' },
 };
 
-const EmptyState = memo(({ tab }) => {
-  const cfg = TAB_EMPTY[tab] || TAB_EMPTY.my;
+/**
+ * Sectioned mode's own empty copy (Minor 3): the only "+" on the Timeline tab is the capture
+ * FAB, which starts a journal capture, not an event -- `TAB_EMPTY.my`'s "Tap + to create your
+ * first event" would point at the wrong control. This points at the "+ New event" row that
+ * renders directly above the list in that mode instead.
+ */
+const EVENTS_PANE_EMPTY = {
+  icon: 'calendar-outline',
+  title: 'No events yet',
+  hint: 'Tap "+ New event" above to create one.',
+};
+
+const EmptyState = memo(({ cfg }) => {
   return (
     <View style={styles.empty}>
       <Ionicons name={cfg.icon} size={54} color="#c7d2fe" />
@@ -143,16 +154,21 @@ export default function EventsList({
   onDrafts,
   onCreate,
 }) {
+  const sectioned = upcoming !== undefined || past !== undefined;
   const data = buildData(events, upcoming, past);
+  const emptyCfg = sectioned ? EVENTS_PANE_EMPTY : TAB_EMPTY[tab] || TAB_EMPTY.my;
 
-  const renderItem = ({ item }) =>
-    item.__header ? (
-      <SectionHeader title={item.title} />
-    ) : (
-      <EventCard event={item} onPress={onSelect} />
-    );
+  const renderItem = useCallback(
+    ({ item }) =>
+      item.__header ? (
+        <SectionHeader title={item.title} />
+      ) : (
+        <EventCard event={item} onPress={onSelect} />
+      ),
+    [onSelect]
+  );
 
-  const keyExtractor = (item) => (item.__header ? item.key : item.id);
+  const keyExtractor = useCallback((item) => (item.__header ? item.key : item.id), []);
 
   const showDrafts = draftsCount > 0 && !!onDrafts;
   const showCreate = !!onCreate;
@@ -179,8 +195,16 @@ export default function EventsList({
       renderItem={renderItem}
       contentContainerStyle={styles.list}
       ListHeaderComponent={header}
+      // Hazard (Minor 2): this branch relies on every caller coupling a non-null `error` to an
+      // empty list -- `useUpcomingEvents` and `useEvents` both fail closed (never a partial
+      // list alongside an error), so that holds for both callers today, but an `error` passed
+      // alongside a non-empty `events`/`upcoming`/`past` would hide the error entirely (`data`
+      // non-empty means `FlatList` never shows `ListEmptyComponent` at all). Not changed here:
+      // flat mode carries this forward verbatim from the original `EventsScreen`, and sectioned
+      // mode's data source cannot produce that shape -- a future caller that can would need to
+      // check `data.length === 0` itself before trusting this to surface the error.
       ListEmptyComponent={
-        error ? <ErrorState error={error} onRetry={onRetry} /> : <EmptyState tab={tab} />
+        error ? <ErrorState error={error} onRetry={onRetry} /> : <EmptyState cfg={emptyCfg} />
       }
       refreshControl={
         onRefresh ? (

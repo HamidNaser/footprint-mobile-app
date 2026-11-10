@@ -212,8 +212,21 @@ function EventsPane({ upcoming, past, draftsCount, isLoading, error, onSelect, o
 export default function TimelineScreen({ navigation, route }) {
   const { user } = useAuth();
   // "Timeline" is the default; a route param opens straight into "Events" (Home's "See all ›",
-  // research R11) -- read once, as the initial state, same as every other screen's route param.
+  // research R11) -- used as the initial state, for the first mount.
   const [view, setView] = useState(route?.params?.view === 'events' ? 'events' : 'timeline');
+  // `TimelineScreen` is a bottom-tab screen (`AppNavigator.js`), kept mounted for the app's
+  // lifetime -- unlike the stack screens elsewhere in this file (`EventDetail`, `EventForm`,
+  // `InterviewMode`), which remount per `navigate`. A second "See all ›" from Home after this
+  // tab has already been visited only changes `route.params`; the `useState` initializer above
+  // does not re-run, so without this effect the param would be silently ignored past the first
+  // visit. Only an explicit `'events'`/`'timeline'` moves the pane -- an unrelated param change
+  // (or none) leaves whatever the person is already looking at alone.
+  useEffect(() => {
+    const requested = route?.params?.view;
+    if (requested === 'events' || requested === 'timeline') {
+      setView(requested);
+    }
+  }, [route?.params?.view]);
   const { upcoming, past, draftsCount, isLoading: eventsLoading, error: eventsError } =
     useUpcomingEvents();
   const [personId, setPersonId] = useState(null); // null = current user

@@ -17,7 +17,7 @@
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { TouchableOpacity } from 'react-native';
+import { TouchableOpacity, FlatList } from 'react-native';
 import EventsList from '../EventsList';
 
 const guest = (id, status) => ({ id, name: `Guest ${id}`, avatar: null, status });
@@ -204,6 +204,24 @@ describe('EventsList', () => {
       expect(shows(tree, /Network request failed/)).toBe(true);
       await press(pressableByText(tree, /^Try again$/));
       expect(onRetry).toHaveBeenCalledTimes(1);
+    });
+
+    // Important 3: `onRefresh`'s presence/absence is otherwise invisible -- a dropped or
+    // misspelled prop silently removes pull-to-refresh, and nothing above touches the
+    // `FlatList`'s `refreshControl` in either direction.
+    it('passes a RefreshControl to the FlatList when onRefresh is given', async () => {
+      const onRefresh = jest.fn();
+      const tree = await mount({ events: [makeEvent({ id: 'e1' })], tab: 'my', onRefresh });
+
+      const list = tree.root.findByType(FlatList);
+      expect(list.props.refreshControl).toBeTruthy();
+    });
+
+    it('passes no RefreshControl to the FlatList when onRefresh is omitted', async () => {
+      const tree = await mount({ events: [makeEvent({ id: 'e1' })], tab: 'my' });
+
+      const list = tree.root.findByType(FlatList);
+      expect(list.props.refreshControl).toBeUndefined();
     });
   });
 });
