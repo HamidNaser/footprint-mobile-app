@@ -3795,6 +3795,9 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
    * action where the cancel is expected -- would pass any `find` on `style` alone.
    */
   const expectTheTwoButtons = () => {
+    // Asserted before it is walked, for the reason `lastAsked` asserts: an alert raised with no
+    // buttons at all is a finding, not a broken test.
+    expect(lastAsked()[2]).toBeDefined();
     expect(lastAsked()[2].map((button) => [button.text, button.style])).toEqual([
       ['Keep it', 'cancel'],
       ['Remove', 'destructive'],

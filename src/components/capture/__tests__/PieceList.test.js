@@ -228,11 +228,13 @@ describe('PieceList: every piece can be taken back out (FR-036)', () => {
         `piece-remove-${index}`,
       ]);
 
-      // And it is that row's control, not another row's: a control outside its own row would
-      // still be found by testID anywhere in the tree, so the negative is checked too.
+      // And it is that row's control, not another row's -- searched over the **whole row**
+      // rather than its meta line, so a stray `piece-remove-1` rendered down in row 0's body is
+      // caught as well as one in its meta line.
+      const row = nodeAt(tree, `piece-row-${index}`);
       FOUR_KINDS.forEach((_, other) => {
         if (other === index) return;
-        expect(meta.findAll((n) => n.props?.testID === `piece-remove-${other}`)).toHaveLength(0);
+        expect(row.findAll((n) => n.props?.testID === `piece-remove-${other}`)).toHaveLength(0);
       });
     });
   });
