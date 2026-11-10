@@ -183,14 +183,27 @@ afterEach(() => {
 /** Every instance in the tree, in render order, so two nodes can be compared for position. */
 const inRenderOrder = (tree) => tree.root.findAll(() => true);
 
-const withTestId = (tree, testID) => tree.root.findAll((node) => node.props?.testID === testID);
+/**
+ * React Native's `View` is itself a component that renders a host `View` and passes `testID`
+ * straight through, so a single test id matches two instances. Only the host element is taken,
+ * or every count in this file would be doubled.
+ */
+const isHost = (node) => typeof node.type === 'string';
+
+const withTestId = (tree, testID) =>
+  tree.root.findAll((node) => isHost(node) && node.props?.testID === testID);
 
 const has = (tree, testID) => withTestId(tree, testID).length > 0;
 
 /** The container of each numbered piece, in the order the card renders them. */
 const numberedPieces = (tree) =>
   tree.root
-    .findAll((node) => typeof node.props?.testID === 'string' && /^memory-piece-\d+$/.test(node.props.testID))
+    .findAll(
+      (node) =>
+        isHost(node) &&
+        typeof node.props?.testID === 'string' &&
+        /^memory-piece-\d+$/.test(node.props.testID),
+    )
     .map((node) => ({ number: Number(node.props.testID.slice('memory-piece-'.length)), node }));
 
 /** The numbers the card badges, in the order the pieces are rendered in. */
@@ -199,10 +212,14 @@ const badgeNumbersInRenderOrder = (tree) => numberedPieces(tree).map((piece) => 
 /** The badge a piece carries, as a person reads it: the digits inside the circle. */
 const badgeLabel = (pieceNode, number) =>
   pieceNode
-    .findAll((node) => node.props?.testID === `piece-badge-${number}`)[0]
+    .findAll((node) => isHost(node) && node.props?.testID === `piece-badge-${number}`)[0]
     ?.findAllByType(Text)[0]?.props?.children;
 
-const photographIn = (pieceNode) => pieceNode.findAllByType(DerivativeImage)[0]?.props?.media?.id;
+/** `React.memo` gives a fiber the inner function as its type, so `findByType` needs that. */
+const DerivativeImageComponent = DerivativeImage.type ?? DerivativeImage;
+
+const photographIn = (pieceNode) =>
+  pieceNode.findAllByType(DerivativeImageComponent)[0]?.props?.media?.id;
 
 const EngagementComponent = EngagementSection.type ?? EngagementSection;
 
@@ -222,7 +239,7 @@ const texts = (node) =>
 
 const positionOf = (tree, predicate) => inRenderOrder(tree).findIndex(predicate);
 
-const byTestId = (testID) => (node) => node.props?.testID === testID;
+const byTestId = (testID) => (node) => isHost(node) && node.props?.testID === testID;
 
 /** A `MapView` anywhere in the tree -- the native view the placeholder exists to avoid. */
 const mapViews = (tree) => tree.root.findAll((node) => node.type === 'MapView');
@@ -296,7 +313,9 @@ describe('a piece with a place carries the number its pin carries (FR-023)', () 
     const tree = await render(entry);
 
     // Both photographs are on screen; only one of them is numbered.
-    expect(tree.root.findAllByType(DerivativeImage).map((image) => image.props.media.id)).toEqual([
+    expect(
+      tree.root.findAllByType(DerivativeImageComponent).map((image) => image.props.media.id),
+    ).toEqual([
       'p-platform',
       'p-nowhere',
     ]);

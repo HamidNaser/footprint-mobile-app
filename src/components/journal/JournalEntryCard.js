@@ -7,7 +7,7 @@
  * - Supports: text, photo grids, video thumbnails, audio players, location
  */
 
-import React, { memo, useState, useCallback } from 'react';
+import React, { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import Avatar from '../Avatar';
 import {
   View,
@@ -28,10 +28,132 @@ import { ShareState } from '../../database/schema';
 // One copy of the words, shared with `JournalEntryDetail` -- the screen a tap on this card
 // opens, which must not say "Family" over a memory this card has just called not shared.
 import { SHARE_LINES, NOT_SHARED_YET } from './shareLabels';
+import MemoryRouteMap, { MEMORY_ROUTE_MAP_HEIGHT } from '../map/MemoryRouteMap';
+// The pin's own colour function, so a piece's badge and its pin cannot be different colours
+// (FR-023). It reads the `PIN_COLOURS` table the map's markers read, and carries the same
+// neutral colour for a kind neither file knows -- repeating that fallback here is how the two
+// would drift. Both exports have a web sibling, so this import resolves in a browser too.
+import { pinColour } from '../map/NumberedPin';
+// One function decides the order, the numbers and the groups of a memory's pieces. The card
+// badges the pieces from it and `MemoryRouteMap` draws the pins from it, which is what makes a
+// badge and a pin agree (FR-023, research R10).
+import { toNumberedPieces } from '../../utils/memoryPieces';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_PADDING = 16;
 const CONTENT_WIDTH = SCREEN_WIDTH - (CARD_PADDING * 2);
+
+/** How long a piece stays lit after its pin is pressed (FR-025, `contracts/ui-contract.md`). */
+const PIECE_HIGHLIGHT_MS = 1500;
+
+/** The map's own route colour, so a lit piece reads as "the map is pointing at this one". */
+const HIGHLIGHT_COLOUR = '#4361ee';
+
+/** `blockIndex` and `mediaIndex` from `toNumberedPieces`, as one lookup key. */
+const pieceKey = (blockIndex, mediaIndex) => `${blockIndex}:${mediaIndex ?? ''}`;
+
+/**
+ * The number a piece wears, in the colour its pin wears (FR-023).
+ *
+ * Absolutely positioned by default, over the top-left corner of a photograph or a video
+ * thumbnail, which is where a badge on an image belongs. A note and a voice clip pass
+ * `styles.pieceBadgeInline` instead and render it above themselves: a circle laid over a
+ * paragraph covers the first words of it, and one laid over the voice pill covers the play
+ * control FR-020 exists for.
+ */
+const PieceBadge = ({ number, kind, style }) => (
+  <View
+    testID={`piece-badge-${number}`}
+    style={[styles.pieceBadge, { backgroundColor: pinColour(kind) }, style]}
+  >
+    <Text style={styles.pieceBadgeText}>{String(number)}</Text>
+  </View>
+);
+
+/**
+ * One piece of a saved memory: the view the card measures, the badge that matches its pin, and
+ * the ring while a pressed pin is pointing at it (FR-023, FR-025).
+ *
+ * A piece the map did not number -- one with no place -- gets no badge, no ring, no test id and
+ * no measurement, so a memory with no places renders exactly as it does today (SC-008).
+ *
+ * The ring is laid over the piece rather than drawn around it, and takes no touches: a piece
+ * that grew a border for a second and a half would reflow the card under the reader's thumb.
+ *
+ * @param {{number: number, kind: string}|null} badge
+ * @param {boolean} highlighted
+ * @param {(number: number, y: number) => void} [onMeasure] Given the piece's offset from the
+ *   top of the piece list, which is what a pin press scrolls to.
+ */
+const PieceSlot = ({ badge, highlighted, onMeasure, style, badgeAbove = false, badgeStyle, children }) => {
+  const marks = badge ? (
+    <PieceBadge number={badge.number} kind={badge.kind} style={badgeStyle} />
+  ) : null;
+
+  return (
+    <View
+      style={style}
+      testID={badge ? `memory-piece-${badge.number}` : undefined}
+      onLayout={
+        badge && onMeasure
+          ? (event) => onMeasure(badge.number, event.nativeEvent.layout.y)
+          : undefined
+      }
+    >
+      {badgeAbove && marks}
+      {children}
+      {!badgeAbove && marks}
+      {badge && highlighted && (
+        <View
+          pointerEvents="none"
+          testID={`piece-highlight-${badge.number}`}
+          style={styles.pieceHighlight}
+        />
+      )}
+    </View>
+  );
+};
+
+/**
+ * Where each numbered tile of a media block sits, measured from the top of the piece list.
+ *
+ * Two measurements make that up -- the block's own position in the list, and the tile's
+ * position inside the block -- and React Native reports them in whichever order it lays the
+ * views out. So both halves are remembered and every tile measured so far is reported again
+ * whenever either arrives. Reporting the same offset twice costs nothing; reporting a tile's
+ * position without its block's would scroll the Journal to the top of the card instead of to
+ * the piece.
+ *
+ * A note and a voice clip need none of this: their own view *is* the block, so they report
+ * their offset straight to the card.
+ */
+function useTileOffsets(onPieceLayout) {
+  const blockY = useRef(null);
+  const tiles = useRef(new Map());
+
+  const report = useCallback(() => {
+    if (blockY.current === null) return;
+    tiles.current.forEach((y, number) => onPieceLayout?.(number, blockY.current + y));
+  }, [onPieceLayout]);
+
+  const onBlockLayout = useCallback(
+    (event) => {
+      blockY.current = event.nativeEvent.layout.y;
+      report();
+    },
+    [report],
+  );
+
+  const onTileLayout = useCallback(
+    (number, y) => {
+      tiles.current.set(number, y);
+      report();
+    },
+    [report],
+  );
+
+  return { onBlockLayout, onTileLayout };
+}
 
 /**
  * Sync status indicator
@@ -66,14 +188,21 @@ const SyncStatusBadge = ({ status }) => {
 /**
  * Text block component
  */
-const TextBlock = memo(({ content, isFirst }) => {
+const TextBlock = memo(({ content, isFirst, badge, highlighted, onMeasure }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const MAX_LENGTH = 300;
   const shouldTruncate = content.length > MAX_LENGTH;
   const displayText = isExpanded ? content : content.slice(0, MAX_LENGTH);
 
   return (
-    <View style={[styles.textBlock, !isFirst && styles.textBlockSpacing]}>
+    <PieceSlot
+      style={[styles.textBlock, !isFirst && styles.textBlockSpacing]}
+      badge={badge}
+      highlighted={highlighted}
+      onMeasure={onMeasure}
+      badgeAbove
+      badgeStyle={styles.pieceBadgeInline}
+    >
       <Text style={styles.textContent}>
         {displayText}
         {shouldTruncate && !isExpanded && '...'}
@@ -85,7 +214,7 @@ const TextBlock = memo(({ content, isFirst }) => {
           </Text>
         </TouchableOpacity>
       )}
-    </View>
+    </PieceSlot>
   );
 });
 
@@ -128,27 +257,48 @@ const PhotoImage = ({ media, style, onPress, failed }) =>
  * where the Hub will serve a 7 KB rendition -- and the person opening the photograph
  * properly gets the display copy, because the viewer picks its own source.
  */
-const PhotoBlock = memo(({ photos, onPhotoPress }) => {
+const PhotoBlock = memo(({ photos, onPhotoPress, badges, highlighted, onPieceLayout }) => {
+  const { onBlockLayout, onTileLayout } = useTileOffsets(onPieceLayout);
+
   if (!photos || photos.length === 0) return null;
 
   const PHOTO_HEIGHT = 200;
   const GRID_GAP = 4;
-  
+
+  // Each tile is its own piece on the map, so each carries its own number (FR-023). `slotFor`
+  // gives one tile the badge, the ring and the measurement; the four grids below are otherwise
+  // exactly as they were, so the card lays out as it does today (FR-021).
+  //
+  // The tiles themselves are deliberately **not** collapsed into one shared `<PhotoImage>`:
+  // `uploadFailedTile.test.js` and `derivativeSurfaces.test.js` both read this file and hold
+  // every one of the five tile sites to passing `failed={…uploadFailed…}` and `media={…}`, so
+  // that no layout can grow a tile that forgets either. Five copies is the price of that guard.
+  const slotFor = (index) => {
+    const badge = badges?.[index] || null;
+    return {
+      badge,
+      highlighted: !!badge && !!highlighted?.has(badge.number),
+      onMeasure: onTileLayout,
+    };
+  };
 
   const renderSinglePhoto = () => (
-    <PhotoImage 
-      media={photos[0]}
-      failed={photos[0]?.uploadFailed || photos[0]?.missingFile}
-      style={{ height: PHOTO_HEIGHT }}
-      onPress={() => onPhotoPress?.(photos, 0)}
-    />
+    <PieceSlot {...slotFor(0)}>
+      <PhotoImage
+        media={photos[0]}
+        failed={photos[0]?.uploadFailed || photos[0]?.missingFile}
+        style={{ height: PHOTO_HEIGHT }}
+        onPress={() => onPhotoPress?.(photos, 0)}
+      />
+    </PieceSlot>
   );
 
   const renderTwoPhotos = () => (
     <View style={styles.photoRow}>
       {photos.slice(0, 2).map((photo, index) => (
-        <View 
+        <PieceSlot
           key={photo.localId || photo.id || index}
+          {...slotFor(index)}
           style={{ flex: 1, marginLeft: index > 0 ? GRID_GAP : 0 }}
         >
           <PhotoImage
@@ -157,25 +307,26 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
             style={{ height: PHOTO_HEIGHT }}
             onPress={() => onPhotoPress?.(photos, index)}
           />
-        </View>
+        </PieceSlot>
       ))}
     </View>
   );
 
   const renderThreePhotos = () => (
     <View style={styles.photoRow}>
-      <View style={{ flex: 2 }}>
+      <PieceSlot {...slotFor(0)} style={{ flex: 2 }}>
         <PhotoImage
           media={photos[0]}
           failed={photos[0]?.uploadFailed || photos[0]?.missingFile}
           style={{ height: PHOTO_HEIGHT }}
           onPress={() => onPhotoPress?.(photos, 0)}
         />
-      </View>
+      </PieceSlot>
       <View style={{ flex: 1, marginLeft: GRID_GAP }}>
         {photos.slice(1, 3).map((photo, index) => (
-          <View 
+          <PieceSlot
             key={photo.localId || photo.id || index}
+            {...slotFor(index + 1)}
             style={{ marginTop: index > 0 ? GRID_GAP : 0, flex: 1 }}
           >
             <PhotoImage
@@ -184,7 +335,7 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
               style={{ height: (PHOTO_HEIGHT - GRID_GAP) / 2 }}
               onPress={() => onPhotoPress?.(photos, index + 1)}
             />
-          </View>
+          </PieceSlot>
         ))}
       </View>
     </View>
@@ -193,8 +344,9 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
   const renderFourPlusPhotos = () => (
     <View style={styles.photoGrid}>
       {photos.slice(0, 4).map((photo, index) => (
-        <View 
+        <PieceSlot
           key={photo.localId || photo.id || index}
+          {...slotFor(index)}
           style={styles.gridPhotoContainer}
         >
           <PhotoImage
@@ -208,13 +360,13 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
               <Text style={styles.moreText}>+{photos.length - 4}</Text>
             </View>
           )}
-        </View>
+        </PieceSlot>
       ))}
     </View>
   );
 
   return (
-    <View style={styles.mediaBlock}>
+    <View style={styles.mediaBlock} onLayout={onBlockLayout}>
       {photos.length === 1 && renderSinglePhoto()}
       {photos.length === 2 && renderTwoPhotos()}
       {photos.length === 3 && renderThreePhotos()}
@@ -226,28 +378,39 @@ const PhotoBlock = memo(({ photos, onPhotoPress }) => {
 /**
  * Video block - displays video thumbnails
  */
-const VideoBlock = memo(({ videos, onVideoPress }) => {
+const VideoBlock = memo(({ videos, onVideoPress, badges, highlighted, onPieceLayout }) => {
+  const { onBlockLayout, onTileLayout } = useTileOffsets(onPieceLayout);
+
   if (!videos || videos.length === 0) return null;
 
   return (
-    <View style={styles.mediaBlock}>
+    <View style={styles.mediaBlock} onLayout={onBlockLayout}>
       <View style={styles.videoGrid}>
-        {videos.slice(0, 4).map((video, index) => (
-          <View key={video.localId || video.id || index} style={styles.videoContainer}>
-            <VideoThumbnail
-              media={video}
-              duration={video.duration}
-              width={videos.length === 1 ? CONTENT_WIDTH - 32 : (CONTENT_WIDTH - 36) / 2}
-              height={videos.length === 1 ? 200 : 100}
-              onPress={() => onVideoPress?.(videos, index)}
-            />
-            {index === 3 && videos.length > 4 && (
-              <View style={styles.moreOverlay}>
-                <Text style={styles.moreText}>+{videos.length - 4}</Text>
-              </View>
-            )}
-          </View>
-        ))}
+        {videos.slice(0, 4).map((video, index) => {
+          const badge = badges?.[index] || null;
+          return (
+            <PieceSlot
+              key={video.localId || video.id || index}
+              style={styles.videoContainer}
+              badge={badge}
+              highlighted={!!badge && !!highlighted?.has(badge.number)}
+              onMeasure={onTileLayout}
+            >
+              <VideoThumbnail
+                media={video}
+                duration={video.duration}
+                width={videos.length === 1 ? CONTENT_WIDTH - 32 : (CONTENT_WIDTH - 36) / 2}
+                height={videos.length === 1 ? 200 : 100}
+                onPress={() => onVideoPress?.(videos, index)}
+              />
+              {index === 3 && videos.length > 4 && (
+                <View style={styles.moreOverlay}>
+                  <Text style={styles.moreText}>+{videos.length - 4}</Text>
+                </View>
+              )}
+            </PieceSlot>
+          );
+        })}
       </View>
     </View>
   );
@@ -256,11 +419,18 @@ const VideoBlock = memo(({ videos, onVideoPress }) => {
 /**
  * Audio block - displays audio player
  */
-const AudioBlock = memo(({ audio, primaryColor }) => {
+const AudioBlock = memo(({ audio, primaryColor, badge, highlighted, onMeasure }) => {
   if (!audio) return null;
 
   return (
-    <View style={styles.audioBlock}>
+    <PieceSlot
+      style={styles.audioBlock}
+      badge={badge}
+      highlighted={highlighted}
+      onMeasure={onMeasure}
+      badgeAbove
+      badgeStyle={styles.pieceBadgeInline}
+    >
       <View style={styles.audioWrapper}>
         <View style={styles.audioIcon}>
           <Ionicons name="mic" size={18} color="#FFF" />
@@ -278,7 +448,7 @@ const AudioBlock = memo(({ audio, primaryColor }) => {
           </Text>
         )}
       </View>
-    </View>
+    </PieceSlot>
   );
 });
 
@@ -330,6 +500,15 @@ export const JournalEntryCard = memo(({
   primaryColor = '#007AFF',
   showSyncStatus = true,
   showEngagement = true,  // Show reactions/comments section
+  // Whether the list this card is in reports it as on screen. **True by default**, and
+  // deliberately: `PersonJournalScreen` and `FamilySummaryScreen` render this card and know
+  // nothing about viewability, so a default of false would take the map off both of them
+  // silently (round-2 M10, research R10 *Lazy rendering*).
+  isVisible = true,
+  // Where to bring a piece into view, when a pin is pressed: the piece's offset from the top
+  // of this card. Only a list can scroll, so the card reports and `JournalScreen` scrolls
+  // (FR-025, T052). A screen that cannot scroll passes nothing, and a press still highlights.
+  onRequestScrollTo,
   style,
 }) => {
   // Determine if this is the current user's entry
@@ -374,51 +553,160 @@ export const JournalEntryCard = memo(({
     onReshare?.(entry, visibility);
   }, [entry, onReshare]);
 
+  // ---------------------------------------------------------------------------------------
+  // The numbers on the pieces, and the map under them (FR-022 to FR-025)
+  // ---------------------------------------------------------------------------------------
+
+  /**
+   * The badge each placed piece wears, by where it came from. `entry.serverUpdatedAt` is the
+   * server's own record of the memory's last save, spelled the same way on both routes --
+   * `DatabaseService._mapEntryRow` for the viewer's own memories and `SocialService.adaptEntry`
+   * for anybody else's -- so the same memory is numbered identically on two phones (SC-007).
+   *
+   * `MemoryRouteMap` below is handed the same two inputs rather than these badges, because
+   * `toNumberedPieces` is pure and cheap and giving the map the entry means a caller cannot
+   * hand it groups that disagree with the badges (T048's second decision).
+   */
+  const badges = useMemo(() => {
+    const byPiece = new Map();
+    toNumberedPieces(entry, entry.serverUpdatedAt).pieces.forEach((piece) => {
+      // A piece with no place carries no number, and a memory with no places carries none at
+      // all, so its card looks exactly as it does today (FR-023, SC-008).
+      if (piece.number == null) return;
+      byPiece.set(pieceKey(piece.blockIndex, piece.mediaIndex), {
+        number: piece.number,
+        kind: piece.kind,
+      });
+    });
+    return byPiece;
+  }, [entry]);
+
+  const hasPlaces = badges.size > 0;
+
+  /** The badges of one media block's items, aligned with its `media` array. */
+  const mediaBadges = (blockIndex, media) =>
+    (media || []).map((_, mediaIndex) => badges.get(pieceKey(blockIndex, mediaIndex)) || null);
+
+  /**
+   * Where each numbered piece sits: the piece list's offset in the card, and each piece's
+   * offset in that list. Held in a ref rather than in state because nothing on screen depends
+   * on it -- it is read once, when a pin is pressed -- and a measurement in state would
+   * re-render every card in the Journal as the list laid itself out.
+   *
+   * `content` starts as null, meaning not measured yet. A pin pressed before the card has been
+   * laid out reports no offset at all rather than a partial sum: scrolling the Journal to a
+   * guessed position moves the memory away from the person who just pressed a pin on it.
+   */
+  const offsets = useRef({ content: null, pieces: new Map() });
+
+  const onContentLayout = useCallback((event) => {
+    offsets.current.content = event.nativeEvent.layout.y;
+  }, []);
+
+  const onPieceLayout = useCallback((number, y) => {
+    offsets.current.pieces.set(number, y);
+  }, []);
+
+  /** The pieces a pressed pin is pointing at, for a second and a half (FR-025). */
+  const [highlighted, setHighlighted] = useState(null);
+  const highlightTimer = useRef(null);
+
+  // The timer outlives nothing: a card scrolled out of the Journal while a piece is lit would
+  // otherwise set state on an unmounted component a second later.
+  useEffect(
+    () => () => {
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * A pin was pressed. A merged marker hands up every number it holds, so all of them light up
+   * and the first is the one brought into view (FR-025, round-2 M1).
+   */
+  const handlePinPress = useCallback(
+    (numbers) => {
+      if (!numbers || numbers.length === 0) return;
+
+      setHighlighted(new Set(numbers));
+      // Restarted rather than extended, so the piece pressed second gets its own second and a
+      // half and the piece pressed first goes out at once.
+      if (highlightTimer.current) clearTimeout(highlightTimer.current);
+      highlightTimer.current = setTimeout(() => {
+        highlightTimer.current = null;
+        setHighlighted(null);
+      }, PIECE_HIGHLIGHT_MS);
+
+      const { content, pieces } = offsets.current;
+      const y = pieces.get(numbers[0]);
+      if (content !== null && y !== undefined) onRequestScrollTo?.(content + y);
+    },
+    [onRequestScrollTo],
+  );
+
   /**
    * Render a single content block based on its type
    */
   const renderContentBlock = (block, index) => {
     const isFirst = index === 0;
-    
+    const blockBadge = badges.get(pieceKey(index, null)) || null;
+    const isLit = (badge) => !!badge && !!highlighted?.has(badge.number);
+
     switch (block.type) {
       case 'text':
         return (
-          <TextBlock 
-            key={`text-${index}`} 
-            content={block.content} 
+          <TextBlock
+            key={`text-${index}`}
+            content={block.content}
             isFirst={isFirst}
+            badge={blockBadge}
+            highlighted={isLit(blockBadge)}
+            onMeasure={onPieceLayout}
           />
         );
-      
+
       case 'photos':
         return (
-          <PhotoBlock 
-            key={`photos-${index}`} 
-            photos={block.media} 
+          <PhotoBlock
+            key={`photos-${index}`}
+            photos={block.media}
             onPhotoPress={onPhotoPress}
+            badges={mediaBadges(index, block.media)}
+            highlighted={highlighted}
+            onPieceLayout={onPieceLayout}
           />
         );
-      
+
       case 'video':
         return (
-          <VideoBlock 
-            key={`video-${index}`} 
-            videos={block.media} 
+          <VideoBlock
+            key={`video-${index}`}
+            videos={block.media}
             onVideoPress={onVideoPress}
+            badges={mediaBadges(index, block.media)}
+            highlighted={highlighted}
+            onPieceLayout={onPieceLayout}
           />
         );
-      
+
       case 'audio':
         // Handle both single audio and array of audio
         const audioItems = Array.isArray(block.media) ? block.media : [block.media];
-        return audioItems.map((audio, audioIndex) => (
-          <AudioBlock 
-            key={`audio-${index}-${audioIndex}`} 
-            audio={audio} 
-            primaryColor={primaryColor}
-          />
-        ));
-      
+        return audioItems.map((audio, audioIndex) => {
+          const badge = badges.get(pieceKey(index, audioIndex)) || null;
+          return (
+            <AudioBlock
+              key={`audio-${index}-${audioIndex}`}
+              audio={audio}
+              primaryColor={primaryColor}
+              badge={badge}
+              highlighted={isLit(badge)}
+              // A voice clip's own view is its block, so it reports straight to the card.
+              onMeasure={onPieceLayout}
+            />
+          );
+        });
+
       default:
         return null;
     }
@@ -519,9 +807,34 @@ export const JournalEntryCard = memo(({
       )}
 
       {/* Content Blocks - Rendered in sequence (threaded) */}
-      <View style={styles.contentContainer}>
+      <View testID="memory-pieces" style={styles.contentContainer} onLayout={onContentLayout}>
         {entry.contentBlocks?.map((block, index) => renderContentBlock(block, index))}
       </View>
+
+      {/* "Where this happened", under the pieces and above the reactions (FR-022).
+
+          Nothing is rendered when no piece has a place -- not the map, and not the placeholder
+          either: an old text memory would otherwise reserve the map's height under every one
+          of them (SC-008).
+
+          **Mounted only while the card is on screen** (research R10 *Lazy rendering*). A map
+          costs a native view per card, and the Journal is a list of them, so an off-screen
+          card holds the height open with a plain view instead. That is a performance
+          requirement rather than an optimisation: the height is `MemoryRouteMap`'s own export,
+          so the two cannot drift and a card does not jump as it scrolls into view. */}
+      {hasPlaces && (
+        <View style={styles.mapSlot}>
+          {isVisible ? (
+            <MemoryRouteMap
+              entry={entry}
+              serverUpdatedAt={entry.serverUpdatedAt}
+              onPinPress={handlePinPress}
+            />
+          ) : (
+            <View testID="memory-route-map-placeholder" style={styles.mapPlaceholder} />
+          )}
+        </View>
+      )}
 
       {/* Engagement Section - Reactions & Responses */}
       {showEngagement && (
@@ -653,6 +966,53 @@ const styles = StyleSheet.create({
   // Engagement section
   engagementContainer: {
     paddingHorizontal: CARD_PADDING,
+  },
+
+  // The map slot, and the number badges on the pieces (FR-022 to FR-025)
+  mapSlot: {
+    paddingHorizontal: CARD_PADDING,
+  },
+  // The height `MemoryRouteMap` reserves for the map itself, held open while the card is off
+  // screen. Its `marginTop` is the map container's, so the pieces above sit where they will.
+  mapPlaceholder: {
+    height: MEMORY_ROUTE_MAP_HEIGHT,
+    marginTop: 12,
+    borderRadius: 12,
+    backgroundColor: '#E8EEFF',
+  },
+  pieceBadge: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    minWidth: 22,
+    height: 22,
+    paddingHorizontal: 5,
+    borderRadius: 11,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFF',
+  },
+  // A note's and a voice clip's badge, above the piece rather than over it.
+  pieceBadgeInline: {
+    position: 'relative',
+    top: 0,
+    left: 0,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+  },
+  pieceBadgeText: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  // Laid over the piece, so lighting one reflows nothing under the reader's thumb.
+  pieceHighlight: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: HIGHLIGHT_COLOUR,
+    backgroundColor: 'rgba(67, 97, 238, 0.10)',
   },
 
   // Text blocks
