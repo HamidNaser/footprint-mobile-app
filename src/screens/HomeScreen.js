@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -25,10 +25,30 @@ export default function HomeScreen({ navigation }) {
   // Retried quietly on focus, not with a button: FR-034 asks for a *quiet* line, and a visible
   // "Try again" is a control the contract does not ask for. Only retried when there is an
   // error to recover from -- an ordinary tab switch must not refetch on every visit.
+  //
+  // Fix round 2, Critical: `upcomingError` must NOT sit in the focus callback's own dependency
+  // array. `useUpcomingEvents.refresh()` sets a *new* `error` object on every failed load, even
+  // for an identical repeated failure -- and React Navigation's `useFocusEffect`
+  // (`@react-navigation/core/useFocusEffect.tsx`) re-invokes its callback immediately, without
+  // a real focus/blur transition, whenever the callback's own identity changes while the screen
+  // is already focused. Depending on `upcomingError` directly made the callback's identity
+  // change on every failure, which retried immediately, which failed again, unbounded -- a
+  // retry storm against the network on the app's landing screen, worst during exactly the
+  // outage this retry exists to recover from. `PlacesScreen.js`'s own `useFocusEffect` avoids
+  // this by depending only on a stable callback, never on error/result state; matched here as
+  // closely as the extra "only when there is an error" condition allows -- by reading the
+  // latest error through a ref (kept current by a plain effect) instead of through the
+  // callback's closure, so the focus callback's identity depends only on the already-stable
+  // `refreshUpcomingEvents`.
+  const upcomingErrorRef = useRef(upcomingError);
+  useEffect(() => {
+    upcomingErrorRef.current = upcomingError;
+  }, [upcomingError]);
+
   useFocusEffect(
     useCallback(() => {
-      if (upcomingError) refreshUpcomingEvents();
-    }, [upcomingError, refreshUpcomingEvents])
+      if (upcomingErrorRef.current) refreshUpcomingEvents();
+    }, [refreshUpcomingEvents])
   );
 
   return (

@@ -251,6 +251,42 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
 
       expect(refresh).not.toHaveBeenCalled();
     });
+
+    // Fix round 2, Critical: `useUpcomingEvents.refresh()` sets a *new* `error` object on
+    // every failed load, even an identical repeated failure (`setError({ ... })`,
+    // `useUpcomingEvents.js:156`, is a fresh object every time). React Navigation's real
+    // `useFocusEffect` (mocked above the same way) re-invokes its callback immediately --
+    // with no focus/blur transition at all -- whenever the callback's own identity changes
+    // while the screen is already focused. A focus callback whose `useCallback` deps include
+    // `upcomingError` directly therefore gets a new identity on every failure and retries
+    // immediately, which fails again, unbounded: a retry storm against the network, worst
+    // during the outage this retry exists to recover from.
+    //
+    // This case reproduces the *trigger* deterministically and safely -- one explicit
+    // `tree.update()` with a brand-new (but still truthy) `error` object and the same
+    // `refresh` reference, no tab switch -- rather than letting a real implementation's own
+    // `setState` cascade run inside the test, which could hang or recurse without bound
+    // against a genuinely broken implementation. `refresh` here is an inert `jest.fn()`, so
+    // even the buggy code path can only call it one extra time from this one forced
+    // re-render, never more -- enough to prove the trigger exists without needing to run the
+    // loop itself.
+    it('a mid-focus re-render with a new (but still truthy) error object does not call refresh again', async () => {
+      const refresh = jest.fn();
+      const navigation = { navigate: jest.fn() };
+      mockUpcoming({ error: { message: 'Network request failed' }, refresh });
+      const tree = await mount({ navigation });
+
+      refresh.mockClear();
+      // Same `refresh` function, a brand-new `error` object -- no focus/blur event, just
+      // HomeScreen re-rendering with a changed value from the hook, the same shape a repeated
+      // identical failure produces.
+      await act(async () => {
+        mockUpcoming({ error: { message: 'Network request failed' }, refresh });
+        tree.update(<HomeScreen navigation={navigation} />);
+      });
+
+      expect(refresh).not.toHaveBeenCalled();
+    });
   });
 
   // Minor 2 (fix round 1): `shows()` is order-blind, so a card that silently reversed its two
