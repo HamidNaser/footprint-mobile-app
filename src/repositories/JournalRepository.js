@@ -354,13 +354,25 @@ class JournalRepositoryClass extends BaseRepository {
 
     const updated = await this.getByLocalId(localId);
 
-    // Queue the update for push (only meaningful once the entry has a serverId).
-    await this._enqueueSync(
-      SyncOperationType.UPDATE_ENTRY,
-      localId,
-      { ...updated, local_id: localId },
-      entry.serverId || null,
-    );
+    // Queue the update for push -- but only for a memory the server already holds.
+    //
+    // Without a server id there is nothing there to update, and an UPDATE_ENTRY carrying none
+    // is worse than useless: `UpdateSyncEntry.ServerId` is a required string, so a batch
+    // containing one is most likely refused whole with 400, taking the memories that were fine
+    // down with it, and the single-operation path drops it as completed
+    // (`SyncEngine.js:1062-1071`). What carries the change instead is the memory's own pending
+    // CREATE, which the push re-reads the row for rather than sending its queued snapshot --
+    // or, for a memory whose share the server refused for good and whose create was therefore
+    // removed, the next `JournalService.reshareEntry`. This applies to every edit of a
+    // not-yet-uploaded memory, not only a refused one (research R15, analyze round-4 U1).
+    if (entry.serverId) {
+      await this._enqueueSync(
+        SyncOperationType.UPDATE_ENTRY,
+        localId,
+        { ...updated, local_id: localId },
+        entry.serverId,
+      );
+    }
 
     return updated;
   }

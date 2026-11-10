@@ -566,7 +566,29 @@ class JournalServiceClass {
    * @returns {Promise<object>} Updated entry
    */
   async updateEntry(localId, updates) {
-    const updatedEntry = await this.repository.update(localId, updates);
+    // Copy anything captured during the edit out of the OS cache -- and out of the draft
+    // folder, which is deleted the moment this resolves (`CaptureDraftStore`, FR-016) --
+    // before the entry references it. Exactly what `createEntry` does, and for the same
+    // reason: an entry pointing at a file that has since been removed renders as a grey
+    // placeholder. This path only queued uploads before, so the edit door led straight past
+    // it (research R7).
+    //
+    // Media the server already holds is left alone: a piece loaded back by an edit carries
+    // `{id, url}` and no `localPath`, which `_persistMediaBlocks` skips and
+    // `_queueMediaBlockForUpload` skips, so it is neither copied nor uploaded a second time.
+    // That matters beyond the wasted upload -- a second copy takes a new media id, and the
+    // server carries a piece's capture moment across an edit by matching on that id and then
+    // on its url, so re-uploading would lose the original moment of a piece nobody touched
+    // (FR-019, research R3).
+    //
+    // Only when the edit actually carries pieces. An update that changes something else, an
+    // audience say, must pass `contentBlocks` through untouched: `_persistMediaBlocks`
+    // answers `[]` for a missing block list, and storing that would empty the memory.
+    const persisted = Array.isArray(updates?.contentBlocks)
+      ? { ...updates, contentBlocks: await this._persistMediaBlocks(updates.contentBlocks) }
+      : updates;
+
+    const updatedEntry = await this.repository.update(localId, persisted);
 
     // Queue any new media for upload
     if (updates.contentBlocks) {

@@ -11,10 +11,18 @@ jest.mock('../DatabaseService', () => {
   // Writes land in the same fake rows the repository mock below holds, so a test can read
   // back what was stored rather than only what was asked for.
   const repository = require('../../repositories/JournalRepository');
+  // The media upload queue, as a store rather than a spy. `_queueMediaForUpload` writes rows
+  // here, so "only the new photo was queued" is read off the queue's whole contents -- a
+  // one-row array that any extra row fails -- rather than off a call that did not happen.
+  const mediaQueue = [];
   return {
     DatabaseService: {
       updateEntry: jest.fn(async (localId, updates) => repository.__write(localId, updates)),
+      queueMedia: jest.fn(async (media) => {
+        mediaQueue.push(media);
+      }),
     },
+    __mediaQueue: mediaQueue,
   };
 });
 jest.mock('../SettingsService', () => ({
@@ -102,7 +110,13 @@ jest.mock('../../repositories/JournalRepository', () => {
   };
 });
 jest.mock('../FileService', () => ({
-  FileService: { persist: jest.fn(), isPersisted: jest.fn() },
+  FileService: {
+    persist: jest.fn(),
+    isPersisted: jest.fn(),
+    // Every captured file is there and has a size, so the upload queue's own
+    // "file not found" branch -- and its warning -- stays out of these tests.
+    getFileInfo: jest.fn(async () => ({ size: 2048 })),
+  },
   MediaType: { IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio' },
 }));
 // The real `SyncQueue` module, for its real `SyncOperationType` tokens -- a restated copy
@@ -130,12 +144,15 @@ import { JournalService, ContentBlock } from '../JournalService';
 import { FileService, MediaType } from '../FileService';
 import { ContentBlockType, ShareState } from '../../database/schema';
 import { JournalRepository, __rows } from '../../repositories/JournalRepository';
+import { __mediaQueue } from '../DatabaseService';
 import { SyncQueue, SyncOperationType } from '../../sync/SyncQueue';
 import { SyncEngine } from '../../sync/SyncEngine';
 
 beforeEach(() => {
   jest.clearAllMocks();
   __rows.clear();
+  // A store, not a mock, so `clearAllMocks` does not empty it.
+  __mediaQueue.length = 0;
   // Cloud sync on, unless a test says otherwise. Re-set rather than cleared: `clearAllMocks`
   // forgets calls, not implementations, so a test that switches storage to Local Only would
   // otherwise leak that into every test after it.
@@ -265,6 +282,152 @@ describe('_persistMediaBlocks', () => {
 
   it('returns an empty array for a missing block list', async () => {
     expect(await JournalService._persistMediaBlocks(undefined)).toEqual([]);
+  });
+});
+
+/**
+ * 013 T055 — `JournalService.updateEntry`, the save at the end of an edit (FR-018, FR-019,
+ * SC-005; research R7 *Edit-mode media durability*, quickstart M13).
+ *
+ * An edit's media is of two kinds and they are not treated the same:
+ *
+ *   - a **new** piece is a file captured during the edit. It lives in the draft folder, which
+ *     is deleted the moment this resolves (`CaptureDraftStore`, FR-016), or in the OS cache,
+ *     which is purged without warning. Until T056 `updateEntry` only queued uploads and never
+ *     called `_persistMediaBlocks`, so an edit stored a path to a file about to be removed --
+ *     the grey-placeholder defect `createEntry` already fixes, reached through the edit door
+ *     instead (R7).
+ *   - a **remote** piece is already on the server, referenced by its `{id, url}` and carrying
+ *     no `localPath` (`journalBlocks.mediaItemFor`). Nothing may copy it -- the phone may not
+ *     hold the file at all -- and nothing may upload it again: a second copy would take a new
+ *     media id, and the server carries a piece's capture moment across an edit by matching on
+ *     that id and then on its url (research R3). Re-uploading therefore loses the original
+ *     moment and place of a piece the person never touched, which is exactly what FR-019 and
+ *     SC-005 forbid.
+ *
+ * Both of the negative claims here are read off a store rather than off a mock call: the
+ * entry's stored blocks say what was written, and `__mediaQueue` holds every row the upload
+ * queue received, asserted whole.
+ */
+describe('updateEntry', () => {
+  // A piece loaded back by an edit: the server's id and url, no local file.
+  const REMOTE = {
+    localId: 'piece-1',
+    id: 'media-srv-1',
+    url: 'https://cdn.example/quay.jpg',
+    capturedAt: '2026-11-01T09:12:00.000Z',
+    location: { lat: 53.3453, lng: -6.2603 },
+    width: 3024,
+    height: 4032,
+  };
+
+  // The same values in a separate object, copied before any test runs. "Untouched" is asserted
+  // against this rather than against REMOTE itself: an implementation that mutated the piece in
+  // place would change REMOTE too, and comparing a mutated object with itself passes.
+  const REMOTE_AS_SAVED = JSON.parse(JSON.stringify(REMOTE));
+
+  // A photo taken during the edit: a cache path, no server id.
+  const newPhoto = (n = 1) => ({
+    localId: `piece-new-${n}`,
+    localPath: `file:///cache/new-${n}.jpg`,
+    capturedAt: `2026-11-08T18:${String(n).padStart(2, '0')}:00.000Z`,
+    location: { lat: 53.3491, lng: -6.2601 },
+  });
+
+  const SEEDED_BLOCKS = [{ type: 'photos', media: [REMOTE] }];
+
+  const seedEntry = (overrides = {}) => {
+    const entry = {
+      localId: 'local-1',
+      journalId: 'journal-1',
+      userId: 'user-1',
+      serverId: 'server-1',
+      date: '2026-11-01',
+      visibility: 'family',
+      locationSharing: 'private',
+      syncStatus: 'synced',
+      shareState: null,
+      contentBlocks: SEEDED_BLOCKS,
+      ...overrides,
+    };
+    __rows.set(entry.localId, entry);
+    return entry;
+  };
+
+  const stored = () => __rows.get('local-1');
+  const storedMedia = () => stored().contentBlocks[0].media;
+
+  const edit = (media) =>
+    JournalService.updateEntry('local-1', { contentBlocks: [{ type: 'photos', media }] });
+
+  it('copies the new photo out of the cache and leaves the remote piece exactly as it was', async () => {
+    seedEntry();
+
+    await edit([REMOTE, newPhoto()]);
+
+    // One copy, for the one file that needs one.
+    expect(FileService.persist).toHaveBeenCalledTimes(1);
+    expect(FileService.persist).toHaveBeenCalledWith('file:///cache/new-1.jpg', MediaType.IMAGE);
+    // Read back from the stored row: the remote piece is byte-for-byte what it was -- its
+    // server id, its url, and the capture moment and place FR-019 preserves -- and it has not
+    // acquired a local path it would be uploaded from.
+    expect(storedMedia()[0]).toEqual(REMOTE_AS_SAVED);
+    // The new capture is stored at its durable path, not the cache path it arrived with.
+    expect(storedMedia()[1].localPath).toBe('file:///docs/media/new-1.jpg');
+    expect(storedMedia()[1].capturedAt).toBe('2026-11-08T18:01:00.000Z');
+  });
+
+  it('queues only the new photo for upload, never the piece the server already holds', async () => {
+    seedEntry();
+
+    await edit([REMOTE, newPhoto()]);
+
+    // The queue's whole contents. One row, for the new capture, at its durable path -- which
+    // also pins the order: the copy happens before the queueing, so the upload reads the file
+    // that survives rather than the cache path that may already be gone.
+    expect(__mediaQueue).toEqual([
+      expect.objectContaining({
+        entryLocalId: 'local-1',
+        filePath: 'file:///docs/media/new-1.jpg',
+        mediaType: MediaType.IMAGE,
+      }),
+    ]);
+  });
+
+  it('leaves the pieces alone when the edit changes something else (an audience, say)', async () => {
+    // `updates` with no `contentBlocks` is not an empty entry. Treating a missing block list
+    // as one -- `_persistMediaBlocks(undefined)` answers `[]` -- would store no pieces at all
+    // and delete the memory's contents on a change of audience.
+    seedEntry();
+
+    await JournalService.updateEntry('local-1', { visibility: 'friends' });
+
+    expect(stored().visibility).toBe('friends');
+    expect(stored().contentBlocks).toEqual([{ type: 'photos', media: [REMOTE_AS_SAVED] }]);
+    expect(FileService.persist).not.toHaveBeenCalled();
+    expect(__mediaQueue).toEqual([]);
+  });
+
+  it('leaves one memory after ten edits, the untouched piece still its own (SC-005)', async () => {
+    seedEntry();
+    let media = [REMOTE];
+
+    for (let n = 1; n <= 10; n += 1) {
+      await edit([...media, newPhoto(n)]);
+      // The next edit starts from what was stored, as reopening the screen does.
+      media = storedMedia();
+    }
+
+    expect(__rows.size).toBe(1);
+    expect(storedMedia()).toHaveLength(11);
+    // Ten edits later, the piece nobody touched still carries the server's id and url and its
+    // original moment and place.
+    expect(storedMedia()[0]).toEqual(REMOTE_AS_SAVED);
+    // Every file the upload queue was ever given, as a set: the ten new captures and nothing
+    // else. The remote piece has no local file and is never queued, in any round.
+    expect(new Set(__mediaQueue.map((row) => row.filePath))).toEqual(
+      new Set(Array.from({ length: 10 }, (_, i) => `file:///docs/media/new-${i + 1}.jpg`)),
+    );
   });
 });
 
