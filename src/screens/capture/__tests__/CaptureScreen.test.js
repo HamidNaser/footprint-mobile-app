@@ -500,6 +500,10 @@ import CaptureDraftStore from '../../../services/CaptureDraftStore';
 import { JournalService } from '../../../services/JournalService';
 import { SyncQueue } from '../../../sync/SyncQueue';
 import CaptureLocation from '../../../services/CaptureLocation';
+// The real ones, deliberately: these are the functions the tiles, the gallery and the players
+// ask for a source with, so an edit's output is judged by them rather than by a copy of their
+// rules (fix round 1, Critical 2).
+import { thumbnailSource, fullSizeSource, videoSource } from '../../../utils/mediaSource';
 import * as captureLocationModule from '../../../services/CaptureLocation';
 import * as journalHook from '../../../hooks/useJournal';
 import * as voiceBar from '../../../components/capture/VoiceRecorderBar';
@@ -2504,13 +2508,18 @@ describe('CaptureScreen: a draft left behind by a save that worked does not come
  *   1. **A second memory.** Save on an edit must update the memory it opened and no other
  *      (FR-018, SC-005). So `createEntry` is asserted *never* called, not merely "called
  *      less".
- *   2. **A re-uploaded piece.** A piece the server already holds comes back as
- *      `remote: {id, url}` with **no local path**, because a second upload takes a new media
- *      id -- and the server carries a piece's capture moment across an edit by matching on
- *      that id and then on its url, so re-uploading loses the moment and the place of a piece
- *      nobody touched (FR-019, research R3/R7). One field is all it would take, so the cases
- *      below assert the *absence* of `localPath` and `uri` on the piece, in the draft, and on
- *      the block that reaches `updateEntry`.
+ *   2. **A re-uploaded piece.** A piece the server already holds comes back carrying
+ *      `remote: {id, url}` and **no `uri` of its own**, because a second upload takes a new
+ *      media id -- and the server carries a piece's capture moment across an edit by matching
+ *      on that id and then on its url, so re-uploading loses the moment and the place of a
+ *      piece nobody touched (FR-019, research R3/R7). One field is all it would take, so the
+ *      cases below assert the absence of `uri` and `localPath` **on the piece**, and that both
+ *      upload gates decline every media item that reaches `updateEntry`.
+ *   2b. **A piece that can no longer be drawn.** The mirror of 2, and the easier mistake to
+ *      make (fix round 1): reduced to its `{id, url}`, an item loses the thumbnail, the display
+ *      copy and the device copy that every tile reads, and the memory's photographs become grey
+ *      "Preparing photo…" plates -- permanently, offline. So the item is carried back whole,
+ *      and the gates above are what keep that safe.
  *   3. **A draft nobody asked for.** Opening Edit and closing again unchanged must leave
  *      nothing behind: no `edit` slot, and no "Unfinished edit -- continue" on a memory
  *      nobody edited (FR-013, round-2 M5). Asserted against the stand-in store's slots, not
@@ -2525,11 +2534,26 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
   /** A local instant, so the expected `HH:mm` is the same in every timezone. */
   const momentAt = (hour, minute) => new Date(2026, 10, 8, hour, minute).toISOString();
 
-  /** The photograph as the server holds it: an id and a url, and no local file anywhere. */
+  /**
+   * The photograph as an uploaded item really is, every address included.
+   *
+   * This is exactly what `SyncEngine._applyUploadedMediaToEntry` (`:1326-1336`) leaves on an
+   * item once its upload lands: the server's id twice over, the original's url twice over, the
+   * two rendition addresses -- and **the device's own copy**, which it never removes. Each one
+   * is read by something: `thumbnailSource` reads `localPath, thumbnailUrl, thumbnailUri`,
+   * `fullSizeSource` reads `localPath, displayUrl, displayUri`, and the voice pill and the
+   * video player read `localPath || serverUrl`. An edit that drops them is fix round 1's
+   * Critical 2.
+   */
   const REMOTE_PHOTO = {
     localId: 'm-photo',
     id: 'media-1',
+    mediaId: 'media-1',
     url: 'https://media.example/photo-1.jpg',
+    serverUrl: 'https://media.example/photo-1.jpg',
+    thumbnailUrl: 'https://media.example/photo-1-thumb.jpg',
+    displayUrl: 'https://media.example/photo-1-display.jpg',
+    localPath: 'file:///documents/media/photo-1.jpg',
     width: 4032,
     height: 3024,
     capturedAt: momentAt(8, 57),
@@ -2539,9 +2563,32 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
   const REMOTE_CLIP = {
     localId: 'm-clip',
     id: 'media-2',
+    mediaId: 'media-2',
     url: 'https://media.example/clip-1.m4a',
+    serverUrl: 'https://media.example/clip-1.m4a',
+    localPath: 'file:///documents/media/clip-1.m4a',
     capturedAt: momentAt(9, 3),
   };
+
+  /**
+   * The two upload gates, written as the production code writes them, so these cases assert
+   * the **real predicates** rather than the absence of a field that stands in for them:
+   *
+   *   - `JournalService._queueMediaBlockForUpload` (`:884`) — `if (item?.serverUrl || item?.url) continue;`
+   *   - `SyncEngine._isUnuploadedItem` (`:658`) —
+   *     `!!((item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url))`
+   *
+   * Both read a server address as proof the server holds the file, which is why an item may
+   * carry its device copy *and* its server copy without either gate acting on it (fix round 1:
+   * `_queueMediaBlockForUpload` gained the `|| item?.url` half in T055/T056).
+   */
+  const theUploadQueueSkips = (item) => !!(item?.serverUrl || item?.url);
+  const isUnuploadedItem = (item) =>
+    !!((item?.localPath || item?.uri) && !item?.mediaId && !(item?.serverUrl || item?.url));
+
+  /** Every media item of every block, flattened. */
+  const mediaIn = (blocks) =>
+    blocks.flatMap((block) => (Array.isArray(block.media) ? block.media : []));
 
   /**
    * The memory's blocks, in the shapes that really reach SQLite: a photos block, a text block
@@ -2635,9 +2682,12 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
       remote: { id: 'media-2', url: REMOTE_CLIP.url },
     });
 
-    // The one field that would undo all of this. `localPath` is what
-    // `JournalService._queueMediaBlockForUpload` reads, and a `uri` becomes a `localPath` the
-    // moment `buildContentBlocks` sees one, so neither may be on a piece the server holds.
+    // ⚠ The one field that would undo all of this, **on the piece itself**. `piece.uri` is
+    // what `CaptureDraftStore.adoptMedia` copies and what `buildContentBlocks` writes out as
+    // the item's own `localPath` through its *local* branch, so neither may be set on a piece
+    // the server holds. The addresses the memory already had travel in `savedItem` instead,
+    // where no upload path reads them -- see "keeps every address a photograph can still be
+    // read from", which asserts both upload gates decline the item that reaches the entry.
     [photo, clip].forEach((piece) => {
       expect(piece.uri).toBeUndefined();
       expect(piece.localPath).toBeUndefined();
@@ -2654,13 +2704,16 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
     expect(blockOfType(sent, 'photos').media[0]).toEqual(
       expect.objectContaining({ id: 'media-1', url: REMOTE_PHOTO.url }),
     );
-    expect(blockOfType(sent, 'photos').media[0].localPath).toBeUndefined();
     expect(blockOfType(sent, 'audio').media[0]).toEqual(
       expect.objectContaining({ id: 'media-2', url: REMOTE_CLIP.url }),
     );
-    expect(blockOfType(sent, 'audio').media[0].localPath).toBeUndefined();
-    // Nothing anywhere in the memory claims a pending local file for a piece the server has.
-    expect(JSON.stringify(sent)).not.toContain('localPath');
+    // Every media item that reaches the entry here is one the server already holds -- the
+    // piece added in this edit is a note -- and both gates decline every one of them.
+    expect(mediaIn(sent)).toHaveLength(2);
+    mediaIn(sent).forEach((item) => {
+      expect(theUploadQueueSkips(item)).toBe(true);
+      expect(isUnuploadedItem(item)).toBe(false);
+    });
   });
 
   // --------------------------------------------------------
@@ -3123,5 +3176,327 @@ describe('CaptureScreen: editing a saved memory (FR-018)', () => {
     expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
     expect(CaptureDraftStore.__slots().edit).toBeUndefined();
     expect(pressable(tree, 'capture-save-button').props.disabled).toBe(true);
+  });
+
+  // --------------------------------------------------------
+  // Fix round 1 -- the edit slot is not this screen's to delete (Critical 1), the unchanged
+  // edit (Important 4), the addresses a piece is read from (Critical 2, Important 3) and what
+  // else belongs to the memory (Minor 5, 6, 7)
+  // --------------------------------------------------------
+
+  /** An unsaved edit of some *other* memory, sitting in the one `edit` slot there is. */
+  const ANOTHER_MEMORYS_EDIT = [
+    { localId: 'other-1', kind: 'text', content: 'Half an edit of a different memory' },
+    {
+      localId: 'other-2',
+      kind: 'photo',
+      uri: 'file:///documents/capture-drafts/edit/other-2.jpg',
+      capturedAt: momentAt(7, 15),
+    },
+  ];
+
+  /**
+   * Critical 1. `CaptureDraftStore.discard` is not a row delete: `removeHeld` also runs
+   * `FileSystem.deleteAsync(slotDirectory('edit'))`, which takes the whole folder -- every
+   * photograph and clip captured into that slot.
+   *
+   * So: memory A has an unsaved edit (opened Edit, typed, closed -- the state these very cases
+   * create). The person opens Edit on memory B, changes nothing, and taps Discard changes to
+   * back out. The dialog promises "The memory itself stays exactly as it was", and A's unsaved
+   * edit is deleted with all of its media. Nothing of B's is in that slot; this screen never
+   * wrote it. It is the twin of the case `performSave` already guards before `clearAfterSave`.
+   */
+  it('leaves another memory unsaved edit alone when Discard changes is confirmed unchanged', async () => {
+    CaptureDraftStore.__seedEdit('entry-other', ANOTHER_MEMORYS_EDIT);
+
+    const tree = await openEdit();
+    expect(rows(tree)).toEqual(SAVED_ROWS);
+
+    await tap(tree, 'capture-overflow-button');
+    await tap(tree, 'capture-discard-button');
+    const discard = Alert.alert.mock.calls[0][2].find((button) => button.style === 'destructive');
+    await act(async () => {
+      discard.onPress?.();
+    });
+
+    // The other memory's unsaved edit is still there, piece for piece, media and all.
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit).toEqual({
+      id: 'edit',
+      entryLocalId: 'entry-other',
+      pieces: ANOTHER_MEMORYS_EDIT,
+    });
+    // And the person still gets what they asked for: out of here, with nothing changed.
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    expect(updateEntry).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The half of the guard that the slot's own `entryLocalId` cannot cover, and the case that
+   * separates the two.
+   *
+   * The memory is unreadable -- a locked database, not a deleted row -- so the screen shows the
+   * "couldn't open this memory" banner with nothing on it. The `edit` slot meanwhile holds an
+   * unsaved edit **of this very memory**, read before the failure. So "does the slot name this
+   * memory?" says yes, and discarding on the strength of that alone would delete an unsaved
+   * edit the person has not been shown and has had no chance to recover, media and all. What
+   * says no is the other half: this screen never wrote that slot, and nothing it is displaying
+   * came from it.
+   */
+  it('discards nothing when the memory could not be read, though the slot is this memory own', async () => {
+    CaptureDraftStore.__seedEdit(ENTRY_LOCAL_ID, [
+      { localId: 'd-1', kind: 'text', content: 'An unsaved edit the screen never got to show' },
+      {
+        localId: 'd-2',
+        kind: 'photo',
+        uri: 'file:///documents/capture-drafts/edit/d-2.jpg',
+        capturedAt: momentAt(7, 40),
+      },
+    ]);
+    JournalService.getEntry.mockImplementation(async () => {
+      throw new Error('database is locked');
+    });
+
+    const tree = await render({ mode: 'edit', entryLocalId: ENTRY_LOCAL_ID });
+
+    expect(textAt(tree, 'capture-capture-error')).toMatch(/couldn.t open this memory/i);
+    expect(rows(tree)).toHaveLength(0);
+
+    await tap(tree, 'capture-overflow-button');
+    await tap(tree, 'capture-discard-button');
+    const discard = Alert.alert.mock.calls[0][2].find((button) => button.style === 'destructive');
+    await act(async () => {
+      discard.onPress?.();
+    });
+
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit.entryLocalId).toBe(ENTRY_LOCAL_ID);
+    expect(CaptureDraftStore.__slots().edit.pieces).toHaveLength(2);
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The second half of the same guard. Having written the slot is not proof it is still ours:
+   * the slot is a single row, and anything that moves it to another memory between the change
+   * and the Discard leaves this screen holding a stale claim on it. Seeded here by moving the
+   * slot directly, which is what `startEdit` for another memory would do.
+   */
+  it('discards nothing when the edit slot has moved to another memory', async () => {
+    const tree = await openEdit();
+    await type(tree, 'piece-note-input-1', 'Changed, so the slot was ours');
+    expect(CaptureDraftStore.__slots().edit.entryLocalId).toBe(ENTRY_LOCAL_ID);
+
+    CaptureDraftStore.__seedEdit('entry-other', ANOTHER_MEMORYS_EDIT);
+
+    await tap(tree, 'capture-overflow-button');
+    await tap(tree, 'capture-discard-button');
+    const discard = Alert.alert.mock.calls[0][2].find((button) => button.style === 'destructive');
+    await act(async () => {
+      discard.onPress?.();
+    });
+
+    expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit.entryLocalId).toBe('entry-other');
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Important 4, and the twin hazard on the save path: Save on an edit that changed nothing
+   * still saves (FR-010 says it saves straight away), and `clearAfterSave('edit')` would then
+   * let go of a slot this session never wrote -- which is the same deletion as above.
+   *
+   * It is the case the guard at `performSave` exists for, and until now nothing drove it.
+   */
+  it('leaves another memory unsaved edit alone when an unchanged edit is saved', async () => {
+    CaptureDraftStore.__seedEdit('entry-other', ANOTHER_MEMORYS_EDIT);
+
+    const tree = await openEdit();
+    await tap(tree, 'capture-save-button');
+
+    // The memory is saved, exactly as FR-010 asks...
+    expect(updateEntry).toHaveBeenCalledTimes(1);
+    expect(updateEntry.mock.calls[0][0]).toBe(ENTRY_LOCAL_ID);
+    expect(createEntry).not.toHaveBeenCalled();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+    // ...and the slot, which holds somebody else's unsaved edit, is untouched.
+    expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+    expect(CaptureDraftStore.__slots().edit).toEqual({
+      id: 'edit',
+      entryLocalId: 'entry-other',
+      pieces: ANOTHER_MEMORYS_EDIT,
+    });
+  });
+
+  /**
+   * Critical 2. An edit must not cost a photograph the addresses it can be read from.
+   *
+   * Reduced to `{id, url}`, a photo item has no `localPath`, no `thumbnailUrl` and no
+   * `displayUrl`, so `thumbnailSource` and `fullSizeSource` both answer null. The item still
+   * has a media id, so `DatabaseService._normalizeContentBlocks` (`:413-414`) deliberately
+   * leaves `thumbnailUrl` null -- "no thumbnail means none yet" -- and the tile goes to
+   * `useMediaDerivative`'s poller and draws the grey "Preparing photo…" plate. Online that is
+   * a flash; **offline the poller stays quiet and backs off** (`mediaStatusPoller.js:104-107`),
+   * so every photograph in that memory shows the plate indefinitely. And the lost `localPath`
+   * is not recoverable by any pull, so a memory that rendered instantly from the device's own
+   * copy is network-dependent from the edit onward. Opening Edit and pressing Save is enough.
+   *
+   * The real `thumbnailSource` / `fullSizeSource` / `videoSource` are used here, not a copy of
+   * their rules: they are what the tiles call.
+   */
+  it('keeps every address a photograph can still be read from, and queues no upload', async () => {
+    const tree = await openEdit();
+
+    await tap(tree, 'capture-save-button');
+
+    const photo = blockOfType(blocksSent(), 'photos').media[0];
+
+    // What the tiles ask for, through the functions they really ask it with.
+    expect(thumbnailSource(photo)).not.toBeNull();
+    expect(fullSizeSource(photo)).not.toBeNull();
+    // The device's own copy first, so the memory still renders with no signal at all.
+    expect(photo.localPath).toBe(REMOTE_PHOTO.localPath);
+    expect(thumbnailSource(photo)).toBe(REMOTE_PHOTO.localPath);
+    expect(photo).toEqual(
+      expect.objectContaining({
+        id: 'media-1',
+        mediaId: 'media-1',
+        url: REMOTE_PHOTO.url,
+        serverUrl: REMOTE_PHOTO.serverUrl,
+        thumbnailUrl: REMOTE_PHOTO.thumbnailUrl,
+        displayUrl: REMOTE_PHOTO.displayUrl,
+      }),
+    );
+
+    // The clip the card plays reads `localPath || serverUrl`, which is `videoSource`'s rule.
+    const clip = blockOfType(blocksSent(), 'audio').media[0];
+    expect(videoSource(clip)).toBe(REMOTE_CLIP.localPath);
+
+    // ⚠ And carrying the device copy must not make either upload gate act on it. Both read a
+    // server address as proof the server holds the file, so both decline -- which is why the
+    // two signals may now sit on one item at all (T055/T056 gave the queue its `|| item.url`).
+    mediaIn(blocksSent()).forEach((item) => {
+      expect(theUploadQueueSkips(item)).toBe(true);
+      expect(isUnuploadedItem(item)).toBe(false);
+    });
+    expect(SyncQueue.enqueue).not.toHaveBeenCalled();
+    expect(SyncQueue.enqueueBatch).not.toHaveBeenCalled();
+    // Nothing was copied either: media only reaches the draft folder through `addPiece`, and
+    // nothing was captured here.
+    expect(CaptureDraftStore.addPiece).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Important 3. T053/T054 landed two tasks ago to make a clip play (FR-020), and in an edit
+   * every clip the memory already had read "This voice clip is unavailable" with the control
+   * dead -- including clips whose file is still on this phone. `PieceList` hands `VoicePlayer`
+   * the piece's `uri`, and a piece the server holds deliberately has none.
+   *
+   * The real `VoicePlayer` renders here, so the label and the disabled state are its own.
+   */
+  it('keeps an existing voice clip playable while the memory is open for editing', async () => {
+    const tree = await openEdit();
+
+    const toggle = pressable(tree, 'piece-player-2-toggle');
+    expect(toggle).toBeDefined();
+    expect(toggle.props.disabled).toBeFalsy();
+    expect(toggle.props.accessibilityLabel).toBe('Play this voice clip');
+
+    // The piece itself still carries no `uri`: the address it plays from is a display-only
+    // field, so nothing can mistake a loaded piece for something captured here.
+    await type(tree, 'piece-note-input-1', 'Changed, so there is a draft to look inside');
+    const clip = CaptureDraftStore.__slots().edit.pieces[2];
+    expect(clip.uri).toBeUndefined();
+    expect(clip.sourceUri).toBe(REMOTE_CLIP.localPath);
+  });
+
+  /**
+   * Minors 5 and 7. A block's `id` is what `ConflictResolver._mergeContentBlocks` (`:462`,
+   * `:467`) keys on -- `block.id || JSON.stringify(block)` -- so an edited block and its
+   * server twin would key differently and a MERGE resolution would duplicate the memory's
+   * blocks. And a block that is not a piece belongs where the memory had it, not at the end.
+   */
+  it('keeps each block id, and a non-piece block where the memory had it', async () => {
+    const tree = await openEdit({
+      contentBlocks: [
+        { id: 'b0', type: 'location', lat: 51.5074, lng: -0.1278, name: 'Old arcade, Bridge St' },
+        { id: 'b1', type: 'photos', media: [REMOTE_PHOTO], location: ARCADE },
+        { id: 'b9', type: 'something-this-app-has-never-heard-of', note: 'kept, not dropped' },
+        {
+          id: 'b2',
+          type: 'text',
+          content: 'The arcade still smells the same.',
+          capturedAt: momentAt(9, 1),
+          location: ARCADE,
+        },
+      ],
+    });
+
+    await tap(tree, 'capture-save-button');
+
+    const sent = blocksSent();
+    expect(sent.map((block) => block.type)).toEqual([
+      'location',
+      'photos',
+      'something-this-app-has-never-heard-of',
+      'text',
+    ]);
+    expect(sent.map((block) => block.id)).toEqual(['b0', 'b1', 'b9', 'b2']);
+    // The two that are not pieces came back exactly as they were stored.
+    expect(sent[0]).toEqual({
+      id: 'b0',
+      type: 'location',
+      lat: 51.5074,
+      lng: -0.1278,
+      name: 'Old arcade, Bridge St',
+    });
+    expect(sent[2]).toEqual({
+      id: 'b9',
+      type: 'something-this-app-has-never-heard-of',
+      note: 'kept, not dropped',
+    });
+  });
+
+  /**
+   * Minor 6. `SyncEngine._planEntryMedia` (`:710`) flags a photograph whose file has gone, and
+   * the card reads those flags to say "Photo couldn't be uploaded". An edit that dropped them
+   * would leave the card quietly claiming a photograph is fine when it can never upload.
+   */
+  it('keeps the flags on a photograph that never uploaded, and its local path', async () => {
+    const tree = await openEdit({
+      contentBlocks: [
+        {
+          id: 'b1',
+          type: 'photos',
+          media: [
+            {
+              localId: 'm-never-uploaded',
+              localPath: 'file:///documents/media/photo-2.jpg',
+              uploadFailed: true,
+              missingFile: true,
+              width: 3024,
+              height: 4032,
+              capturedAt: momentAt(8, 59),
+            },
+          ],
+        },
+      ],
+    });
+
+    await tap(tree, 'capture-save-button');
+
+    const photo = blockOfType(blocksSent(), 'photos').media[0];
+    expect(photo).toEqual(
+      expect.objectContaining({
+        localPath: 'file:///documents/media/photo-2.jpg',
+        uploadFailed: true,
+        missingFile: true,
+      }),
+    );
+    // It has no server copy, so it is still something the upload path should pick up -- the
+    // opposite of every other case here, and the reason the gates are asserted rather than a
+    // field: this one must stay visible to them.
+    expect(photo.id).toBeUndefined();
+    expect(theUploadQueueSkips(photo)).toBe(false);
+    expect(isUnuploadedItem(photo)).toBe(true);
   });
 });

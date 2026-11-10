@@ -180,12 +180,14 @@ function blocksFromPieces(pieces) {
 
   return assembleInOrder(captures, {
     photos: (run) => ({
+      ...blockIdOf(run[0]),
       type: 'photos',
       location: run[0].location,
       media: run.map(mediaItemFor),
     }),
 
     video: (piece) => ({
+      ...blockIdOf(piece),
       type: 'video',
       location: piece.location,
       media: [mediaItemFor(piece)],
@@ -193,6 +195,7 @@ function blocksFromPieces(pieces) {
     }),
 
     audio: (piece) => ({
+      ...blockIdOf(piece),
       type: 'audio',
       location: piece.location,
       media: [mediaItemFor(piece)],
@@ -205,6 +208,7 @@ function blocksFromPieces(pieces) {
     // saved blank -- the same rule the legacy form holds for blank composer text.
     text: (piece) => (piece.content?.trim()
       ? {
+        ...blockIdOf(piece),
         type: 'text',
         content: piece.content,
         location: piece.location,
@@ -215,24 +219,57 @@ function blocksFromPieces(pieces) {
 }
 
 /**
+ * The id of the block a loaded piece came out of, for the rebuilt block to keep.
+ *
+ * `ConflictResolver._mergeContentBlocks` (`:462`, `:467`) keys a block on
+ * `block.id || JSON.stringify(block)`, so a block that loses its id across an edit keys
+ * differently from its own server twin and a MERGE resolution would hold both -- the memory's
+ * blocks duplicated. Nothing for a newly captured piece, which came out of no block: the key is
+ * then omitted entirely rather than set to undefined, so the shape is exactly what it has
+ * always been for a new memory.
+ */
+function blockIdOf(piece) {
+  return piece?.blockId ? { id: piece.blockId } : {};
+}
+
+/**
  * One media item from one piece.
  *
  * A piece loaded back by an edit is already on the server: it is referenced by its server
- * `id`/`url` and carries **no** `localPath`. Remote media is never copied and never re-uploaded.
+ * `id`/`url`, and it is never copied and never re-uploaded.
  *
- * Two independent things exclude it from being uploaded, and it is worth knowing which:
+ * **It keeps every other address the memory already had, `localPath` included** (013 T057/T058
+ * fix round 1). An uploaded item carries two rendition addresses and the device's own copy as
+ * well as its url, and the tiles read exactly those: `thumbnailSource` reads
+ * `localPath, thumbnailUrl, thumbnailUri` and `fullSizeSource` reads
+ * `localPath, displayUrl, displayUri`. Written back as `{id, url}` alone, a photograph answers
+ * null to both -- and because it still has a media id,
+ * `DatabaseService._normalizeContentBlocks` leaves `thumbnailUrl` null on purpose ("no
+ * thumbnail means none yet"), so the tile draws the grey "Preparing photo…" plate and waits
+ * for the poller. Offline the poller stays quiet and backs off, so the plate never resolves;
+ * and no pull can restore a device path, so the memory is network-dependent from the edit on.
+ * `piece.savedItem` is the item as the memory has it, and it is written back out underneath the
+ * piece's own values.
  *
- *   - **the missing `localPath`**, which is what `JournalService._queueMediaBlockForUpload`
- *     needs: it skips an item with no `localPath` and no `uri`;
- *   - **the `url`**, which both gates on that path now read as proof the server holds the file
- *     -- `SyncEngine._isUnuploadedItem` is
- *     `!!((localPath || uri) && !mediaId && !(serverUrl || url))`, and the queue skips on
- *     `serverUrl || url` too (fix round 1; it keyed only on `serverUrl` before, so the `url`
- *     alone did NOT exclude it there).
+ * **Why both signals on one item is safe now.** Three things read a path on an item, and none
+ * of them acts on this one:
  *
- * `localPath` is omitted anyway so the two signals can never disagree -- an item that claims
- * both a server copy and a pending local file is a contradiction for every later reader of it,
- * not just for the sync engine.
+ *   - `JournalService._queueMediaBlockForUpload` (`:884`) skips on `item.serverUrl || item.url`
+ *     **before** it looks at a path;
+ *   - `SyncEngine._isUnuploadedItem` (`:658`) is
+ *     `!!((localPath || uri) && !mediaId && !(serverUrl || url))`, so a server address excludes
+ *     it there too -- and `_planEntryMedia` (`:699`) strips `localPath` from the wire copy, so
+ *     the device path is never sent;
+ *   - `JournalService._persistMediaBlocks` (`:238`) does read `item.localPath`, but through
+ *     `FileService.persist`, which returns a path already inside `documentDirectory/media/`
+ *     untouched (`FileService.js:240-244`, `isPersisted` `:228-230`) -- so no copy is made.
+ *
+ * This comment used to say the opposite: that `localPath` was omitted "so the two signals can
+ * never disagree". That was written when they genuinely did -- the upload queue keyed only on
+ * `serverUrl`, so a `url` alone did not exclude an item there -- and 013 T055/T056 closed it by
+ * giving the queue its `|| item?.url`. With both gates reading either address, an item that
+ * carries its server copy and its device copy is a complete record rather than a contradiction,
+ * and keeping the device copy is what lets an edited memory still render with no signal.
  */
 function mediaItemFor(piece) {
   const common = {
@@ -246,11 +283,15 @@ function mediaItemFor(piece) {
     ...(piece.kind === 'video' ? { duration: piece.duration } : {}),
   };
 
+  // Empty for anything captured here: a new piece came out of no stored item, so the shape is
+  // exactly what it has always been for a new memory.
+  const saved = piece.savedItem ?? {};
+
   if (piece.remote) {
-    return { ...common, id: piece.remote.id, url: piece.remote.url };
+    return { ...saved, ...common, id: piece.remote.id, url: piece.remote.url };
   }
 
-  return { ...common, localPath: piece.uri };
+  return { ...saved, ...common, localPath: piece.uri };
 }
 
 // ============================================================

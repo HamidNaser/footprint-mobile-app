@@ -40,13 +40,16 @@
  * that same memory, never a second one (FR-018, SC-005). It is the same screen with four
  * rules of its own, and each of them is a way of losing something if it is got wrong:
  *
- *   - **A piece the server already holds comes back as `remote: {id, url}`, with no local
- *     path of any kind.** Not an optimisation: a second upload takes a new media id, and the
- *     server carries a piece's capture moment across an edit by matching first on that id and
- *     then on its url -- so re-uploading a photograph nobody touched loses the moment and the
- *     place it was taken (FR-019, research R3, R7). A `localPath` is what
- *     `JournalService._queueMediaBlockForUpload` reads, and `buildContentBlocks` turns a
- *     piece's `uri` into exactly that, so neither may be set on a remote piece.
+ *   - **A piece the server already holds carries `remote: {id, url}` and no `uri`, and keeps
+ *     every address the memory had.** The missing `uri` is the load-bearing half: a second
+ *     upload takes a new media id, and the server carries a piece's capture moment across an
+ *     edit by matching first on that id and then on its url, so re-uploading a photograph
+ *     nobody touched loses the moment and the place it was taken (FR-019, research R3, R7) --
+ *     and `buildContentBlocks` turns a piece's `uri` into exactly the `localPath` the upload
+ *     path picks up. Keeping the addresses is the other half, and it is just as load-bearing:
+ *     an item saved back as `{id, url}` alone has no thumbnail, no display copy and no device
+ *     copy, so every tile in that memory draws the grey "Preparing photo…" plate -- for ever,
+ *     if the phone is offline. See `pieceFromMediaItem`.
  *   - **The `edit` slot is written on the first change and not before** (FR-013, round-2 M5).
  *     Opening Edit and closing again leaves *nothing*: no draft, and so nothing on the
  *     memory's card claiming an unfinished edit nobody started. `startEdit` is what begins it,
@@ -54,14 +57,17 @@
  *   - **Save saves at once, keeping the memory's audience, with no sheet** (FR-010, the
  *     owner's round-2 answer). The sheet is for choosing an audience a memory does not have
  *     yet; asking again about one that has one is a question with a wrong answer available.
- *   - **Everything that is not a piece is carried through untouched.** A memory can hold a
+ *   - **Everything that is not a piece is carried through, where it was.** A memory can hold a
  *     `location` block -- `entry.location` written out again by the old composer -- which is
  *     not a captured piece and which `JournalEntryDetail` reads as where the memory happened
  *     (`:239`). Rebuilding the memory from its pieces alone would quietly drop it, so blocks
- *     this screen does not turn into pieces are kept and re-emitted after them.
+ *     this screen does not turn into pieces are kept, and `blocksForSave` puts them back
+ *     between the same pieces they were stored between.
  *
  * Leaving is still leaving (Close keeps the edit), and Discard changes throws away the changes
- * and not the memory (FR-015).
+ * and not the memory (FR-015) -- and **only ever this memory's changes**: there is one `edit`
+ * slot, so a Discard that did not check whose edit is in it would delete another memory's
+ * unsaved work, media and all. See `handleDiscardConfirmed`.
  *
  * **Durability is T040**, and it is User Story 2: whatever happens mid-capture, what was
  * captured is still here afterwards, private, until the person saves or discards it.
@@ -229,16 +235,40 @@ const MEDIA_BLOCK_KINDS = new Map([
 /**
  * One piece from one media item of one block (FR-018, FR-019).
  *
- * **The server's copy comes back by `id` and `url`, and by nothing else.** An item the server
- * holds -- it has a media id, or an address to fetch it from -- gets `remote: {id, url}` and
- * **no** `uri`: `buildContentBlocks` writes a piece's `uri` out as `localPath`, which is
- * exactly what `JournalService._queueMediaBlockForUpload` picks up, so a `uri` here would
- * upload the photograph again. A second upload takes a new media id, and the server carries a
- * piece's capture moment across an edit by matching on that id and then on its url, so the
- * moment and the place of a piece nobody touched would be lost (research R3, R7).
+ * **`remote: {id, url}` is the signal, and `savedItem` is the item.** The signal is what says
+ * "the server holds this file": `CaptureDraftStore.adoptMedia` refuses to copy it,
+ * `buildContentBlocks` writes it out by its server id and url, and nothing turns it into an
+ * upload. The piece's own `uri` must stay unset for that -- `adoptMedia` copies `piece.uri`,
+ * and `buildContentBlocks`' *local* branch writes it out as the item's `localPath` -- because a
+ * second upload takes a new media id, and the server carries a piece's capture moment across an
+ * edit by matching on that id and then on its url, so the moment and the place of a piece
+ * nobody touched would be lost (research R3, R7).
  *
- * An item the server does **not** hold yet keeps its local path, for the opposite reason: it
- * still has to be uploaded, and dropping the path would strand it on this phone for good.
+ * **But the signal is not the whole item, and reducing it to the signal breaks the render**
+ * (fix round 1, Critical 2). An uploaded item carries two rendition addresses and the device's
+ * own copy as well as its url (`SyncEngine._applyUploadedMediaToEntry`), and every tile reads
+ * those: `thumbnailSource` reads `localPath, thumbnailUrl, thumbnailUri`, `fullSizeSource`
+ * reads `localPath, displayUrl, displayUri`. Saved back as `{id, url}` alone, a photograph has
+ * none of them -- and `DatabaseService._normalizeContentBlocks` deliberately leaves
+ * `thumbnailUrl` null for an item that has a media id and no thumbnail, so the tile draws the
+ * grey "Preparing photo…" plate and waits for the poller. Offline the poller stays quiet, so
+ * the plate never resolves; and the lost `localPath` cannot be restored by any pull, so a
+ * memory that rendered instantly from this phone's own copy becomes network-dependent. So the
+ * whole item is carried in `savedItem` and written back out underneath the piece's own values.
+ *
+ * **Carrying `localPath` is safe, and it is what fixes the offline case.** Both upload gates
+ * read a server address as proof the server holds the file and decline on it *before* they look
+ * at a path -- `JournalService._queueMediaBlockForUpload` (`:884`, `if (item?.serverUrl ||
+ * item?.url) continue;`) and `SyncEngine._isUnuploadedItem` (`:658`,
+ * `(localPath || uri) && !mediaId && !(serverUrl || url)`) -- so an item carrying both signals
+ * is skipped by both, and `SyncEngine._planEntryMedia` (`:699`) strips `localPath` from what
+ * goes on the wire. `JournalService._persistMediaBlocks` does read `item.localPath`, but
+ * through `FileService.persist`, which returns a path already inside `documentDirectory/media/`
+ * untouched (`FileService.js:240-244`, `:228-230`) -- so there is no copy either.
+ *
+ * `sourceUri` is **display only**: the address this piece can be read from now, for the rows'
+ * voice player (FR-020), which cannot use `uri` for the reason above. Nothing that uploads,
+ * copies or deletes reads it, and `buildContentBlocks` never writes it out.
  *
  * `location` falls back to the block's, as `memoryPieces.expand` does: a photos or video block
  * written before this feature carries the place on the block alone, and reading the item only
@@ -250,6 +280,9 @@ function pieceFromMediaItem(kind, block, item) {
   return {
     localId: item.localId ?? uuidv4(),
     kind,
+    // Which block this piece came out of, so the rebuilt block keeps its id (see
+    // `blocksFromPieces`). `ConflictResolver._mergeContentBlocks` keys on `block.id`.
+    ...(block.id ? { blockId: block.id } : {}),
     // Contract C3: a media item's time is its own, and a block with media carries none.
     capturedAt: item.capturedAt ?? null,
     location: item.location ?? block.location ?? null,
@@ -261,8 +294,20 @@ function pieceFromMediaItem(kind, block, item) {
       ? { duration: block.duration ?? item.duration, waveform: block.waveform }
       : {}),
     ...(kind === 'video' ? { duration: item.duration ?? block.duration } : {}),
+    // The item as the memory already has it, carried back on save so an edit cannot erase an
+    // address or a flag the phone put there -- `uploadFailed`/`missingFile` included, which is
+    // what makes a tile say "Photo couldn't be uploaded" (`SyncEngine._planEntryMedia:710`).
+    savedItem: { ...item },
     ...(heldByTheServer
-      ? { remote: { id: item.id ?? item.mediaId ?? null, url: item.url ?? item.serverUrl ?? null } }
+      ? {
+        remote: {
+          id: item.id ?? item.mediaId ?? null,
+          url: item.url ?? item.serverUrl ?? null,
+        },
+        ...(item.localPath || item.serverUrl || item.url
+          ? { sourceUri: item.localPath || item.serverUrl || item.url }
+          : {}),
+      }
       : { uri: item.localPath ?? item.uri }),
   };
 }
@@ -278,9 +323,12 @@ function pieceFromMediaItem(kind, block, item) {
  * The same goes for a block of a type this app has never heard of, and for a media block whose
  * `media` is not a usable list: part of somebody's memory, and not this screen's to drop.
  *
+ * Each carried block is kept with **how many pieces stood before it**, so `blocksForSave` can
+ * put it back where the memory had it rather than at the end (fix round 1, Minor 7).
+ *
  * @param {object} entry the saved memory, as `JournalRepository.getByLocalId` hands it back
- * @returns {{pieces: object[], carried: object[]}} the pieces in stored order, and the blocks
- *   that are not pieces, in stored order
+ * @returns {{pieces: object[], carried: {block: object, piecesBefore: number}[]}} the pieces in
+ *   stored order, and the blocks that are not pieces, in stored order
  */
 function piecesOfEntry(entry) {
   const pieces = [];
@@ -296,6 +344,7 @@ function piecesOfEntry(entry) {
         // never sent anywhere: the text builder does not write it out.
         localId: block.localId ?? uuidv4(),
         kind: 'text',
+        ...(block.id ? { blockId: block.id } : {}),
         content: block.content ?? '',
         // A block with no media is where its own capture time is a recorded fact (contract C3).
         capturedAt: block.capturedAt ?? null,
@@ -308,7 +357,7 @@ function piecesOfEntry(entry) {
     const media = kind && Array.isArray(block.media) ? block.media.filter(Boolean) : [];
 
     if (!media.length) {
-      carried.push(block);
+      carried.push({ block, piecesBefore: pieces.length });
       return;
     }
 
@@ -316,6 +365,36 @@ function piecesOfEntry(entry) {
   });
 
   return { pieces, carried };
+}
+
+/**
+ * The memory as it will be saved: its pieces, as blocks, with the blocks that are not pieces
+ * back in their places.
+ *
+ * Built in segments rather than appended at the end, because a block that is not a piece is
+ * still *somewhere* in the memory, and moving it is a change nobody asked for. Each carried
+ * block was recorded with the number of pieces that stood before it, so the pieces split there
+ * and the block goes between the two halves. Splitting also keeps a run of photographs from
+ * merging *across* a block that was stored between them.
+ *
+ * `buildContentBlocks` is called per segment rather than once over everything: it is pure, and
+ * it is the only thing that knows how a run of pieces becomes blocks -- counting that out here
+ * would get it wrong for a note left blank, which it drops.
+ */
+function blocksForSave(pieces, carried) {
+  const blocks = [];
+  let from = 0;
+
+  carried.forEach(({ block, piecesBefore }) => {
+    // Clamped and monotonic: the carried blocks come in stored order, and a `piecesBefore` can
+    // only be stale in one direction -- pieces are added at the end, never removed here.
+    const upto = Math.min(Math.max(piecesBefore, from), pieces.length);
+    blocks.push(...buildContentBlocks(pieces.slice(from, upto)), block);
+    from = upto;
+  });
+
+  blocks.push(...buildContentBlocks(pieces.slice(from)));
+  return blocks;
 }
 
 /**
@@ -981,12 +1060,37 @@ export default function CaptureScreen({ route, navigation }) {
 
   const handleDiscardConfirmed = useCallback(async () => {
     try {
-      await CaptureDraftStore.discard(slot);
+      // ⚠ **Only ever this memory's own unsaved edit.** `discard` is not a row delete:
+      // `CaptureDraftStore.removeHeld` also deletes the slot's whole media folder. There is
+      // one `edit` slot, so opening Edit on one memory while another memory has an unsaved
+      // edit puts somebody else's work in it -- and "Discard changes", whose dialog promises
+      // the memory itself is untouched, would delete that edit and every photograph and clip
+      // in it. This screen never wrote that slot and it is not ours to throw away.
+      //
+      // Two independent checks, because the cost of being wrong is somebody's unsaved memory:
+      // this session wrote the slot, **and** the slot still names this memory. The second
+      // matters because the first is a claim this screen made earlier and the slot is a single
+      // row that anything may have moved since. It is the same reasoning `performSave` applies
+      // before `clearAfterSave`, which is where it was first written down.
+      const ours =
+        !isEditMode ||
+        (editDraftLiveRef.current && !!(await CaptureDraftStore.getEditFor(entryLocalId)));
+
+      if (ours) {
+        await CaptureDraftStore.discard(slot);
+      } else {
+        // Not an error, and nothing to say on screen: there were no changes of ours to throw
+        // away, so leaving is exactly what the person asked for and exactly what happens.
+        console.warn(
+          '[CaptureScreen] nothing of this edit is in the draft store, so nothing was ' +
+            'discarded; the edit slot holds another memory or no memory at all',
+        );
+      }
     } catch (error) {
       console.warn('[CaptureScreen] the unsaved memory could not be discarded', error);
     }
     navigation?.goBack?.();
-  }, [navigation, slot]);
+  }, [entryLocalId, isEditMode, navigation, slot]);
 
   /** FR-015: discarding asks first, and the question says what goes. */
   const handleDiscardPress = useCallback(() => {
@@ -1048,9 +1152,11 @@ export default function CaptureScreen({ route, navigation }) {
       setIsSaving(true);
 
       try {
-        // Everything that is not a piece, after the pieces: a `location` block is part of the
-        // memory and is not this screen's to drop (see `piecesOfEntry`). Empty for a new one.
-        const contentBlocks = [...buildContentBlocks(pieces), ...carriedBlocksRef.current];
+        // Everything that is not a piece, back where the memory had it: a `location` block is
+        // part of the memory and is not this screen's to drop or to move (see `piecesOfEntry`
+        // and `blocksForSave`). Nothing is carried for a new memory, so this is
+        // `buildContentBlocks(pieces)` there.
+        const contentBlocks = blocksForSave(pieces, carriedBlocksRef.current);
 
         if (isEditMode) {
           // The same memory, updated (FR-018, SC-005) -- and **only** its content and the

@@ -128,7 +128,13 @@ function PieceRow({ piece, index, onChangeText, onBlurText, focusNonce, isRecord
         // The clip plays here, on the row, rather than only once the memory is saved (FR-020).
         <VoicePlayer
           testID={`piece-player-${index}`}
-          uri={piece.uri}
+          // `sourceUri` is the clip of a piece the memory already has, loaded back by an edit
+          // (013 T058). Such a piece carries **no** `uri` on purpose -- that field is what the
+          // draft store copies and what `buildContentBlocks` writes out as a pending local
+          // file, so setting it would re-upload a clip the server already holds -- which left
+          // every existing clip reading "This voice clip is unavailable" for the whole of an
+          // edit, the one screen state in which FR-020's clips did not play.
+          uri={piece.uri ?? piece.sourceUri}
           duration={piece.duration}
           waveform={piece.waveform}
           // ⚠ Load-bearing, not cosmetic: playing a clip asks the one shared audio session for
