@@ -4628,6 +4628,14 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
     const STILL_SAVING =
       'Still saving this memory — give it a moment. Nothing is lost by waiting.';
 
+    /**
+     * Save's own capture-in-flight sentence, which the contract asks for in the mirror
+     * direction too -- a save refused because a removal is still being recorded.
+     */
+    const STILL_KEEPING =
+      'Still keeping what you just captured — give it a moment, then save. Nothing is lost by ' +
+      'waiting.';
+
     /** Two pieces and a save that has started and not finished. */
     const savingTwoPieces = async () => {
       const save = deferred();
@@ -4709,13 +4717,21 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
      * still up because the tidying up after the save did not finish (here: `goBack` had
      * nowhere to go). Answering "Still saving this memory — give it a moment" beside the banner
      * saying the memory is saved would be the screen contradicting itself, so the refusal is
-     * over when the save is.
+     * over when the save is -- **and its message goes with it**.
+     *
+     * The refusal is made to happen first, so both halves are real: an assertion that the
+     * banner is absent proves nothing in a test where nothing ever put one up (whole-branch
+     * review round 2, point 1).
      */
-    it('stops refusing once a save that worked has finished', async () => {
+    it('stops refusing, and takes its message down, once a save that worked has finished', async () => {
       const { tree, save } = await savingTwoPieces();
       navigation.goBack.mockImplementation(() => {
         throw new Error('nowhere to go back to');
       });
+
+      // Refused first, and the banner is up -- this is the state the rest of the case is about.
+      await tap(tree, 'piece-remove-0');
+      expect(textAt(tree, 'capture-capture-error')).toBe(STILL_SAVING);
 
       await act(async () => {
         save.settle({ localId: 'entry-1', date: '2026-11-08' });
@@ -4724,12 +4740,89 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       // Saved, and still on screen -- the one state where this screen stays up with Save
       // correctly down for good.
       expect(textAt(tree, 'capture-saved-notice')).toMatch(/your memory is on this phone/i);
+      // The refusal was about a save that has finished, so it is not still being said.
+      expect(has(tree, 'capture-capture-error')).toBe(false);
 
       await tap(tree, 'capture-overflow-button');
       await tap(tree, 'capture-discard-button');
 
       expect(lastAsked()[0]).toBe('Discard this memory?');
+    });
+
+    /**
+     * The same, on the failure that leaves this screen up with Try again -- which is where the
+     * two banners would contradict each other outright.
+     *
+     * Left up, the screen would show "Still saving this memory — give it a moment. Nothing is
+     * lost by waiting." beside "Couldn't save — your memory is still here." and a Try again
+     * button: one sentence counselling waiting, the other retrying, and the one counselling
+     * waiting false. Only one of the two may be on screen, and it is the true one.
+     */
+    it('takes its message down when the save fails, so nothing counsels waiting and retrying at once', async () => {
+      const { tree, save } = await savingTwoPieces();
+
+      await tap(tree, 'piece-remove-0');
+      expect(textAt(tree, 'capture-capture-error')).toBe(STILL_SAVING);
+
+      await act(async () => {
+        save.fail(new Error('disk full'));
+      });
+
+      // The true one, with its retry.
+      expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
+      expect(pressable(tree, 'capture-save-retry-button')).toBeDefined();
+      // And the false one is gone.
       expect(has(tree, 'capture-capture-error')).toBe(false);
+    });
+
+    /**
+     * ⚠ **The mirror window: a save started while a removal is still being recorded.**
+     *
+     * The same mechanism in the other direction. A confirmed removal commits the row and then
+     * deletes the file; a save beginning in that tail copies the file the delete then takes,
+     * `FileService.persist` throws, `JournalService` swallows it and keeps the original uri --
+     * and the memory is written holding a path into a folder that is about to go. **An edit
+     * saves on one tap with no sheet**, so the moment after a confirmation is a single tap away
+     * from it.
+     *
+     * It is refused in Save's own capture-in-flight words, which is what the UI contract asks
+     * for, and it is counted with a count of its own: a count of removals *done* would disable
+     * Save for good after the first one (whole-branch review round 2, point 2).
+     */
+    it('refuses a save while a removal is still being recorded, the same window mirrored', async () => {
+      const removal = deferred();
+      CaptureDraftStore.removePiece.mockImplementation(() => removal.promise);
+
+      const tree = await openEdit();
+      expect(rows(tree)).toEqual(SAVED_ROWS);
+
+      await tap(tree, 'piece-remove-1');
+      await confirmRemoval();
+      // Asked for and not yet recorded: the row is still on screen, which is the point --
+      // nothing about this screen looks busy.
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(rows(tree)).toEqual(SAVED_ROWS);
+
+      // One tap, no sheet: the whole of saving an edit.
+      await tap(tree, 'capture-save-button');
+
+      expect(updateEntry).not.toHaveBeenCalled();
+      expect(textAt(tree, 'capture-capture-error')).toBe(STILL_KEEPING);
+      expect(has(tree, 'audience-sheet')).toBe(false);
+
+      // Once the removal is recorded, the save goes through -- with the piece gone.
+      await act(async () => {
+        removal.settle(CaptureDraftStore.__slots().edit);
+      });
+      expect(rows(tree)).toEqual([SAVED_ROWS[0], SAVED_ROWS[2]]);
+
+      await tap(tree, 'capture-save-button');
+      expect(updateEntry).toHaveBeenCalledTimes(1);
+      expect(updateEntry.mock.calls[0][1].contentBlocks.map((block) => block.type)).toEqual([
+        'photos',
+        'audio',
+        'location',
+      ]);
     });
   });
 });

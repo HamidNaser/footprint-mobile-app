@@ -644,6 +644,17 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const removingRef = useRef(new Set());
   /**
+   * How many removals are between their confirmation and the store having recorded them.
+   *
+   * The mirror of `capturesInFlightRef`, and it exists for the mirror hazard: Save must not
+   * begin while a removal's file delete is still in flight, or the save copies a file the
+   * delete then takes (see SAVE_IN_FLIGHT_MESSAGE for the loss, which is the same one in the
+   * other direction). ⚠ **Not `removingRef.current.size`**: that set keeps the ids of removals
+   * that *worked*, on purpose, so a size test would disable Save for good after the first one.
+   * Counted before the first await and released in a `finally`, exactly as the capture count is.
+   */
+  const removalsInFlightRef = useRef(0);
+  /**
    * How many captures are between the shutter and the draft store. Above zero means a piece
    * has been captured that `pieces` does not have yet, so there is nothing safe to build a
    * memory from. A ref rather than state because Save has to see the increment in the same
@@ -1103,6 +1114,31 @@ export default function CaptureScreen({ route, navigation }) {
   }, [flushDraft]);
 
   /**
+   * What stops **getting rid of something** this instant, in words, or null.
+   *
+   * Shared by Remove, Discard and Discard changes, because the hazard is theirs jointly: all
+   * three delete something the save in flight may still be copying out of the draft folder. See
+   * SAVE_IN_FLIGHT_MESSAGE for what that costs. It is the mirror of `saveBlockedMessage`, which
+   * is the same guard from the other side -- a save held off while a capture is still landing --
+   * and it is said rather than ignored for the same reason: a control that silently does
+   * nothing is indistinguishable from one that is broken.
+   *
+   * `saveInFlightRef` rather than `isSaving` for the reason the ref exists at all: both of
+   * these are taps, and a tap in the same tick as Save cannot wait for a render.
+   *
+   * ⚠ **In flight means in flight.** That ref stays set after a save that *worked*, on purpose,
+   * so that Save stays down for good -- but such a save has finished, nothing is being copied
+   * out of the draft folder any more, and the screen is only still up because the tidying up
+   * after it did not finish. `savedNotice` is this screen's own record of exactly that, so it
+   * is what tells the two states apart; without it this would answer "still saving" beside a
+   * banner saying the memory is saved, which is the screen contradicting itself.
+   */
+  const takingAwayBlockedMessage = useCallback(
+    () => (saveInFlightRef.current && !savedNotice ? SAVE_IN_FLIGHT_MESSAGE : null),
+    [savedNotice],
+  );
+
+  /**
    * Take one piece back out of this memory, once the question has been answered (FR-036).
    *
    * Two orderings carry the whole of it:
@@ -1130,6 +1166,19 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const handleRemoveConfirmed = useCallback(
     async (piece) => {
+      // ⚠ **Asked again here, and this is not redundant.** The gate on the tap is only as good
+      // as the confirmation being modal: what stops a save beginning between the tap and the
+      // answer is that React Native's `Alert` blocks the screen underneath it. That is true
+      // today and it is not this screen's to guarantee -- it already renders an in-app sheet of
+      // its own (`SaveAudienceSheet`), so a confirmation built the same way would reopen the
+      // window with every test still green. Two lines, and the answer is right either way
+      // (whole-branch review round 2, point 3).
+      const blocked = takingAwayBlockedMessage();
+      if (blocked) {
+        setCaptureError(blocked);
+        return;
+      }
+
       // ⚠ The last-remaining rule, defended where it is decided and not only where the control
       // is drawn. `PieceList` works `canRemove` out at render, so with two pieces both rows
       // carry a control -- and two questions answered in the same moment, before either
@@ -1153,6 +1202,10 @@ export default function CaptureScreen({ route, navigation }) {
         return;
       }
       removingRef.current.add(piece.localId);
+      // Before the first await and released however this ends, so that Save can tell "nothing
+      // is being taken out" from "a removal is recorded but its file has not gone yet" -- the
+      // mirror of the capture count, and of this handler's own refusal above.
+      removalsInFlightRef.current += 1;
 
       try {
         if (isEditMode) await startEditDraft();
@@ -1183,40 +1236,25 @@ export default function CaptureScreen({ route, navigation }) {
         // evidence the retry worked -- and it is not here: removing a note is no evidence about
         // a photograph that failed to be kept, and taking `lostCaptureMessage` down would be
         // this screen quietly forgetting a piece somebody lost (whole-branch review, Minor 3).
-        setCaptureError((previous) => (previous === REMOVE_FAILED_MESSAGE ? null : previous));
+        //
+        // Both of this screen's own words about a removal, though: the refusal *and* the
+        // "still saving" that held an earlier attempt off. A removal that has just gone through
+        // is the one thing that makes both of them false.
+        setCaptureError((previous) =>
+          previous === REMOVE_FAILED_MESSAGE || previous === SAVE_IN_FLIGHT_MESSAGE
+            ? null
+            : previous,
+        );
       } catch (error) {
         console.warn('[CaptureScreen] a piece could not be removed', error);
         // Back out, so the retry the message invites is not refused by the guard above.
         removingRef.current.delete(piece.localId);
         if (mountedRef.current) setCaptureError(REMOVE_FAILED_MESSAGE);
+      } finally {
+        removalsInFlightRef.current -= 1;
       }
     },
-    [isEditMode, pieces, slot, startEditDraft],
-  );
-
-  /**
-   * What stops **getting rid of something** this instant, in words, or null.
-   *
-   * Shared by Remove, Discard and Discard changes, because the hazard is theirs jointly: all
-   * three delete something the save in flight may still be copying out of the draft folder. See
-   * SAVE_IN_FLIGHT_MESSAGE for what that costs. It is the mirror of `saveBlockedMessage`, which
-   * is the same guard from the other side -- a save held off while a capture is still landing --
-   * and it is said rather than ignored for the same reason: a control that silently does
-   * nothing is indistinguishable from one that is broken.
-   *
-   * `saveInFlightRef` rather than `isSaving` for the reason the ref exists at all: both of
-   * these are taps, and a tap in the same tick as Save cannot wait for a render.
-   *
-   * ⚠ **In flight means in flight.** That ref stays set after a save that *worked*, on purpose,
-   * so that Save stays down for good -- but such a save has finished, nothing is being copied
-   * out of the draft folder any more, and the screen is only still up because the tidying up
-   * after it did not finish. `savedNotice` is this screen's own record of exactly that, so it
-   * is what tells the two states apart; without it this would answer "still saving" beside a
-   * banner saying the memory is saved, which is the screen contradicting itself.
-   */
-  const takingAwayBlockedMessage = useCallback(
-    () => (saveInFlightRef.current && !savedNotice ? SAVE_IN_FLIGHT_MESSAGE : null),
-    [savedNotice],
+    [isEditMode, pieces, slot, startEditDraft, takingAwayBlockedMessage],
   );
 
   /**
@@ -1339,6 +1377,16 @@ export default function CaptureScreen({ route, navigation }) {
   }, [flushDraft, navigation]);
 
   const handleDiscardConfirmed = useCallback(async () => {
+    // ⚠ Asked again here, for the reason `handleRemoveConfirmed` says at length: the gate on
+    // the tap holds only because the confirmation is modal, which is a property of
+    // `Alert.alert` and not a promise this screen makes. This one deletes the slot's whole
+    // folder, so it is the half with the most to lose.
+    const blocked = takingAwayBlockedMessage();
+    if (blocked) {
+      setCaptureError(blocked);
+      return;
+    }
+
     try {
       // ⚠ **Only ever this memory's own unsaved edit.** `discard` is not a row delete:
       // `CaptureDraftStore.removeHeld` also deletes the slot's whole media folder. There is
@@ -1370,7 +1418,7 @@ export default function CaptureScreen({ route, navigation }) {
       console.warn('[CaptureScreen] the unsaved memory could not be discarded', error);
     }
     navigation?.goBack?.();
-  }, [entryLocalId, isEditMode, navigation, slot]);
+  }, [entryLocalId, isEditMode, navigation, slot, takingAwayBlockedMessage]);
 
   /** FR-015: discarding asks first, and the question says what goes. */
   const handleDiscardPress = useCallback(() => {
@@ -1409,6 +1457,19 @@ export default function CaptureScreen({ route, navigation }) {
   }, [handleDiscardConfirmed, isEditMode, takingAwayBlockedMessage]);
 
   const canSave = pieces.length > 0 && !isSaving;
+
+  /**
+   * Take down the "still saving" refusal, and only that.
+   *
+   * It is the one banner on this screen that nothing but the save's own outcome can make false,
+   * so it is cleared where the save settles rather than left for the next capture to tidy up --
+   * which is what `addCapturedPiece` would eventually do, and far too late. Everything else
+   * stays: a lost capture and typing that reached no draft are facts a finished save says
+   * nothing about.
+   */
+  const clearTheWaitForTheSave = useCallback(() => {
+    setCaptureError((previous) => (previous === SAVE_IN_FLIGHT_MESSAGE ? null : previous));
+  }, []);
 
   /**
    * Save the memory on the phone, then -- and only then -- let the draft go.
@@ -1475,9 +1536,20 @@ export default function CaptureScreen({ route, navigation }) {
         if (mountedRef.current) {
           setSaveError(SAVE_FAILED_MESSAGE);
           setIsSaving(false);
+          // ⚠ And the refusal this save held over Remove and Discard goes with it. Left up it
+          // would sit beside "Couldn't save — your memory is still here." and Try again: one
+          // banner counselling waiting, the other retrying, and the one counselling waiting
+          // false (whole-branch review round 2, point 1).
+          clearTheWaitForTheSave();
         }
         return;
       }
+
+      // The save has settled, so nothing is being copied out of the draft folder any more and
+      // the refusal that held a removal or a discard off is over. Said here as well as on the
+      // failure path, because the success that keeps this screen up -- a tidy-up that did not
+      // finish -- would otherwise show "still saving" beside "Saved".
+      if (mountedRef.current) clearTheWaitForTheSave();
 
       // The memory is on the phone. Nothing below may claim otherwise, re-arm Save, or offer
       // Try again -- a retry from here would write the memory a second time.
@@ -1510,7 +1582,17 @@ export default function CaptureScreen({ route, navigation }) {
         if (mountedRef.current) setSavedNotice(SAVED_MESSAGE);
       }
     },
-    [createEntry, entryLocalId, isEditMode, navigation, pieces, slot, updateEntry, user?.id],
+    [
+      clearTheWaitForTheSave,
+      createEntry,
+      entryLocalId,
+      isEditMode,
+      navigation,
+      pieces,
+      slot,
+      updateEntry,
+      user?.id,
+    ],
   );
 
   /**
@@ -1526,6 +1608,13 @@ export default function CaptureScreen({ route, navigation }) {
     // Neither `isRecording` nor `pieces.length` can see a capture already taken and still on
     // its way into the draft, and that is the one this screen could lose silently.
     if (capturesInFlightRef.current > 0) return CAPTURE_IN_FLIGHT_MESSAGE;
+    // ⚠ And the mirror of `takingAwayBlockedMessage`: a removal that has been confirmed and
+    // whose file delete has not finished. Saving into that moment copies a file the delete then
+    // takes, which is SAVE_IN_FLIGHT_MESSAGE's loss in the other direction -- and in an edit it
+    // is one tap away, because an edit saves with no sheet in between. Said in Save's own
+    // capture-in-flight words, which is what the UI contract asks for: the window is short and
+    // the answer is to wait.
+    if (removalsInFlightRef.current > 0) return CAPTURE_IN_FLIGHT_MESSAGE;
     return null;
   }, [isRecording]);
 
