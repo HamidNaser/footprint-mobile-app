@@ -93,9 +93,8 @@ const pieceCount = (count) => `${count} ${count === 1 ? 'piece' : 'pieces'}`;
  *   capture time is treated as impossible (FR-029).
  * @param {(numbers: number[]) => void} [props.onPinPress] Given every number the pressed pin
  *   holds. The card highlights them all and brings the first into view (FR-025).
- * @param {object} [props.style] Extra style for the block, so the card can space it.
  */
-function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress, style }) {
+function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
   const { groups, withoutPlaceCount } = useMemo(
     () => toNumberedPieces(entry, serverUpdatedAt),
     [entry, serverUpdatedAt],
@@ -109,7 +108,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress, style }) {
   const route = groups.map((group) => ({ latitude: group.lat, longitude: group.lng }));
 
   return (
-    <View testID="memory-route-map" style={[styles.container, style]}>
+    <View testID="memory-route-map" style={styles.container}>
       <Text testID="memory-route-map-title" style={styles.title}>
         Where this happened
       </Text>
