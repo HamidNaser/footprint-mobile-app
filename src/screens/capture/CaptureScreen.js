@@ -225,6 +225,27 @@ const REMOVE_FAILED_MESSAGE =
   'Couldn’t remove that piece — it is still part of this memory.';
 
 /**
+ * ⚠ **Why getting rid of something is refused while a save is in flight** (SC-002, FR-012).
+ *
+ * `performSave` builds its blocks and then awaits `createEntry`/`updateEntry`, and inside that
+ * await `JournalService._persistMediaBlocks` copies each piece's media out of
+ * `capture-drafts/<slot>/` into the app's own folder. A removal landing in that window deletes
+ * a file the save is still copying -- and the copy's failure is **swallowed**
+ * (`JournalService.js:251-258` keeps the original uri), so the memory is written holding a path
+ * into a folder `clearAfterSave` then deletes wholesale. The result is a saved memory with a
+ * photograph that can never render and never upload: a piece lost, which is SC-002's own
+ * failure mode, through the control that exists to be the safe way of getting rid of one.
+ *
+ * **Discard and Discard changes are refused in the same window and for the same reason**, and
+ * they are worse: `discard` deletes the slot's whole folder rather than one file.
+ *
+ * The words follow CAPTURE_IN_FLIGHT_MESSAGE's: the window is short, the answer is to wait,
+ * and nothing is lost by waiting. Said rather than a control that silently does nothing.
+ */
+const SAVE_IN_FLIGHT_MESSAGE =
+  'Still saving this memory — give it a moment. Nothing is lost by waiting.';
+
+/**
  * What the confirmation says about **this** piece, because one wording cannot be true of all
  * three (UI contract, *Remove, on every row*). ⚠ **Origin wins over kind**, and the three are
  * checked in the contract's own order, so no piece falls between two of them.
@@ -613,6 +634,15 @@ export default function CaptureScreen({ route, navigation }) {
   const editStartRef = useRef(null);
   /** A note being added, as a second tap can see it before any render has happened. */
   const typeInFlightRef = useRef(false);
+  /**
+   * The `localId`s whose removal this screen has accepted, so that no two of them can empty
+   * the memory between them (see `handleRemoveConfirmed`).
+   *
+   * A set rather than a count because what it has to answer is *which* pieces are still part of
+   * this memory, asked from a closure whose `pieces` may be a render behind: counting down from
+   * a stale length would be wrong in both directions, and an id either is in the set or is not.
+   */
+  const removingRef = useRef(new Set());
   /**
    * How many captures are between the shutter and the draft store. Above zero means a piece
    * has been captured that `pieces` does not have yet, so there is nothing safe to build a
@@ -1100,6 +1130,30 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const handleRemoveConfirmed = useCallback(
     async (piece) => {
+      // ⚠ The last-remaining rule, defended where it is decided and not only where the control
+      // is drawn. `PieceList` works `canRemove` out at render, so with two pieces both rows
+      // carry a control -- and two questions answered in the same moment, before either
+      // removal has reached a render, would take both and leave a memory of nothing: the state
+      // the rule exists to forbid, and one that cannot be saved.
+      //
+      // Counted against `removingRef` rather than `pieces.length` alone, because the second of
+      // those two answers is a closure made when both pieces were still there. Ids go in
+      // synchronously, before the first await, and a **successful** removal leaves its id in:
+      // the stale closure it is guarding against still lists the piece, so forgetting it would
+      // reopen the window it was added to close. A failed one takes its id back out, so the
+      // retry this screen explicitly offers is not refused.
+      const remaining = pieces.filter(
+        (candidate) => !removingRef.current.has(candidate.localId),
+      );
+      if (remaining.length <= 1) {
+        console.warn(
+          '[CaptureScreen] a removal was refused because it would have emptied this memory; ' +
+            'getting rid of all of it is Discard',
+        );
+        return;
+      }
+      removingRef.current.add(piece.localId);
+
       try {
         if (isEditMode) await startEditDraft();
         const draft = await CaptureDraftStore.removePiece(slot, piece.localId);
@@ -1119,19 +1173,50 @@ export default function CaptureScreen({ route, navigation }) {
         setPieces((previous) =>
           previous.filter((candidate) => candidate.localId !== piece.localId),
         );
-        // The banner this screen may have put up for an earlier attempt at this very removal
-        // says the piece is still part of the memory; it has just stopped being true, and a
-        // false sentence beside a list that contradicts it is worse than no sentence. Cleared
-        // the way `addCapturedPiece` clears it, `TEXT_NOT_KEPT_MESSAGE` excepted: that one is
-        // about words of somebody's that are not being kept, which a removal says nothing
-        // about (T073 review, Important 1).
-        setCaptureError((previous) => (previous === TEXT_NOT_KEPT_MESSAGE ? previous : null));
+        // ⚠ **Its own failure, and nothing else.** The banner this screen may have put up for
+        // an earlier attempt at this very removal says the piece is still part of the memory;
+        // that has just stopped being true, and a false sentence beside a list contradicting it
+        // is worse than no sentence (T073 review, Important 1).
+        //
+        // Deliberately narrower than `addCapturedPiece`'s clear, which takes down anything but
+        // TEXT_NOT_KEPT_MESSAGE. That is coherent there -- the row it just added *is* the
+        // evidence the retry worked -- and it is not here: removing a note is no evidence about
+        // a photograph that failed to be kept, and taking `lostCaptureMessage` down would be
+        // this screen quietly forgetting a piece somebody lost (whole-branch review, Minor 3).
+        setCaptureError((previous) => (previous === REMOVE_FAILED_MESSAGE ? null : previous));
       } catch (error) {
         console.warn('[CaptureScreen] a piece could not be removed', error);
+        // Back out, so the retry the message invites is not refused by the guard above.
+        removingRef.current.delete(piece.localId);
         if (mountedRef.current) setCaptureError(REMOVE_FAILED_MESSAGE);
       }
     },
-    [isEditMode, slot, startEditDraft],
+    [isEditMode, pieces, slot, startEditDraft],
+  );
+
+  /**
+   * What stops **getting rid of something** this instant, in words, or null.
+   *
+   * Shared by Remove, Discard and Discard changes, because the hazard is theirs jointly: all
+   * three delete something the save in flight may still be copying out of the draft folder. See
+   * SAVE_IN_FLIGHT_MESSAGE for what that costs. It is the mirror of `saveBlockedMessage`, which
+   * is the same guard from the other side -- a save held off while a capture is still landing --
+   * and it is said rather than ignored for the same reason: a control that silently does
+   * nothing is indistinguishable from one that is broken.
+   *
+   * `saveInFlightRef` rather than `isSaving` for the reason the ref exists at all: both of
+   * these are taps, and a tap in the same tick as Save cannot wait for a render.
+   *
+   * ⚠ **In flight means in flight.** That ref stays set after a save that *worked*, on purpose,
+   * so that Save stays down for good -- but such a save has finished, nothing is being copied
+   * out of the draft folder any more, and the screen is only still up because the tidying up
+   * after it did not finish. `savedNotice` is this screen's own record of exactly that, so it
+   * is what tells the two states apart; without it this would answer "still saving" beside a
+   * banner saying the memory is saved, which is the screen contradicting itself.
+   */
+  const takingAwayBlockedMessage = useCallback(
+    () => (saveInFlightRef.current && !savedNotice ? SAVE_IN_FLIGHT_MESSAGE : null),
+    [savedNotice],
   );
 
   /**
@@ -1144,6 +1229,14 @@ export default function CaptureScreen({ route, navigation }) {
    */
   const handleRemovePress = useCallback(
     (piece) => {
+      // Before the question, not after it: a question answered "Remove" is a promise, and this
+      // is a window in which the screen cannot keep it (SC-002).
+      const blocked = takingAwayBlockedMessage();
+      if (blocked) {
+        setCaptureError(blocked);
+        return;
+      }
+
       Alert.alert(
         `Remove this ${kindLabel(piece?.kind)}?`,
         removalBodyFor(slot, piece),
@@ -1159,7 +1252,7 @@ export default function CaptureScreen({ route, navigation }) {
         ],
       );
     },
-    [handleRemoveConfirmed, slot],
+    [handleRemoveConfirmed, slot, takingAwayBlockedMessage],
   );
 
   /** One clip per recording. `capturedAt` is when recording **started** (research R8). */
@@ -1282,6 +1375,19 @@ export default function CaptureScreen({ route, navigation }) {
   /** FR-015: discarding asks first, and the question says what goes. */
   const handleDiscardPress = useCallback(() => {
     setIsMenuOpen(false);
+
+    // ⚠ The same window as a removal's, and this one takes the slot's whole media folder.
+    // `discard` → `removeHeld` deletes `slotDirectory(slot)`, so a Discard confirmed while a
+    // save is copying media out of that folder is the loss in SAVE_IN_FLIGHT_MESSAGE several
+    // times over. This half pre-dates FR-036 and is fixed with it, because one guard covers
+    // both doors and leaving the older one open is the same loss by a different route
+    // (whole-branch review, Important 1).
+    const blocked = takingAwayBlockedMessage();
+    if (blocked) {
+      setCaptureError(blocked);
+      return;
+    }
+
     Alert.alert(
       isEditMode ? 'Discard your changes?' : 'Discard this memory?',
       isEditMode
@@ -1300,7 +1406,7 @@ export default function CaptureScreen({ route, navigation }) {
         },
       ],
     );
-  }, [handleDiscardConfirmed, isEditMode]);
+  }, [handleDiscardConfirmed, isEditMode, takingAwayBlockedMessage]);
 
   const canSave = pieces.length > 0 && !isSaving;
 

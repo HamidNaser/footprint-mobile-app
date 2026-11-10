@@ -4024,6 +4024,79 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
     });
 
     /**
+     * The other side of the case above, and the limit of it: a removal clears **its own**
+     * failure and nothing else.
+     *
+     * A capture that was lost -- "That voice clip wasn't saved, so it hasn't been added to this
+     * memory" -- is a fact about something that is not here, and removing a note says nothing
+     * about it. `addCapturedPiece` may clear that message because the row it just added *is*
+     * the evidence the retry worked; a removal has no such evidence to offer, and taking the
+     * warning down would be the screen quietly forgetting a piece somebody lost.
+     *
+     * Added at the whole-branch review's direction (Phase 9 review, Minor 3).
+     */
+    it('leaves a failed capture\'s message alone, because a removal says nothing about it', async () => {
+      const tree = await noteThenPhoto();
+
+      await act(async () => {
+        voiceBar.__props().onCaptureFailed({
+          reason: 'no-file',
+          error: null,
+          capturedAt: momentAt(9, 20),
+          duration: 12,
+        });
+      });
+      const lostTheClip = textAt(tree, 'capture-capture-error');
+      expect(lostTheClip).toMatch(/voice clip/i);
+
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      // The removal happened...
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(kinds(tree)).toEqual(['Photo']);
+      // ...and the clip nobody managed to keep is still being reported, word for word.
+      expect(textAt(tree, 'capture-capture-error')).toBe(lostTheClip);
+    });
+
+    /**
+     * The invariant the last-remaining rule exists for, defended where it is decided rather
+     * than only where it is drawn: **a removal may never empty the memory.** `canRemove` is
+     * computed at render, so with two pieces both rows carry a control -- and two confirmations
+     * answered in the same moment, before either removal has reached a render, would take both
+     * pieces and leave a memory of nothing, which cannot be saved and which Save is disabled
+     * for.
+     *
+     * Both questions are opened and then both answered inside one `act`, which is the window a
+     * modal `Alert` makes narrow in practice and does not close in principle.
+     *
+     * Added at the whole-branch review's direction (Phase 9 review, Minor 2).
+     */
+    it('never empties the memory, even if two removals are confirmed in the same moment', async () => {
+      const tree = await noteThenPhoto();
+      const [noteId, photoId] = listed('new');
+
+      await tap(tree, 'piece-remove-0');
+      const takeTheNote = lastAsked()[2].find((button) => button.style === 'destructive');
+      await tap(tree, 'piece-remove-1');
+      const takeThePhoto = lastAsked()[2].find((button) => button.style === 'destructive');
+
+      await act(async () => {
+        takeTheNote.onPress();
+        takeThePhoto.onPress();
+      });
+
+      // One of them went through -- the first -- and the other was refused rather than
+      // emptying the memory.
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledWith('new', noteId);
+      expect(kinds(tree)).toEqual(['Photo']);
+      expect(listed('new')).toEqual([photoId]);
+      // And the memory can still be saved, which is the whole point of the rule.
+      expect(pressable(tree, 'capture-save-button').props.disabled).toBe(false);
+    });
+
+    /**
      * FR-007. Playing a clip would end a running recording -- it asks the one shared audio
      * session for `allowsRecording: false` -- which is why the player's control is deadened
      * while the bar is recording. Removing touches no audio session, so it is **allowed**: the
@@ -4466,6 +4539,197 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       const [slot, piece] = CaptureDraftStore.addPiece.mock.calls.at(-1);
       expect([slot, piece.kind]).toEqual(['edit', 'audio']);
       expect(listed('edit')).toHaveLength(3);
+    });
+
+    /**
+     * **The one scenario the mark exists for**, and the only one that would fail if the
+     * decision were ever moved back to load time: an unfinished edit restored from the
+     * persisted draft row.
+     *
+     * Every other case in this describe opens through `openEdit`, which loads the memory -- so
+     * a screen that derived "this piece came out of the saved memory" from the entry it had
+     * just read would pass all of them. Here the slot already holds an edit (a force-close, a
+     * phone that ran out of battery), so `piecesOfEntry`'s pieces are **discarded** in favour
+     * of the draft's and there is nothing to re-derive from: the mark has to have been written
+     * into the draft row when the pieces were first built. That is why `data-model.md` and
+     * `contracts/ui-contract.md` both require it on the piece.
+     *
+     * The draft holds one of each origin, which is what makes it a discriminator rather than a
+     * presence check: the memory's own note (marked, no media of any kind) and a photograph
+     * captured into the earlier edit session (unmarked, its file in the slot's folder).
+     *
+     * Added at the whole-branch review's direction (Phase 9 review, Minor 4).
+     */
+    it('reads the mark off a restored draft, with no memory load to re-derive it from', async () => {
+      CaptureDraftStore.__seedEdit(ENTRY_LOCAL_ID, [
+        {
+          localId: 'd-note',
+          kind: 'text',
+          content: 'The arcade still smells the same.',
+          capturedAt: momentAt(9, 1),
+          blockId: 'b2',
+          fromSavedMemory: true,
+        },
+        {
+          localId: 'd-photo',
+          kind: 'photo',
+          uri: `${CaptureDraftStore.slotDirectory('edit')}d-photo.jpg`,
+          capturedAt: momentAt(9, 30),
+        },
+      ]);
+
+      const tree = await openEdit();
+
+      // Restored, not rebuilt: these are the draft's two pieces, not the memory's three.
+      expect(CaptureDraftStore.startEdit).not.toHaveBeenCalled();
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      const [note, photo] = CaptureDraftStore.__slots().edit.pieces;
+      expect(note.fromSavedMemory).toBe(true);
+      expect(photo.fromSavedMemory).toBeUndefined();
+      expect(theStoreOwnsTheFile('edit', photo)).toBe(true);
+
+      // The note the memory holds: nothing of it is deleted, and nothing is irreversible --
+      // read off the draft row alone.
+      await tap(tree, 'piece-remove-0');
+      expect(lastAsked()[0]).toBe('Remove this Note?');
+      expect(lastAsked()[1]).toBe(ALREADY_IN_THE_MEMORY);
+      await keepIt();
+
+      // The photograph captured into that same edit, before the app went away: its file goes.
+      await tap(tree, 'piece-remove-1');
+      expect(lastAsked()[1]).toBe(CAPTURED_WITH_MEDIA);
+    });
+  });
+
+  // --------------------------------------------------------
+  // While a save is in flight (SC-002)
+  // --------------------------------------------------------
+
+  /**
+   * ⚠ **The window in which getting rid of something can lose something.**
+   *
+   * `performSave` builds its blocks and then awaits `createEntry`/`updateEntry`, and inside
+   * that await `JournalService._persistMediaBlocks` copies each piece's media out of
+   * `capture-drafts/<slot>/` into the app's own folder. A removal landing there deletes a file
+   * the save is still copying: `FileService.persist` throws, `JournalService` swallows it and
+   * keeps the original uri, and the memory is written holding a path into a folder
+   * `clearAfterSave` then deletes -- a saved memory with a photograph that can never render
+   * and never upload. One piece lost, which is SC-002's own failure mode, through the control
+   * meant to be safe.
+   *
+   * **Discard and Discard changes reach the same hole**, by the overflow menu, and worse:
+   * `discard` deletes the slot's whole folder. One guard covers both doors, so both are pinned
+   * here (`contracts/ui-contract.md`, *Remove, on every row*, the availability bullet).
+   *
+   * Added at the whole-branch review's direction (Phase 9 review, Important 1).
+   */
+  describe('while a save is in flight', () => {
+    /** The contract's sentence, exactly: the window is short and waiting costs nothing. */
+    const STILL_SAVING =
+      'Still saving this memory — give it a moment. Nothing is lost by waiting.';
+
+    /** Two pieces and a save that has started and not finished. */
+    const savingTwoPieces = async () => {
+      const save = deferred();
+      createEntry.mockImplementation(() => save.promise);
+
+      const tree = await render();
+      await tap(tree, 'capture-type-button');
+      await type(tree, 'piece-note-input-0', 'Rain on the bus window');
+      await tap(tree, 'capture-camera-button');
+      await tap(tree, 'camera-photo-button');
+      await tap(tree, 'camera-done-button');
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+
+      await tap(tree, 'capture-save-button');
+      await tap(tree, 'audience-option-family');
+      // In flight: the write has been asked for and has not answered.
+      expect(createEntry).toHaveBeenCalledTimes(1);
+      expect(CaptureDraftStore.clearAfterSave).not.toHaveBeenCalled();
+
+      return { tree, save };
+    };
+
+    it('refuses a removal, and says to wait rather than asking', async () => {
+      const { tree } = await savingTwoPieces();
+      const before = listed('new');
+
+      await tap(tree, 'piece-remove-0');
+
+      // Not even asked: there is nothing to confirm when the answer is "in a moment".
+      expect(Alert.alert).not.toHaveBeenCalled();
+      expect(CaptureDraftStore.removePiece).not.toHaveBeenCalled();
+      expect(textAt(tree, 'capture-capture-error')).toBe(STILL_SAVING);
+      // Both pieces still on screen and still in the draft, media and all.
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+      expect(listed('new')).toEqual(before);
+    });
+
+    it('refuses Discard in the same window, with the same message', async () => {
+      const { tree } = await savingTwoPieces();
+
+      await tap(tree, 'capture-overflow-button');
+      await tap(tree, 'capture-discard-button');
+
+      expect(Alert.alert).not.toHaveBeenCalled();
+      // The one that would take the slot's whole folder, media included.
+      expect(CaptureDraftStore.discard).not.toHaveBeenCalled();
+      expect(navigation.goBack).not.toHaveBeenCalled();
+      expect(textAt(tree, 'capture-capture-error')).toBe(STILL_SAVING);
+      expect(kinds(tree)).toEqual(['Note', 'Photo']);
+    });
+
+    it('lets both through again once the save has settled', async () => {
+      const { tree, save } = await savingTwoPieces();
+
+      // The failed save is the settled outcome that leaves this screen up with its pieces --
+      // a save that worked goes back, and Save stays down for good.
+      await act(async () => {
+        save.fail(new Error('disk full'));
+      });
+      expect(textAt(tree, 'capture-save-error')).toMatch(/still here/i);
+
+      await tap(tree, 'piece-remove-0');
+      await confirmRemoval();
+
+      expect(CaptureDraftStore.removePiece).toHaveBeenCalledTimes(1);
+      expect(kinds(tree)).toEqual(['Photo']);
+
+      // And Discard asks its own question again, as it did before the save.
+      await tap(tree, 'capture-overflow-button');
+      await tap(tree, 'capture-discard-button');
+      expect(lastAsked()[0]).toBe('Discard this memory?');
+    });
+
+    /**
+     * The other way a save settles, and the one that needs saying: a save that **worked**.
+     *
+     * `saveInFlightRef` stays set after one, deliberately, so that Save stays down for good --
+     * but nothing is being copied out of the draft folder any more, and the screen is only
+     * still up because the tidying up after the save did not finish (here: `goBack` had
+     * nowhere to go). Answering "Still saving this memory — give it a moment" beside the banner
+     * saying the memory is saved would be the screen contradicting itself, so the refusal is
+     * over when the save is.
+     */
+    it('stops refusing once a save that worked has finished', async () => {
+      const { tree, save } = await savingTwoPieces();
+      navigation.goBack.mockImplementation(() => {
+        throw new Error('nowhere to go back to');
+      });
+
+      await act(async () => {
+        save.settle({ localId: 'entry-1', date: '2026-11-08' });
+      });
+
+      // Saved, and still on screen -- the one state where this screen stays up with Save
+      // correctly down for good.
+      expect(textAt(tree, 'capture-saved-notice')).toMatch(/your memory is on this phone/i);
+
+      await tap(tree, 'capture-overflow-button');
+      await tap(tree, 'capture-discard-button');
+
+      expect(lastAsked()[0]).toBe('Discard this memory?');
+      expect(has(tree, 'capture-capture-error')).toBe(false);
     });
   });
 });
