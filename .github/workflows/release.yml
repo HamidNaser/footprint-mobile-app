@@ -25,13 +25,14 @@ on:
           - android
           - all
       profile:
-        description: 'production = TestFlight/App Store. preview = internal ad-hoc testing.'
+        description: 'production = TestFlight/App Store. preview = internal ad-hoc testing. development-device = a FootPrint dev client for a registered phone (live logs from a computer running expo start).'
         required: true
         default: 'production'
         type: choice
         options:
           - production
           - preview
+          - development-device
       submit:
         description: 'Upload to App Store Connect / Play after a successful build'
         required: true
@@ -108,9 +109,9 @@ jobs:
         run: npm ci
 
       - name: Guard against submitting a preview build
-        if: ${{ inputs.submit && inputs.profile == 'preview' }}
+        if: ${{ inputs.submit && inputs.profile != 'production' }}
         run: |
-          echo "::error::The 'preview' profile is distribution:internal (ad-hoc) and cannot be submitted to a store. Re-run with profile=production, or with submit=false."
+          echo "::error::The '${{ inputs.profile }}' profile is distribution:internal (ad-hoc) and cannot be submitted to a store. Re-run with profile=production, or with submit=false."
           exit 1
 
       - name: Build${{ inputs.submit && ' and submit' || '' }}
@@ -185,7 +186,7 @@ jobs:
             if [ -n "${{ steps.builtat.outputs.id }}" ]; then
               PAGE="https://expo.dev/accounts/hamid.naser/projects/footprint-mobile-app/builds/${{ steps.builtat.outputs.id }}"
             fi
-            if [ "${{ inputs.profile }}" = "preview" ]; then
+            if [ "${{ inputs.profile }}" != "production" ]; then
               echo "> This is an **ad-hoc** build. It will **not** appear in TestFlight."
               echo ""
               if [ -n "$PAGE" ]; then
