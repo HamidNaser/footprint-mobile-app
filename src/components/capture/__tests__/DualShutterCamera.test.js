@@ -1423,9 +1423,9 @@ describe('video waits for the camera (013-capture-fixes row 3)', () => {
 
   it('gives up after 5 attempts and reports the failure as before', async () => {
     const tree = await render();
-    camera.__recordAsync.mockImplementation(async () => {
-      throw new Error('Camera is not ready yet');
-    });
+    for (let i = 0; i < 5; i += 1) {
+      camera.__recordAsync.mockRejectedValueOnce(new Error('Camera is not ready yet'));
+    }
 
     await pressVideo(tree);
     await cameraBecomesReady(tree);
@@ -1437,7 +1437,6 @@ describe('video waits for the camera (013-capture-fixes row 3)', () => {
     expect(onCaptureFailed.mock.calls[0][0].reason).toBe('capture-failed');
     expect(has(tree, 'camera-capture-failed')).toBe(true);
     expect(has(tree, 'camera-recording-indicator')).toBe(false);
-    camera.__recordAsync.mockReset();
   });
 
   it('does not retry an error that is not about readiness', async () => {
@@ -1509,9 +1508,16 @@ describe('video waits for the camera (013-capture-fixes row 3)', () => {
     expect(onCaptureFailed).not.toHaveBeenCalled();
     expect(has(tree, 'camera-capture-failed')).toBe(false);
 
-    // And the shutter is not stuck: a fresh start works.
+    // And the shutter is not stuck: a fresh start works, and delivers a real video.
     await tap(tree, 'camera-video-button');
     expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    await elapse(2000);
+    await tap(tree, 'camera-video-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ kind: 'video', uri: camera.__videoUri(1), duration: 2 }),
+    );
+    expect(onCaptureFailed).not.toHaveBeenCalled();
   });
 
   it('starts anyway if the preview never reports ready again', async () => {
@@ -1521,5 +1527,54 @@ describe('video waits for the camera (013-capture-fixes row 3)', () => {
     await elapse(2000);
 
     expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    await tap(tree, 'camera-video-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].kind).toBe('video');
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+  });
+
+  it('measures the clip from when recording began, not from the tap', async () => {
+    const tree = await render();
+
+    await pressVideo(tree);
+    await elapse(1000); // the camera is still settling
+    expect(textAt(tree, 'camera-recording-time')).toBe('0:00');
+    await cameraBecomesReady(tree);
+    await elapse(3000);
+    await tap(tree, 'camera-video-button');
+
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].duration).toBe(3); // not 4
+    expect(onShot.mock.calls[0][0].capturedAt).toBe(START_ISO); // still the tap (R8)
+  });
+
+  it('shows no failure for a recording ended while the last attempt was in flight', async () => {
+    const tree = await render();
+    let rejectLast;
+    for (let i = 0; i < 4; i += 1) {
+      camera.__recordAsync.mockRejectedValueOnce(new Error('Camera is not ready yet'));
+    }
+    camera.__recordAsync.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectLast = () => reject(new Error('Camera is not ready yet'));
+        }),
+    );
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    for (let i = 0; i < 6; i += 1) await elapse(200);
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(5);
+
+    await tap(tree, 'camera-video-button'); // stop, with attempt 5 in flight
+    await act(async () => {
+      rejectLast();
+    });
+
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    expect(preview(tree).props.mode).toBe('picture');
   });
 });

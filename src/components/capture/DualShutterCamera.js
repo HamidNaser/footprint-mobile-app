@@ -64,7 +64,15 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Text, Image, TouchableOpacity, StyleSheet, Platform, Linking } from 'react-native';
+import {
+  View,
+  Text,
+  Image,
+  TouchableOpacity,
+  StyleSheet,
+  Platform,
+  Linking,
+} from 'react-native';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -349,7 +357,8 @@ export default function DualShutterCamera({
     }
 
     capturedAtRef.current = new Date().toISOString();
-    startedAtRef.current = Date.now();
+    // Stamped just before `recordAsync` is called, once the camera is ready (see the effect).
+    startedAtRef.current = null;
     stoppedAtRef.current = null;
     setRecordedMs(0);
     // The flip to video output reconfigures the camera; wait for it to report ready again.
@@ -411,18 +420,26 @@ export default function DualShutterCamera({
       // than losing the video; any other error, or the last attempt, takes the failure path.
       for (let attempt = 1; attempt <= RECORD_MAX_ATTEMPTS; attempt += 1) {
         try {
-          video = await cameraRef.current?.recordAsync({
-            maxDuration: maxVideoSeconds,
-          });
+          // The clip's clock starts here, not at the tap: the ready-wait and any retries
+          // are not part of the video. (`capturedAt` stays at the tap, research R8.)
+          startedAtRef.current = Date.now();
+          video = await cameraRef.current?.recordAsync({ maxDuration: maxVideoSeconds });
           recordError = null;
           break;
         } catch (error) {
           recordError = error;
-          if (!isNotReadyError(error) || attempt === RECORD_MAX_ATTEMPTS) break;
+          if (!isNotReadyError(error)) break;
+          if (stoppedAtRef.current != null) {
+            // The person ended it while it was still failing to start: nothing to keep,
+            // and no notice for a recording they ended -- even on the last attempt.
+            cancelled = true;
+            recordError = null;
+            break;
+          }
+          if (attempt === RECORD_MAX_ATTEMPTS) break;
           await new Promise((resolve) => setTimeout(resolve, RECORD_RETRY_DELAY_MS));
           if (!mountedRef.current) return;
           if (stoppedAtRef.current != null) {
-            // The person ended it while it was still failing to start: nothing to keep.
             cancelled = true;
             recordError = null;
             break;
@@ -643,8 +660,8 @@ export default function DualShutterCamera({
               <View testID="camera-microphone-denied" style={styles.notice}>
                 <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-microphone-message" style={styles.noticeText}>
-                  Footprint can’t use the microphone, so it can’t record a video. Turn it on in
-                  Settings. Photos still work.
+                  Footprint can’t use the microphone, so it can’t record a video. Turn it on
+                  in Settings. Photos still work.
                 </Text>
                 <TouchableOpacity
                   testID="camera-open-settings-button"
@@ -672,8 +689,8 @@ export default function DualShutterCamera({
               <View testID="camera-video-blocked" style={styles.notice}>
                 <Ionicons name="mic-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-video-blocked-message" style={styles.noticeText}>
-                  You’re recording a voice note, so a video would cut it short. Photos still work;
-                  to record a video, close the camera, stop the voice note, and come back.
+                  You’re recording a voice note, so a video would cut it short. Photos still
+                  work; to record a video, close the camera, stop the voice note, and come back.
                 </Text>
               </View>
             )}
