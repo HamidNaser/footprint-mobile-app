@@ -7,6 +7,7 @@
 
 import { ApiClient } from './ApiClient';
 import { toDateKey } from '../utils/journalDate';
+import { wholeSeconds } from '../utils/wholeSeconds';
 import {
   API_CONFIG,
   JOURNAL_ENDPOINTS,
@@ -330,7 +331,11 @@ class JournalApiClass {
       // precision on one path only, which is the kind of gap that surfaces months later.
       datePrecision: entry.date_precision || entry.datePrecision || 'day',
       title: entry.title,
-      contentBlocks: this._parseContentBlocks(entry.content_blocks || entry.contentBlocks),
+      // The server's durations are int? seconds; a measured 4.37 is refused with a 400.
+      // Rounded here, on the wire only -- local storage keeps the precise value.
+      contentBlocks: this._roundDurations(
+        this._parseContentBlocks(entry.content_blocks || entry.contentBlocks)
+      ),
       visibility: entry.visibility,
       mood: entry.mood,
       weather: entry.weather,
@@ -366,6 +371,26 @@ class JournalApiClass {
       synced_at: new Date().toISOString(),
       sync_status: 'synced',
     };
+  }
+
+  /**
+   * Round every block and media-item duration to whole seconds (wire format only).
+   */
+  _roundDurations(blocks) {
+    if (!Array.isArray(blocks)) return blocks;
+    return blocks.map((block) => ({
+      ...block,
+      ...(block.duration !== undefined ? { duration: wholeSeconds(block.duration) } : {}),
+      ...(Array.isArray(block.media)
+        ? {
+            media: block.media.map((item) =>
+              item && item.duration !== undefined
+                ? { ...item, duration: wholeSeconds(item.duration) }
+                : item
+            ),
+          }
+        : {}),
+    }));
   }
 
   /**

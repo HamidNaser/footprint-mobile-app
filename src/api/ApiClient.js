@@ -520,7 +520,7 @@ class ApiClientClass {
 
     // Try to parse JSON response
     const contentType = response.headers.get('content-type');
-    if (contentType && contentType.includes('application/json')) {
+    if (contentType && /application\/([\w.+-]*\+)?json/i.test(contentType)) {
       try {
         data = await response.json();
       } catch (e) {

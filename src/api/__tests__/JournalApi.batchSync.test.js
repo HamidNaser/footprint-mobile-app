@@ -131,3 +131,28 @@ describe('batchSync and an audience the server could not apply', () => {
     });
   });
 });
+
+describe('batchSync and durations', () => {
+  it('sends every duration as whole seconds, on blocks and on media items', async () => {
+    post.mockResolvedValue(acceptedEverything());
+    const entry = { localId: 'L', contentBlocks: [
+      { type: 'audio', duration: 4.37, media: [] },
+      { type: 'videos', media: [{ id: 'm', duration: 11.6 }] },
+    ] };
+
+    await JournalApi.batchSync({ creates: [entry], updates: [], deletes: [] });
+
+    const sent = post.mock.calls[0][1];
+    expect(sent.creates[0].contentBlocks[0].duration).toBe(4);
+    expect(sent.creates[0].contentBlocks[1].media[0].duration).toBe(12);
+  });
+
+  it('leaves the callers own blocks untouched (local storage keeps the precise value)', async () => {
+    post.mockResolvedValue(acceptedEverything());
+    const entry = { localId: 'L', contentBlocks: [{ type: 'audio', duration: 4.37 }] };
+
+    await JournalApi.batchSync({ creates: [entry], updates: [], deletes: [] });
+
+    expect(entry.contentBlocks[0].duration).toBe(4.37);
+  });
+});
