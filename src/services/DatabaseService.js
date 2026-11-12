@@ -334,7 +334,7 @@ class DatabaseServiceClass {
     const rows = await db.getAllAsync(
       `SELECT * FROM journal_entries 
        WHERE journal_id = ? AND deleted_at IS NULL 
-       ORDER BY ${orderBy} ${order}
+       ORDER BY ${orderBy} ${order}, created_at ${order}
        LIMIT ? OFFSET ?`,
       [journalId, limit, offset]
     );
