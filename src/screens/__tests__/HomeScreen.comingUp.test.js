@@ -1,10 +1,10 @@
 /**
  * 013 T066 -- HomeScreen renders `ComingUpCard` after the Events quick action, fed by
- * `useUpcomingEvents`, and wired to Timeline's Events view (FR-034, research R11, SC-009).
+ * `useUpcomingEvents`, and wired to the stand-alone Events screen (FR-034, research R11, SC-009).
  *
  * `useUpcomingEvents`'s own behaviour (the civil-date split, the fail-closed error) is covered
  * by its own test (T061); this file is only about what `HomeScreen` does with what the hook
- * gives it, the same division `TimelineScreen.events.test.js` draws for the same hook.
+ * gives it, the same division the other hook-consuming screen tests draw.
  *
  * The phase checkpoint -- "the six tabs are unchanged (T012)" -- is not re-pinned here:
  * `HomeScreen` renders no tab chrome of its own, so there is nothing about the tab list for this
@@ -140,8 +140,8 @@ afterEach(() => {
 describe('HomeScreen (T066 -- Coming up card)', () => {
   it('does not ask for the drafts tab, so the landing screen makes two requests and not three (Minor 6)', async () => {
     // The card reads `upcoming` and `error` and nothing else, so the drafts request bought
-    // nothing -- a third call on the screen the app opens on. The Timeline pane, which does
-    // show "Drafts (n)", asks for it (`TimelineScreen.events.test.js` pins that side).
+    // nothing -- a third call on the screen the app opens on. The Events pane that used to live on Timeline, which did
+    // show "Drafts (n)", asked for it (removed in 013 fix T8).
     mockUpcoming({ upcoming: [event()] });
     await mount();
 
@@ -180,13 +180,13 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
     expect(shows(tree, /^Coming up$/)).toBe(false);
   });
 
-  it("tapping the Coming up card navigates to Timeline's Events view", async () => {
+  it("tapping the Coming up card navigates to the Events screen", async () => {
     mockUpcoming({ upcoming: [event()] });
     const navigate = jest.fn();
     const tree = await mount({ navigation: { navigate } });
 
     pressableByText(tree, /^See all/).props.onPress();
-    expect(navigate).toHaveBeenCalledWith('Timeline', { view: 'events' });
+    expect(navigate).toHaveBeenCalledWith('Events');
   });
 
   // Minor 1 (fix round 1): `pressableByText` finds the first pressable whose subtree contains
@@ -196,7 +196,7 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
   // swallows the tap on the real "See all" button would still pass it. Every pressable the
   // card exposes is checked here, one at a time, each cleared before the next is pressed, so a
   // broken nested button cannot hide behind the outer card's own onPress.
-  it('every pressable on the card -- the card body and the nested "See all" -- independently navigates to Timeline', async () => {
+  it('every pressable on the card -- the card body and the nested "See all" -- independently navigates to Events', async () => {
     mockUpcoming({ upcoming: [event()] });
     const navigate = jest.fn();
     const tree = await mount({ navigation: { navigate } });
@@ -218,7 +218,7 @@ describe('HomeScreen (T066 -- Coming up card)', () => {
     cardPressables.forEach((node) => {
       navigate.mockClear();
       node.props.onPress();
-      expect(navigate).toHaveBeenCalledWith('Timeline', { view: 'events' });
+      expect(navigate).toHaveBeenCalledWith('Events');
     });
   });
 

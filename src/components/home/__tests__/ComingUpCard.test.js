@@ -11,7 +11,7 @@
  *    failed load can never be mistaken for "you have no events" (the spec's own Edge Case).
  *
  * `onPress` is a plain callback prop here -- this file does not know or care that it resolves to
- * `navigate('Timeline', { view: 'events' })`; that wiring belongs to `HomeScreen` and is pinned
+ * `navigate('Events')`; that wiring belongs to `HomeScreen` and is pinned
  * by `HomeScreen.comingUp.test.js`.
  */
 
