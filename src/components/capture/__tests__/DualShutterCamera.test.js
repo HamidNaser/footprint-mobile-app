@@ -706,8 +706,9 @@ describe('permission screen (013-capture-fixes row 2)', () => {
 
   it('asks iOS for the camera once, on first open, when the answer is not yet known', async () => {
     camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
-    const tree = await render();
     const request = camera.useCameraPermissions()[1];
+    request.mockImplementationOnce(() => new Promise(() => {})); // the prompt is still up
+    const tree = await render();
     expect(request).toHaveBeenCalledTimes(1);
 
     // Re-rendering with the same answer does not ask a second time.
@@ -718,6 +719,30 @@ describe('permission screen (013-capture-fixes row 2)', () => {
     // While waiting, no "can't use the camera" message flashes.
     expect(has(tree, 'camera-permission-checking')).toBe(true);
     expect(has(tree, 'camera-permission-denied')).toBe(false);
+  });
+
+  it('falls through to the denied screen, with a way out, when the ask rejects', async () => {
+    camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
+    const request = camera.useCameraPermissions()[1];
+    request.mockImplementationOnce(() => Promise.reject(new Error('no prompt')));
+    const tree = await render();
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'camera-permission-checking')).toBe(false);
+    expect(has(tree, 'camera-permission-denied')).toBe(true);
+    await tap(tree, 'camera-close-button');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls through too when the ask throws synchronously', async () => {
+    camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
+    const request = camera.useCameraPermissions()[1];
+    request.mockImplementationOnce(() => {
+      throw new Error('sync');
+    });
+    const tree = await render();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(has(tree, 'camera-permission-denied')).toBe(true);
   });
 
   it('does not ask again once refused for good', async () => {

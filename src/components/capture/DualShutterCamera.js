@@ -454,6 +454,10 @@ export default function DualShutterCamera({
   // Ask on first open (owner's decision, 013-capture-fixes): iOS's own prompt, once. A refusal
   // for good (`canAskAgain: false`) is never re-asked -- that is the Open Settings screen.
   const askedRef = useRef(false);
+  // State, so the render re-runs once the single ask has settled. If the status is still
+  // undetermined after that, the denied screen (Close, Open Settings, Allow) takes over
+  // rather than leaving the person on "Checking" with no way out.
+  const [askSettled, setAskSettled] = useState(false);
   useEffect(() => {
     if (askedRef.current) return;
     if (
@@ -463,13 +467,23 @@ export default function DualShutterCamera({
       permission.status === 'undetermined'
     ) {
       askedRef.current = true;
-      Promise.resolve(requestPermission()).catch(() => {});
+      (async () => {
+        try {
+          await requestPermission();
+        } catch (error) {
+          // A failed ask is treated as an unanswered one: the denied screen takes over.
+        }
+        if (mountedRef.current) setAskSettled(true);
+      })();
     }
   }, [permission, requestPermission]);
 
   // Still being asked (or about to be). Nothing is shown that could look like a camera that
   // works, and the "can't use the camera" message does not flash before the prompt.
-  if (!permission || (permission.status === 'undetermined' && permission.canAskAgain)) {
+  if (
+    !permission ||
+    (permission.status === 'undetermined' && permission.canAskAgain && !askSettled)
+  ) {
     return (
       <View testID="camera-permission-checking" style={[styles.container, styles.centred, style]}>
         <Text style={styles.checkingText}>Checking camera access…</Text>
