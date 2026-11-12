@@ -50,10 +50,14 @@
  */
 
 import React, { useEffect, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
-// `formatClock` comes with it: an audio row and the video row under it must not round the same
-// 11.6 seconds two different ways, and one of the two formatters had to go.
-import VoicePlayer, { formatClock } from '../journal/VoicePlayer';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions } from 'react-native';
+import VoicePlayer from '../journal/VoicePlayer';
+import DerivativeImage from '../media/DerivativeImage';
+import { VideoThumbnail } from '../media/VideoThumbnail';
+
+/** A photo or video row's picture: the list's width less its 16 px of padding at each end. */
+const MEDIA_HEIGHT = 180;
+const MEDIA_WIDTH = Dimensions.get('window').width - 32;
 
 /** What each kind is called on a row. The label is the contract; the colour is cosmetic. */
 const KINDS = {
@@ -86,12 +90,8 @@ export const placeLabel = (location) => {
   return 'No place';
 };
 
-/** Everything but a note and a voice clip: those two have a control of their own. */
-const detailFor = (piece) => {
-  if (piece.kind === 'video') return `Video · ${formatClock(piece.duration)}`;
-  if (piece.kind === 'photo') return 'Photo kept with this memory';
-  return 'Kept with this memory';
-};
+/** A kind this list does not know: the only row left with a line of words. */
+const detailFor = () => 'Kept with this memory';
 
 /**
  * One piece.
@@ -191,9 +191,40 @@ function PieceRow({
           isRecording={isRecording}
           style={styles.player}
         />
+      ) : piece.kind === 'photo' ? (
+        // `savedItem` is the media item an edited memory already has (it carries no `uri`);
+        // a piece just taken carries only its local file, which `localPath` renders first.
+        <DerivativeImage
+          testID={`piece-photo-${index}`}
+          media={piece.savedItem ?? { localPath: piece.uri }}
+          style={styles.media}
+          resizeMode="cover"
+        />
+      ) : piece.kind === 'video' ? (
+        // Wrapped because VideoThumbnail does not forward a testID. Its `duration` is in
+        // milliseconds (the badge), a piece's is in seconds.
+        <View testID={`piece-video-${index}`}>
+          {piece.savedItem ? (
+            <VideoThumbnail
+              media={piece.savedItem}
+              duration={piece.duration * 1000}
+              width={MEDIA_WIDTH}
+              height={MEDIA_HEIGHT}
+              style={styles.videoThumb}
+            />
+          ) : (
+            <VideoThumbnail
+              videoUri={piece.uri}
+              duration={piece.duration * 1000}
+              width={MEDIA_WIDTH}
+              height={MEDIA_HEIGHT}
+              style={styles.videoThumb}
+            />
+          )}
+        </View>
       ) : (
         <Text testID={`piece-detail-${index}`} style={styles.detail}>
-          {detailFor(piece)}
+          {detailFor()}
         </Text>
       )}
     </View>
@@ -298,6 +329,17 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontSize: 15,
     color: '#1C1C1E',
+  },
+  media: {
+    width: '100%',
+    height: MEDIA_HEIGHT,
+    borderRadius: 10,
+    marginTop: 8,
+    backgroundColor: '#F2F2F7',
+  },
+  videoThumb: {
+    marginTop: 8,
+    borderRadius: 10,
   },
   player: {
     marginTop: 6,

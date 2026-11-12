@@ -3948,7 +3948,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       // The clip is gone and the two around it have closed up in their own order.
       expect(kinds(tree)).toEqual(['Note', 'Photo']);
       expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
-      expect(textAt(tree, 'piece-detail-1')).toBe('Photo kept with this memory');
+      expect(nodeAt(tree, 'piece-photo-1')).toBeDefined();
       expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 2 pieces');
       // And the unsaved memory kept on the phone agrees (FR-012).
       expect(listed('new')).toEqual([noteId, photoId]);

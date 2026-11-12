@@ -41,6 +41,17 @@ import renderer, { act } from 'react-test-renderer';
 
 import PieceList, { kindLabel } from '../PieceList';
 
+// Host stand-ins: no media hook, poller or thumbnail generator runs. They keep the props the
+// row passes so the tests can read what each was given.
+jest.mock('../../media/DerivativeImage', () => {
+  const R = require('react');
+  return { __esModule: true, default: (props) => R.createElement('DerivativeImage', props) };
+});
+jest.mock('../../media/VideoThumbnail', () => {
+  const R = require('react');
+  return { __esModule: true, VideoThumbnail: (props) => R.createElement('VideoThumbnail', props) };
+});
+
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 /** A local instant, so the expected `HH:mm` is the same in every timezone. */
@@ -312,8 +323,48 @@ describe('PieceList: the control disturbs nothing else on the row (FR-004, FR-00
     // says it is kept. One of each, so a control inserted into the wrong branch is caught.
     expect(nodeAt(tree, 'piece-note-input-1').props.value).toBe(NOTE.content);
     expect(pressable(tree, 'piece-player-2-toggle')).toBeDefined();
-    expect(textAt(tree, 'piece-detail-3')).toBe('Video · 0:12');
-    expect(textAt(tree, 'piece-detail-0')).toBe('Photo kept with this memory');
+    expect(has(tree, 'piece-video-3')).toBe(true);
+    expect(tree.root.findByType('VideoThumbnail').props.duration).toBe(12000);
+    expect(has(tree, 'piece-photo-0')).toBe(true);
+  });
+
+  describe('photos and videos show themselves (013 fix 4)', () => {
+    const AT = momentAt(9, 0);
+    const media = (tree, id) =>
+      tree.root.findAll((n) => n.props?.testID === id && n.props?.media !== undefined)[0];
+
+    it('shows a new photo as the picture itself', async () => {
+      const tree = await render({
+        pieces: [{ localId: 'p', kind: 'photo', uri: 'file:///a.jpg', capturedAt: AT }],
+      });
+      expect(media(tree, 'piece-photo-0').props.media).toEqual({ localPath: 'file:///a.jpg' });
+    });
+
+    it('shows an edited photo from the item the memory already has', async () => {
+      const saved = { id: 'm1', thumbnailUrl: 'https://cdn/t.webp', url: 'https://cdn/a.jpg' };
+      const tree = await render({
+        pieces: [{ localId: 'p', kind: 'photo', savedItem: saved, capturedAt: AT }],
+      });
+      expect(media(tree, 'piece-photo-0').props.media).toBe(saved);
+    });
+
+    it('shows a new video as a thumbnail of its file, with its length in milliseconds', async () => {
+      const tree = await render({
+        pieces: [{ localId: 'v', kind: 'video', uri: 'file:///v.mov', duration: 7, capturedAt: AT }],
+      });
+      expect(has(tree, 'piece-video-0')).toBe(true);
+      const thumb = tree.root.findByType('VideoThumbnail');
+      expect(thumb.props.videoUri).toBe('file:///v.mov');
+      expect(thumb.props.duration).toBe(7000);
+    });
+
+    it('shows an edited video from the item the memory already has', async () => {
+      const saved = { id: 'v1', thumbnailUrl: 'https://cdn/vt.webp', url: 'https://cdn/v.mov' };
+      const tree = await render({
+        pieces: [{ localId: 'v', kind: 'video', savedItem: saved, duration: 7, capturedAt: AT }],
+      });
+      expect(tree.root.findByType('VideoThumbnail').props.media).toBe(saved);
+    });
   });
 
   it('leaves the note input\'s own handlers reaching the note\'s own piece', async () => {
