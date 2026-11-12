@@ -675,7 +675,9 @@ describe('DualShutterCamera: a denied camera permission', () => {
   });
 
   it('offers to ask again when the phone still allows it', async () => {
-    camera.__refuseCamera({ canAskAgain: true, status: 'undetermined' });
+    // 'denied' + canAskAgain (Android's one more try); an 'undetermined' one is now asked
+    // automatically on open and shows "Checking camera access" meanwhile.
+    camera.__refuseCamera({ canAskAgain: true, status: 'denied' });
     const tree = await render();
 
     expect(has(tree, 'camera-open-settings-button')).toBe(true);
@@ -690,6 +692,39 @@ describe('DualShutterCamera: a denied camera permission', () => {
     expect(has(tree, 'camera-photo-button')).toBe(false);
     expect(has(tree, 'camera-video-button')).toBe(false);
     expect(preview(tree)).toBeUndefined();
+  });
+});
+
+describe('permission screen (013-capture-fixes row 2)', () => {
+  it('defines every style the permission screens use, in a colour readable on black', () => {
+    const source = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'DualShutterCamera.js'), 'utf8');
+    const used = [...new Set([...source.matchAll(/styles\.(\w+)/g)].map((m) => m[1]))];
+    const defined = new Set([...source.matchAll(/^  (\w+): \{/gm)].map((m) => m[1]));
+    expect(used.filter((name) => !defined.has(name))).toEqual([]);
+  });
+
+  it('asks iOS for the camera once, on first open, when the answer is not yet known', async () => {
+    camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
+    const tree = await render();
+    const request = camera.useCameraPermissions()[1];
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // Re-rendering with the same answer does not ask a second time.
+    await act(async () => {
+      tree.update(element({ voiceRecording: true }));
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    // While waiting, no "can't use the camera" message flashes.
+    expect(has(tree, 'camera-permission-checking')).toBe(true);
+    expect(has(tree, 'camera-permission-denied')).toBe(false);
+  });
+
+  it('does not ask again once refused for good', async () => {
+    camera.__refuseCamera({ granted: false, status: 'denied', canAskAgain: false });
+    const tree = await render();
+    expect(camera.useCameraPermissions()[1]).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-open-settings-button')).toBe(true);
   });
 });
 

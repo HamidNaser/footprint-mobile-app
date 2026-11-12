@@ -451,8 +451,25 @@ export default function DualShutterCamera({
     return () => clearInterval(handle);
   }, [isRecording]);
 
-  // Still being asked. Nothing is shown that could look like a camera that works.
-  if (!permission) {
+  // Ask on first open (owner's decision, 013-capture-fixes): iOS's own prompt, once. A refusal
+  // for good (`canAskAgain: false`) is never re-asked -- that is the Open Settings screen.
+  const askedRef = useRef(false);
+  useEffect(() => {
+    if (askedRef.current) return;
+    if (
+      permission &&
+      !permission.granted &&
+      permission.canAskAgain &&
+      permission.status === 'undetermined'
+    ) {
+      askedRef.current = true;
+      Promise.resolve(requestPermission()).catch(() => {});
+    }
+  }, [permission, requestPermission]);
+
+  // Still being asked (or about to be). Nothing is shown that could look like a camera that
+  // works, and the "can't use the camera" message does not flash before the prompt.
+  if (!permission || (permission.status === 'undetermined' && permission.canAskAgain)) {
     return (
       <View testID="camera-permission-checking" style={[styles.container, styles.centred, style]}>
         <Text style={styles.checkingText}>Checking camera access…</Text>
@@ -697,6 +714,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
+  checkingText: { color: '#FFFFFF', fontSize: 16 },
+  deniedText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginTop: 16,
+    marginBottom: 24,
+  },
+  primaryButton: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    marginBottom: 12,
+  },
+  primaryButtonText: { color: '#000000', fontSize: 16, fontWeight: '600' },
+  secondaryButton: { paddingVertical: 10, paddingHorizontal: 24 },
+  secondaryButtonText: { color: '#FFFFFF', fontSize: 16 },
   preview: {
     ...StyleSheet.absoluteFill,
   },
