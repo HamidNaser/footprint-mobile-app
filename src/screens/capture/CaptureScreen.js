@@ -108,7 +108,7 @@ import {
   AppState,
   Linking,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -549,6 +549,7 @@ function restoreUnderCaptures(setPieces, stored) {
 const draftsLeftAfterSave = new Map();
 
 export default function CaptureScreen({ route, navigation }) {
+  const insets = useSafeAreaInsets();
   const isEditMode = route?.params?.mode === 'edit';
   const entryLocalId = route?.params?.entryLocalId ?? null;
   const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
@@ -1710,8 +1711,16 @@ export default function CaptureScreen({ route, navigation }) {
     // The safe area wraps the *content*, not the screen, so that the camera overlay below
     // can be genuinely full screen: an overlay inside the inset box would leave a white band
     // under the notch and over the home indicator.
+    //
+    // The insets come from `useSafeAreaInsets` and are applied as padding, not through the
+    // library's native `SafeAreaView`: inside a `fullScreenModal` that wrapper sometimes kept a 0
+    // top inset, which left the X and Save buttons under the clock where they could not be tapped.
+    // The hook returned the right values (top 59, bottom 34) on every render on the device.
     <View style={styles.screen}>
-      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+      <View
+        testID="capture-safe-content"
+        style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+      >
         <View style={styles.header}>
           <TouchableOpacity
             testID="capture-close-button"
@@ -1876,7 +1885,7 @@ export default function CaptureScreen({ route, navigation }) {
             />
           }
         />
-      </SafeAreaView>
+      </View>
 
       {isCameraOpen && (
         // Over this screen, not instead of it: a replacement would unmount the voice bar and

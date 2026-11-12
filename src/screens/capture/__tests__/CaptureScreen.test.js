@@ -528,6 +528,19 @@ jest.mock('../../../components/capture/SaveAudienceSheet', () => {
   return { __esModule: true, default: Mock, SaveAudienceSheet: Mock, AUDIENCE_OPTIONS };
 });
 
+// Task 10: the insets come from the hook (device: top 59, bottom 34), and the library's native
+// SafeAreaView is replaced by a marker so the test can prove the screen no longer renders it.
+jest.mock('react-native-safe-area-context', () => {
+  const ReactLib = require('react');
+  const { View } = require('react-native');
+  const actual = jest.requireActual('react-native-safe-area-context');
+  return {
+    ...actual,
+    useSafeAreaInsets: () => ({ top: 59, bottom: 34, left: 0, right: 0 }),
+    SafeAreaView: (props) => ReactLib.createElement(View, { ...props, testID: 'lib-safe-area-view' }),
+  };
+});
+
 import CaptureDraftStore from '../../../services/CaptureDraftStore';
 import { JournalService } from '../../../services/JournalService';
 import { SyncQueue } from '../../../sync/SyncQueue';
@@ -4858,5 +4871,19 @@ describe('opening straight into the camera (013 fix T9)', () => {
     const tree = await render({ mode: 'edit', entryLocalId: 'e1', open: 'camera' });
 
     expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+});
+
+describe('CaptureScreen: the header never sits under the status bar', () => {
+  it('pads the content by the hook insets on the first render, with no native SafeAreaView', async () => {
+    const { StyleSheet } = require('react-native');
+    const tree = await render({ mode: 'new' });
+
+    const content = nodeAt(tree, 'capture-safe-content');
+    expect(content).toBeDefined();
+    const style = StyleSheet.flatten(content.props.style);
+    expect(style.paddingTop).toBe(59);
+    expect(style.paddingBottom).toBe(34);
+    expect(has(tree, 'lib-safe-area-view')).toBe(false);
   });
 });
