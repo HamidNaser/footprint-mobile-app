@@ -454,3 +454,42 @@ The `Events` stack screen already exists (`AppNavigator.js:182`).
 - [ ] `git grep -n "\[DIAG\]" -- .` returns nothing.
 - [ ] `npm test` — full suite; quote passed/failed/total against the baseline.
 - [ ] On the iPhone (development build, owner): camera opens with iOS's prompt; photo + Done shows the photo in the list; a 3-second video records and shows; Journal bar Camera opens the camera; recording bar spans the dock; map pinch and +/− zoom; Timeline has no Events; Home "See all" opens Events; a memory with a voice note **and** a video saves and the Metro log shows `pushed: 1` with no 400.
+
+---
+
+## Addendum (owner-approved 2026-11-12 after device testing): Tasks 10–12
+
+Design rows 10–12 in the manifest (section "scope addition"). Same Global Constraints.
+
+### Task 10: The capture header never sits under the status bar (design row 10)
+
+**Files:** Modify `src/screens/capture/CaptureScreen.js` (the `<SafeAreaView style={styles.safeArea} edges={['top','bottom']}>` wrapper, ~:1714 and its close ~:1879; the `SafeAreaView` import ~:111). Test: `src/screens/capture/__tests__/CaptureScreen.test.js`.
+
+Device evidence: on each mount the header measured at window y=0, then 59 a moment later; once it stayed at 0, so X and Save sat under the clock and could not be tapped. `useSafeAreaInsets()` returned `{top: 59, bottom: 34}` on every render.
+
+- [ ] **Step 1: Failing test** — mock `react-native-safe-area-context` in the test file so `useSafeAreaInsets` returns `{ top: 59, bottom: 34, left: 0, right: 0 }` (keep the rest of the module: `jest.requireActual`, or the package's own `react-native-safe-area-context/jest/mock` if it exists). Assert the content wrapper (give it `testID="capture-safe-content"`) has, in its flattened style, `paddingTop: 59` and `paddingBottom: 34` on the **first** render, and that no `SafeAreaView` from the library is rendered by `CaptureScreen`.
+- [ ] **Step 2: FAIL.**
+- [ ] **Step 3: Implement** — `const insets = useSafeAreaInsets();` and replace the `SafeAreaView` with `<View testID="capture-safe-content" style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>`. Keep the camera overlay outside it (full screen, as now). Update the comment above it to say why the hook is used (the native wrapper inside a `fullScreenModal` sometimes kept a 0 inset).
+- [ ] **Step 4: PASS** (whole CaptureScreen test file). **Step 5: Commit** `013-fix T10: …`.
+
+### Task 11: Newest memory first within a day (design row 11)
+
+**Files:** Modify `src/services/DatabaseService.js` `getEntriesByJournalId` (~:330-343). Test: a new `src/services/__tests__/DatabaseService.entryOrder.test.js` (follow the db-mocking pattern of an existing `src/services/__tests__` file that tests `DatabaseService` SQL).
+
+Root cause: `ORDER BY ${orderBy} ${order}` with `orderBy = 'date'` has no tiebreak; same-day memories return in storage order (device: eight memories of 2026-11-11, oldest first).
+
+- [ ] **Step 1: Failing test** — capture the SQL passed to `db.getAllAsync` and assert it contains `ORDER BY date DESC, created_at DESC` for the default options, and `ORDER BY date ASC, created_at ASC` when `order: 'ASC'`.
+- [ ] **Step 2: FAIL.**
+- [ ] **Step 3: Implement** — `ORDER BY ${orderBy} ${order}, created_at ${order}`. Check the other journal-entry list queries in `DatabaseService.js` for the same missing tiebreak (`git grep -n "ORDER BY" -- src/services/DatabaseService.js`); add `created_at` where a list of entries is ordered by `date` alone, and report which.
+- [ ] **Step 4: PASS** (+ `src/services`, `src/repositories`, `src/hooks` folders). **Step 5: Commit** `013-fix T11: …`.
+
+### Task 12: The keyboard never covers the note being typed (design row 12)
+
+**Files:** Modify `src/screens/capture/CaptureScreen.js` (wrap the screen content in a `KeyboardAvoidingView`; scroll the piece list when the keyboard opens). Test: `src/screens/capture/__tests__/CaptureScreen.test.js`.
+
+Root cause: the capture screen has no keyboard handling (the pre-013 composer had a `KeyboardAvoidingView`), so on iOS the keyboard covers the note being typed and the Type/Voice/Camera dock.
+
+- [ ] **Step 1: Failing tests** — (a) on iOS (`Platform.OS = 'ios'` in the test, restored after) the screen renders a `KeyboardAvoidingView` (testID `capture-keyboard-avoider`) with `behavior="padding"` that contains the piece scroll and the dock but **not** the camera overlay; (b) when a `keyboardDidShow` event fires (mock `Keyboard.addListener` and call the registered handler) while a note is focused and it is the last piece, the piece `ScrollView`'s `scrollToEnd` is called (spy on the ref instance).
+- [ ] **Step 2: FAIL.**
+- [ ] **Step 3: Implement** — wrap the content View from Task 10 (the whole full-screen content: header, notices, piece scroll, dock) in `<KeyboardAvoidingView testID="capture-keyboard-avoider" style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>`; it is the top of the full-screen root, so `keyboardVerticalOffset` is 0. While the keyboard is up, drop the content's `paddingBottom` inset (the keyboard already covers the home-indicator area) so no 34 px gap shows above the keyboard. Add a ref to the piece `ScrollView`; subscribe to `keyboardDidShow` in an effect (remove on unmount) and `scrollToEnd({ animated: true })` when the focused note is the last piece (track focus from `PieceList`'s note `onFocus`, or simply when the last piece is a note being edited — keep it minimal).
+- [ ] **Step 4: PASS** (whole CaptureScreen test file, then the full suite). **Step 5: Commit** `013-fix T12: …`.
