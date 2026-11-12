@@ -4826,3 +4826,37 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
     });
   });
 });
+
+describe('opening straight into the camera (013 fix T9)', () => {
+  it('opens the camera overlay on mount when the route says open: camera, without a tap', async () => {
+    const tree = await render({ mode: 'new', open: 'camera' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(true);
+  });
+
+  it('does not open the camera when the route does not ask for it', async () => {
+    const tree = await render({ mode: 'new' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+
+  it('opens it only once: closing it does not reopen it on a re-render', async () => {
+    const tree = await render({ mode: 'new', open: 'camera' });
+    await tap(tree, 'camera-close-button');
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+
+    await act(async () => {
+      tree.update(
+        <CaptureScreen route={{ params: { mode: 'new', open: 'camera' } }} navigation={navigation} />,
+      );
+    });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+
+  it('ignores open in edit mode', async () => {
+    const tree = await render({ mode: 'edit', entryLocalId: 'e1', open: 'camera' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+});

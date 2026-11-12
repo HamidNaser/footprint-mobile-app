@@ -1362,6 +1362,17 @@ export default function CaptureScreen({ route, navigation }) {
     setIsCameraOpen(false);
   }, []);
 
+  // 013 fix T9: the Journal bar's Camera asks for `open: 'camera'`. Once per screen instance, so
+  // closing the camera is not undone by a re-render; edit mode never opens it.
+  const openedFromParamRef = useRef(false);
+  const openParam = route?.params?.open;
+  useEffect(() => {
+    if (!openedFromParamRef.current && !isEditMode && openParam === 'camera') {
+      openedFromParamRef.current = true;
+      openCamera();
+    }
+  }, [openParam, isEditMode, openCamera]);
+
   // ============================================================
   // Leaving, discarding, saving
   // ============================================================

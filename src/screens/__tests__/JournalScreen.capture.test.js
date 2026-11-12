@@ -511,13 +511,14 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
    * touched the picker is never offered a wider audience than the one in front of them.
    */
   const BAR_DEFAULT = { mode: 'new', audience: 'private' };
+  const CAMERA_DEFAULT = { ...BAR_DEFAULT, open: 'camera' };
 
   it('opens Capture when the camera control is tapped, carrying the audience the bar is showing', async () => {
     const { tree, navigate } = await render();
 
     await tapCamera(tree);
 
-    expect(navigate).toHaveBeenCalledWith('Capture', BAR_DEFAULT);
+    expect(navigate).toHaveBeenCalledWith('Capture', CAMERA_DEFAULT);
   });
 
   it('opens Capture when the mic control is tapped, carrying the audience the bar is showing', async () => {
@@ -541,10 +542,10 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
     // now carry the bar's audience as the save sheet's pre-selection and nothing more — the
     // camera and the microphone were added in fix round 2, because the picker sits on the same
     // bar as them and a tap on either used to replace the choice with a wider one.
-    for (const [name, action] of [
-      ['camera', tapCamera],
-      ['mic', tapMic],
-      ['text', (tree) => tapSend(tree, NOTE)],
+    for (const [name, action, expected] of [
+      ['camera', tapCamera, CAMERA_DEFAULT],
+      ['mic', tapMic, BAR_DEFAULT],
+      ['text', (tree) => tapSend(tree, NOTE), BAR_DEFAULT],
     ]) {
       const { tree, navigate } = await render();
 
@@ -555,7 +556,7 @@ describe('the Journal quick bar opens the capture screen in one tap (FR-001)', (
       // fails here.
       expect({ action: name, navigated: navigate.mock.calls }).toEqual({
         action: name,
-        navigated: [['Capture', BAR_DEFAULT]],
+        navigated: [['Capture', expected]],
       });
     }
   });
@@ -620,7 +621,7 @@ describe('the quick bar audience picker travels with the note (review fix, Impor
     await pickAudienceInBar(tree, 'Only Me');
     await tapCamera(tree);
 
-    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private' });
+    expect(navigate).toHaveBeenCalledWith('Capture', { mode: 'new', audience: 'private', open: 'camera' });
   });
 
   it('carries the picked audience on the mic control too', async () => {
@@ -640,10 +641,10 @@ describe('the quick bar audience picker travels with the note (review fix, Impor
       ['Friends', 'friends'],
       ['Family & Friends', 'family_friends'],
     ]) {
-      for (const [name, action] of [
-        ['camera', tapCamera],
-        ['mic', tapMic],
-        ['text', (tree) => tapSend(tree, NOTE)],
+      for (const [name, action, extra] of [
+        ['camera', tapCamera, { open: 'camera' }],
+        ['mic', tapMic, {}],
+        ['text', (tree) => tapSend(tree, NOTE), {}],
       ]) {
         const { tree, navigate } = await render();
 
@@ -653,7 +654,7 @@ describe('the quick bar audience picker travels with the note (review fix, Impor
         expect({ label, action: name, navigated: navigate.mock.calls }).toEqual({
           label,
           action: name,
-          navigated: [['Capture', { mode: 'new', audience }]],
+          navigated: [['Capture', { mode: 'new', audience, ...extra }]],
         });
       }
     }
