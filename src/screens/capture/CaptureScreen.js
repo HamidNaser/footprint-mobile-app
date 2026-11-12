@@ -107,6 +107,9 @@ import {
   Alert,
   AppState,
   Linking,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -682,6 +685,39 @@ export default function CaptureScreen({ route, navigation }) {
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  // ============================================================
+  // The keyboard (013 fix T12)
+  // ============================================================
+
+  const pieceScrollRef = useRef(null);
+  /** Read by the keyboard handler, which is subscribed once and must not see a stale list. */
+  const lastPieceIsNoteRef = useRef(false);
+  lastPieceIsNoteRef.current = pieces[pieces.length - 1]?.kind === 'text';
+  const [isKeyboardShown, setIsKeyboardShown] = useState(false);
+
+  /**
+   * iOS announces the keyboard *before* it moves, so the bottom inset is dropped in step with
+   * it; elsewhere only the Did events exist. While it is up the keyboard already covers the
+   * home-indicator area, so keeping the inset would leave a gap above it. When it opens with
+   * the last piece a note -- which Type makes almost always the one being typed -- the list
+   * scrolls to the end so the note stays visible above the keyboard.
+   */
+  useEffect(() => {
+    const ios = Platform.OS === 'ios';
+    const subscriptions = [
+      Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', () => {
+        if (mountedRef.current) setIsKeyboardShown(true);
+      }),
+      Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => {
+        if (mountedRef.current) setIsKeyboardShown(false);
+      }),
+      Keyboard.addListener('keyboardDidShow', () => {
+        if (lastPieceIsNoteRef.current) pieceScrollRef.current?.scrollToEnd?.({ animated: true });
+      }),
+    ];
+    return () => subscriptions.forEach((subscription) => subscription?.remove?.());
   }, []);
 
   /** Which journal a saved memory belongs to, as `JournalScreen` resolves it. */
@@ -1717,9 +1753,18 @@ export default function CaptureScreen({ route, navigation }) {
     // top inset, which left the X and Save buttons under the clock where they could not be tapped.
     // The hook returned the right values (top 59, bottom 34) on every render on the device.
     <View style={styles.screen}>
+      {/* Around the content only -- never the camera overlay or the sheet below. */}
+      <KeyboardAvoidingView
+        testID="capture-keyboard-avoider"
+        style={styles.safeArea}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
       <View
         testID="capture-safe-content"
-        style={[styles.safeArea, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+        style={[
+          styles.safeArea,
+          { paddingTop: insets.top, paddingBottom: isKeyboardShown ? 0 : insets.bottom },
+        ]}
       >
         <View style={styles.header}>
           <TouchableOpacity
@@ -1844,6 +1889,7 @@ export default function CaptureScreen({ route, navigation }) {
         )}
 
         <ScrollView
+          ref={pieceScrollRef}
           testID="capture-piece-scroll"
           style={styles.body}
           keyboardShouldPersistTaps="handled"
@@ -1886,6 +1932,7 @@ export default function CaptureScreen({ route, navigation }) {
           }
         />
       </View>
+      </KeyboardAvoidingView>
 
       {isCameraOpen && (
         // Over this screen, not instead of it: a replacement would unmount the voice bar and
