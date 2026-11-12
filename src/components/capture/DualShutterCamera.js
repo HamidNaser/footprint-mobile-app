@@ -64,15 +64,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  Image,
-  TouchableOpacity,
-  StyleSheet,
-  Platform,
-  Linking,
-} from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet, Platform, Linking } from 'react-native';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -85,6 +77,18 @@ const TICK_INTERVAL_MS = 500;
 /** The white Photo shutter and the red Video shutter (contracts/ui-contract.md). */
 export const PHOTO_SHUTTER_COLOR = '#FFFFFF';
 export const VIDEO_SHUTTER_COLOR = '#E5484D';
+
+/** Backstop for a `recordAsync` that still says the camera is not ready (013-capture-fixes). */
+const RECORD_MAX_ATTEMPTS = 5;
+const RECORD_RETRY_DELAY_MS = 200;
+/**
+ * If the preview never reports ready again after the picture -> video flip (not guaranteed on
+ * every iOS version), start anyway rather than leave the person on a recording that never begins.
+ */
+const CAMERA_READY_FALLBACK_MS = 1500;
+
+const isNotReadyError = (error) =>
+  error?.code === 'ERR_CAMERA_NOT_READY' || /not ready/i.test(String(error?.message ?? ''));
 
 /** m:ss, as the prototype's camera shows a clip's length. */
 export const formatSeconds = (seconds) => {
@@ -161,6 +165,9 @@ export default function DualShutterCamera({
   // `photoInFlightRef` as render can see it, so the Video shutter can be disabled while a
   // still capture is in flight -- the mirror of Photo being disabled while recording.
   const [photoInFlight, setPhotoInFlight] = useState(false);
+  // The preview's own "ready" report. `recordAsync` is not called until it arrives after the
+  // picture -> video flip: iOS rejects a start on an output that is not configured yet.
+  const [cameraReady, setCameraReady] = useState(false);
 
   const cameraRef = useRef(null);
   /** Set the render before `recordAsync` is called, so the preview is in video output first. */
@@ -345,13 +352,27 @@ export default function DualShutterCamera({
     startedAtRef.current = Date.now();
     stoppedAtRef.current = null;
     setRecordedMs(0);
+    // The flip to video output reconfigures the camera; wait for it to report ready again.
+    setCameraReady(false);
     // Flips the preview to video output and disables Photo in the same render.
     setIsRecording(true);
   }, [isRecording, micPermission, requestMicPermission]);
 
   /** FR-008: ... and stops on the next. */
   const endRecording = useCallback(() => {
-    if (!isRecording || !cameraRef.current) return;
+    if (!isRecording) return;
+    if (pendingRecordRef.current) {
+      // Stopped before the camera was ready: `recordAsync` has not been called, so there is
+      // nothing to stop and nothing to keep. Cancel cleanly -- no piece, no failure notice.
+      pendingRecordRef.current = false;
+      startedAtRef.current = null;
+      stoppedAtRef.current = null;
+      capturedAtRef.current = null;
+      setRecordedMs(0);
+      setIsRecording(false);
+      return;
+    }
+    if (!cameraRef.current) return;
     // Read here, not after the call: this is the instant the recording was ended.
     const stoppedAt = Date.now();
     try {
@@ -379,16 +400,43 @@ export default function DualShutterCamera({
    * produces the piece and it cannot produce two.
    */
   useEffect(() => {
-    if (!isRecording || !pendingRecordRef.current) return;
+    if (!isRecording || !cameraReady || !pendingRecordRef.current) return;
     pendingRecordRef.current = false;
 
     (async () => {
       let video;
       let recordError = null;
-      try {
-        video = await cameraRef.current?.recordAsync({ maxDuration: maxVideoSeconds });
-      } catch (error) {
-        recordError = error;
+      let cancelled = false;
+      // Backstop: a not-ready rejection is retried (200 ms apart, 5 attempts in all) rather
+      // than losing the video; any other error, or the last attempt, takes the failure path.
+      for (let attempt = 1; attempt <= RECORD_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          video = await cameraRef.current?.recordAsync({
+            maxDuration: maxVideoSeconds,
+          });
+          recordError = null;
+          break;
+        } catch (error) {
+          recordError = error;
+          if (!isNotReadyError(error) || attempt === RECORD_MAX_ATTEMPTS) break;
+          await new Promise((resolve) => setTimeout(resolve, RECORD_RETRY_DELAY_MS));
+          if (!mountedRef.current) return;
+          if (stoppedAtRef.current != null) {
+            // The person ended it while it was still failing to start: nothing to keep.
+            cancelled = true;
+            recordError = null;
+            break;
+          }
+        }
+      }
+
+      if (cancelled) {
+        startedAtRef.current = null;
+        stoppedAtRef.current = null;
+        capturedAtRef.current = null;
+        setIsRecording(false);
+        setRecordedMs(0);
+        return;
       }
 
       const endedAt = stoppedAtRef.current ?? Date.now();
@@ -438,7 +486,14 @@ export default function DualShutterCamera({
         );
       }
     })();
-  }, [isRecording, maxVideoSeconds]);
+  }, [isRecording, cameraReady, maxVideoSeconds]);
+
+  /** See CAMERA_READY_FALLBACK_MS: a preview that never reports ready must not hang a start. */
+  useEffect(() => {
+    if (!isRecording || cameraReady || !pendingRecordRef.current) return undefined;
+    const handle = setTimeout(() => setCameraReady(true), CAMERA_READY_FALLBACK_MS);
+    return () => clearTimeout(handle);
+  }, [isRecording, cameraReady]);
 
   /** The time on screen while recording. The cap itself is the camera's, not this timer's. */
   useEffect(() => {
@@ -543,6 +598,7 @@ export default function DualShutterCamera({
         // picture-mode camera, and this is set the render before recording starts.
         mode={isRecording ? 'video' : 'picture'}
         videoQuality={videoQuality}
+        onCameraReady={() => setCameraReady(true)}
       />
 
       {/* CameraView renders no children in expo-camera 16+, so the controls sit over it. */}
@@ -587,8 +643,8 @@ export default function DualShutterCamera({
               <View testID="camera-microphone-denied" style={styles.notice}>
                 <Ionicons name="alert-circle-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-microphone-message" style={styles.noticeText}>
-                  Footprint can’t use the microphone, so it can’t record a video. Turn it on
-                  in Settings. Photos still work.
+                  Footprint can’t use the microphone, so it can’t record a video. Turn it on in
+                  Settings. Photos still work.
                 </Text>
                 <TouchableOpacity
                   testID="camera-open-settings-button"
@@ -616,8 +672,8 @@ export default function DualShutterCamera({
               <View testID="camera-video-blocked" style={styles.notice}>
                 <Ionicons name="mic-outline" size={20} color="#FFFFFF" />
                 <Text testID="camera-video-blocked-message" style={styles.noticeText}>
-                  You’re recording a voice note, so a video would cut it short. Photos still
-                  work; to record a video, close the camera, stop the voice note, and come back.
+                  You’re recording a voice note, so a video would cut it short. Photos still work;
+                  to record a video, close the camera, stop the voice note, and come back.
                 </Text>
               </View>
             )}

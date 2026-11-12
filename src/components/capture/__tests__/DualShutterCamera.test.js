@@ -306,11 +306,39 @@ const untestableControls = (tree) =>
 
 const preview = (tree) => tree.root.findAll((n) => n.type === 'ExpoCameraViewMock')[0];
 
+/** The preview reports ready, as expo-camera does once the video output is configured. */
+const cameraBecomesReady = async (tree) => {
+  await act(async () => {
+    preview(tree).props.onCameraReady();
+  });
+};
+
+/**
+ * A tap. A Video tap that flips the preview picture -> video is a recording start, and since
+ * 013-capture-fixes row 3 a start only reaches `recordAsync` once the camera reports ready,
+ * so the helper reports it -- the contract every ordinary video test now runs under. The
+ * tests that are *about* the waiting press the button directly instead (`pressVideo`).
+ */
 const tap = async (tree, testID) => {
   const target = pressable(tree, testID);
   expect(target).toBeDefined();
+  const modeBefore = preview(tree)?.props.mode;
   await act(async () => {
     target.props.onPress();
+  });
+  if (
+    testID === 'camera-video-button' &&
+    modeBefore === 'picture' &&
+    preview(tree)?.props.mode === 'video'
+  ) {
+    await cameraBecomesReady(tree);
+  }
+};
+
+/** A Video tap with no ready report: the camera is still settling after the flip. */
+const pressVideo = async (tree) => {
+  await act(async () => {
+    pressable(tree, 'camera-video-button').props.onPress();
   });
 };
 
@@ -1067,6 +1095,7 @@ describe('DualShutterCamera: a second Video tap inside the permission ask', () =
     await act(async () => {
       camera.__answerMicrophoneAsk();
     });
+    await cameraBecomesReady(tree);
 
     // No second dialog left hanging, and one recording for one recording's worth of taps.
     expect(camera.__pendingMicrophoneAsks()).toBe(0);
@@ -1085,6 +1114,7 @@ describe('DualShutterCamera: a second Video tap inside the permission ask', () =
     await act(async () => {
       camera.__answerMicrophoneAsk();
     });
+    await cameraBecomesReady(tree);
     expect(camera.__recordAsync).toHaveBeenCalledTimes(2);
   });
 
@@ -1341,5 +1371,155 @@ describe('DualShutterCamera: Video is unavailable while a voice clip is recordin
 
     expect(pressable(tree, 'camera-video-button').props.disabled).toBeFalsy();
     expect(has(tree, 'camera-video-blocked')).toBe(false);
+  });
+});
+
+describe('video waits for the camera (013-capture-fixes row 3)', () => {
+  it('does not call recordAsync until the camera reports ready in video mode', async () => {
+    const tree = await render();
+
+    await pressVideo(tree);
+    expect(preview(tree).props.mode).toBe('video');
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+
+    await cameraBecomesReady(tree);
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a not-ready rejection rather than losing the video', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockRejectedValueOnce(
+      Object.assign(new Error('Camera is not ready yet'), {
+        code: 'ERR_CAMERA_NOT_READY',
+      }),
+    );
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+
+    await elapse(250);
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(2);
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+
+    await tap(tree, 'camera-video-button');
+    expect(onShot).toHaveBeenCalledTimes(1);
+    expect(onShot.mock.calls[0][0].kind).toBe('video');
+  });
+
+  it('matches a not-ready error by its message alone, whatever the case', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockRejectedValueOnce(
+      new Error('CameraOutputNotReadyException: Camera is NOT READY yet'),
+    );
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    await elapse(250);
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after 5 attempts and reports the failure as before', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockImplementation(async () => {
+      throw new Error('Camera is not ready yet');
+    });
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    for (let i = 0; i < 8; i += 1) await elapse(200); // each wait needs its own flush
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(5);
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed.mock.calls[0][0].reason).toBe('capture-failed');
+    expect(has(tree, 'camera-capture-failed')).toBe(true);
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    camera.__recordAsync.mockReset();
+  });
+
+  it('does not retry an error that is not about readiness', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockRejectedValueOnce(new Error('the disk is full'));
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    await elapse(2000);
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    expect(onCaptureFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops retrying once the person has ended the recording', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockRejectedValueOnce(new Error('Camera is not ready yet'));
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    await tap(tree, 'camera-video-button'); // stop, while the retry is waiting
+    await elapse(2000);
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    expect(preview(tree).props.mode).toBe('picture');
+    expect(pressable(tree, 'camera-photo-button').props.disabled).toBeFalsy();
+  });
+
+  it('stops retrying once the component has unmounted', async () => {
+    const tree = await render();
+    camera.__recordAsync.mockRejectedValueOnce(new Error('Camera is not ready yet'));
+
+    await pressVideo(tree);
+    await cameraBecomesReady(tree);
+    await act(async () => {
+      tree.unmount();
+    });
+    await elapse(2000);
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    trees = trees.filter((t) => t !== tree);
+  });
+
+  it('cancels cleanly when Video is tapped again before the camera is ready', async () => {
+    const tree = await render();
+
+    await pressVideo(tree);
+    expect(preview(tree).props.mode).toBe('video');
+
+    await pressVideo(tree); // the stop tap, before any ready report
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(preview(tree).props.mode).toBe('picture');
+    expect(has(tree, 'camera-recording-indicator')).toBe(false);
+    expect(pressable(tree, 'camera-photo-button').props.disabled).toBeFalsy();
+    expect(pressable(tree, 'camera-video-button').props.disabled).toBeFalsy();
+
+    // A late ready report, or the fallback, must not start anything.
+    await cameraBecomesReady(tree);
+    await elapse(5000);
+    expect(camera.__recordAsync).not.toHaveBeenCalled();
+    expect(camera.__isRecording()).toBe(false);
+    expect(onShot).not.toHaveBeenCalled();
+    expect(onCaptureFailed).not.toHaveBeenCalled();
+    expect(has(tree, 'camera-capture-failed')).toBe(false);
+
+    // And the shutter is not stuck: a fresh start works.
+    await tap(tree, 'camera-video-button');
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts anyway if the preview never reports ready again', async () => {
+    const tree = await render();
+
+    await pressVideo(tree);
+    await elapse(2000);
+
+    expect(camera.__recordAsync).toHaveBeenCalledTimes(1);
   });
 });
