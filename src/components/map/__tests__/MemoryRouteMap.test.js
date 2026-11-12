@@ -278,7 +278,48 @@ describe('the map it draws on', () => {
     const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
 
     expect(map(tree).props.scrollEnabled).toBe(false);
-    expect(map(tree).props.zoomEnabled).toBe(false);
+  });
+
+  it('zooms with a pinch, but leaves one-finger drags to the list', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(map(tree).props.zoomEnabled).toBe(true);
+    expect(map(tree).props.scrollEnabled).toBe(false);
+  });
+
+  it('zooms in and out with its buttons', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+    const press = (id) =>
+      act(() => tree.root.findAllByProps({ testID: id })[0].props.onPress());
+    const before = map(tree).props.region.latitudeDelta;
+
+    press('memory-route-map-zoom-in');
+    expect(map(tree).props.region.latitudeDelta).toBeCloseTo(before / 2);
+    press('memory-route-map-zoom-out');
+    press('memory-route-map-zoom-out');
+    expect(map(tree).props.region.latitudeDelta).toBeCloseTo(before * 2);
+  });
+
+  it('keeps the same region object across re-renders, and clamps and resets the zoom', () => {
+    const entry = { contentBlocks: [text('a', { location: BUS })] };
+    const tree = render({ entry });
+    const press = (id) =>
+      act(() => tree.root.findAllByProps({ testID: id })[0].props.onPress());
+    const before = map(tree).props.region.latitudeDelta;
+
+    const first = map(tree).props.region;
+    act(() => tree.update(<MemoryRouteMap entry={entry} onPinPress={() => {}} />));
+    expect(map(tree).props.region).toBe(first);
+
+    for (let i = 0; i < 10; i += 1) press('memory-route-map-zoom-in');
+    expect(map(tree).props.region.latitudeDelta).toBeCloseTo(before / 64);
+
+    act(() =>
+      tree.update(
+        <MemoryRouteMap entry={{ contentBlocks: [text('b', { location: ANOTHER_CITY })] }} />,
+      ),
+    );
+    expect(map(tree).props.region.latitudeDelta).toBeCloseTo(before);
   });
 });
 

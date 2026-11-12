@@ -27,13 +27,14 @@
  *    (`JournalsController.cs:2565-2569`), so the only safe thing to draw is the value itself;
  *    the rounded key that decided the grouping is never drawn (FR-026).
  *
- * The map is **not pannable or zoomable**, as `PlaceMapPreview` already is not: a map that
- * takes gestures inside a scrolling list swallows every vertical drag that starts over it, and
- * this one sits in the middle of a Journal card. Pin presses are unaffected.
+ * The map is **not pannable**, as `PlaceMapPreview` already is not: a one-finger drag inside a
+ * scrolling list must keep scrolling the list, and this map sits in the middle of a Journal
+ * card. It **does zoom**: a two-finger pinch, plus + and - buttons at the frame's top-right.
+ * Pin presses are unaffected.
  */
 
-import React, { memo, useMemo } from 'react';
-import { View, Text, StyleSheet, Platform } from 'react-native';
+import React, { memo, useMemo, useState } from 'react';
+import { View, Text, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import NumberedPin from './NumberedPin';
 import { toNumberedPieces } from '../../utils/memoryPieces';
@@ -107,6 +108,10 @@ const ROUTE_COLOUR = '#4361ee';
 /** Dashed, in the same pattern as the journal map's trail (`JournalMapView.js:373`). */
 const ROUTE_DASH_PATTERN = [5, 5];
 
+/** How far the + and - buttons may take the view from the opening one (each press is x2 or /2). */
+const MIN_ZOOM = 1 / 8;
+const MAX_ZOOM = 64;
+
 /**
  * The region that shows every group, from the coordinates themselves rather than by calling
  * `fitToCoordinates` on a ref: the map takes no gestures, so the region is always the one that
@@ -159,6 +164,31 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
 
   // FR-022: a memory with no places shows no map at all -- not an empty one, and not a
   // heading over nothing. Its card then looks exactly as it does today (SC-008).
+  // Zoom is a multiplier on the opening region, reset when the memory's region changes (a
+  // different memory). Adjusting state during render, as React documents for this case.
+  const [zoom, setZoom] = useState(1);
+  const [zoomBase, setZoomBase] = useState(region);
+  if (zoomBase !== region) {
+    setZoomBase(region);
+    setZoom(1);
+  }
+
+  // Memoized, so an ordinary re-render hands the map the same object and a pinch is not undone.
+  // (Buttons act from this computed region, so they take over from wherever a pinch left off
+  // only in the sense of the last button zoom -- acceptable.)
+  const zoomedRegion = useMemo(
+    () =>
+      region && {
+        ...region,
+        latitudeDelta: region.latitudeDelta / zoom,
+        longitudeDelta: region.longitudeDelta / zoom,
+      },
+    [region, zoom],
+  );
+
+  const zoomBy = (factor) =>
+    setZoom((current) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current * factor)));
+
   if (groups.length === 0) return null;
 
   const placedCount = groups.reduce((total, group) => total + group.numbers.length, 0);
@@ -177,11 +207,11 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
         <MapView
           style={StyleSheet.absoluteFill}
           provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
-          region={region}
+          region={zoomedRegion}
           showsUserLocation={false}
           showsMyLocationButton={false}
           scrollEnabled={false}
-          zoomEnabled={false}
+          zoomEnabled
           rotateEnabled={false}
           pitchEnabled={false}
           toolbarEnabled={false}
@@ -207,6 +237,27 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
             />
           ))}
         </MapView>
+
+        <View style={styles.zoomButtons}>
+          <TouchableOpacity
+            testID="memory-route-map-zoom-in"
+            accessibilityRole="button"
+            accessibilityLabel="Zoom in"
+            style={styles.zoomButton}
+            onPress={() => zoomBy(2)}
+          >
+            <Text style={styles.zoomButtonText}>+</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="memory-route-map-zoom-out"
+            accessibilityRole="button"
+            accessibilityLabel="Zoom out"
+            style={[styles.zoomButton, styles.zoomButtonGap]}
+            onPress={() => zoomBy(0.5)}
+          >
+            <Text style={styles.zoomButtonText}>{'−'}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {withoutPlaceCount > 0 && (
@@ -242,6 +293,27 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
     backgroundColor: '#E8EEFF',
+  },
+  zoomButtons: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+  },
+  zoomButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  zoomButtonGap: {
+    marginTop: 8,
+  },
+  zoomButtonText: {
+    fontSize: 22,
+    lineHeight: 24,
+    color: '#1C1C1E',
   },
   withoutPlace: {
     fontSize: 13,
