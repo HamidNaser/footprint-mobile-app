@@ -415,7 +415,7 @@ const MediaExplorerSheet = ({
 
 const styles = StyleSheet.create({
   backdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
   },
 
@@ -592,7 +592,7 @@ const styles = StyleSheet.create({
   },
 
   selectionOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(67, 97, 238, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',

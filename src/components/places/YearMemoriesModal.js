@@ -637,7 +637,7 @@ const styles = StyleSheet.create({
   },
   // Inline overlay used for the memory reader / ask sheet (no nested Modal)
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: BACKGROUND_COLOR,
     zIndex: 20,
   },

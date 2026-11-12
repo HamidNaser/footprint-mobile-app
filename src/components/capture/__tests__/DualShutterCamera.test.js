@@ -1249,7 +1249,7 @@ describe('DualShutterCamera: Video is unavailable while a voice clip is recordin
 
   it('sends the person somewhere they can actually go: close the camera first (fix round 2)', async () => {
     // This overlay fills the screen (`CaptureScreen`'s `cameraOverlay` -- an opaque
-    // `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but covered and its
+    // `absoluteFill` at `zIndex: 10`), so the recording bar is mounted but covered and its
     // Stop control cannot be reached from here. The first wording read "stop the voice note to
     // record a video", which is a control the person cannot get at while this is open.
     const tree = await render({ voiceRecording: true });

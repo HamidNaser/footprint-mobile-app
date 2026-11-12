@@ -489,7 +489,7 @@ const styles = StyleSheet.create({
 
   // Permission overlay
   permissionOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
     justifyContent: 'center',
     alignItems: 'center',

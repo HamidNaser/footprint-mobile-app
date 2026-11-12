@@ -559,7 +559,7 @@ const styles = StyleSheet.create({
     height: SCREEN_HEIGHT - 200,
   },
   videoOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -645,7 +645,7 @@ const styles = StyleSheet.create({
 
   // Loading
   loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.5)',

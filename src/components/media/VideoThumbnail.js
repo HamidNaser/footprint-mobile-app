@@ -380,7 +380,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   playIconContainer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
   },

@@ -264,7 +264,7 @@ const styles = StyleSheet.create({
 
   // Video controls
   videoControlOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
   },

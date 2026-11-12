@@ -577,7 +577,7 @@ export default function DualShutterCamera({
 
                 ⚠ It says **close the camera** rather than "stop the voice note", because this
                 overlay fills the screen (`CaptureScreen`'s `cameraOverlay`: an opaque
-                `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but
+                `absoluteFill` at `zIndex: 10`), so the recording bar is mounted but
                 covered and its Stop control cannot be reached from here. The first wording sent
                 somebody to a control they could not get at (fix round 2, item 2). The sequence
                 it names is the one that works: Done, then Stop, then back in for the video. */}
@@ -698,10 +698,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
   },
   preview: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'space-between',
   },
   topRow: {

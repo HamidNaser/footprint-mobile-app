@@ -2028,7 +2028,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   cameraOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 10,
     elevation: 10,
     backgroundColor: '#000000',
