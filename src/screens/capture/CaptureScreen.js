@@ -2024,7 +2024,6 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
   },
   recordingBar: {
-    marginHorizontal: 12,
     marginBottom: 8,
   },
   cameraOverlay: {
