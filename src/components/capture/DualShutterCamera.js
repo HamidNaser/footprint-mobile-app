@@ -559,6 +559,16 @@ export default function DualShutterCamera({
     return (
       <View testID="camera-permission-checking" style={[styles.container, styles.centred, style]}>
         <Text style={styles.checkingText}>Checking camera access…</Text>
+        {/* The overlay covers a fullScreenModal that cannot be swiped away: never a trap. */}
+        <TouchableOpacity
+          testID="camera-close-button"
+          accessibilityRole="button"
+          accessibilityLabel="Close the camera"
+          style={styles.secondaryButton}
+          onPress={onClose}
+        >
+          <Text style={styles.secondaryButtonText}>Close</Text>
+        </TouchableOpacity>
       </View>
     );
   }

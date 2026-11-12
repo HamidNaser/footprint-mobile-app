@@ -144,7 +144,7 @@ export function VideoPosterTile({
           </View>
         </View>
       ) : null}
-      {showDuration && duration && shownUri ? (
+      {showDuration && !!duration && shownUri ? (
         <View style={styles.durationBadge}>
           <Text style={styles.durationText}>{formatDuration(duration)}</Text>
         </View>

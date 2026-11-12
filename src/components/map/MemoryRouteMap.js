@@ -33,7 +33,7 @@
  * Pin presses are unaffected.
  */
 
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import NumberedPin from './NumberedPin';
@@ -108,14 +108,16 @@ const ROUTE_COLOUR = '#4361ee';
 /** Dashed, in the same pattern as the journal map's trail (`JournalMapView.js:373`). */
 const ROUTE_DASH_PATTERN = [5, 5];
 
-/** How far the + and - buttons may take the view from the opening one (each press is x2 or /2). */
+/** How far the + and - buttons may take the view from the opening one, as a zoom (each press is x2 or /2). */
+const HIT_SLOP = { top: 4, bottom: 4, left: 4, right: 4 };
 const MIN_ZOOM = 1 / 8;
 const MAX_ZOOM = 64;
 
 /**
  * The region that shows every group, from the coordinates themselves rather than by calling
  * `fitToCoordinates` on a ref: the map takes no gestures, so the region is always the one that
- * fits the pins, and arithmetic needs no map instance and no `onMapReady`.
+ * fits the pins, and arithmetic needs no map instance and no `onMapReady`. (Pinch and the
+ * buttons then move the view away from it; the opening region is only where it starts.)
  */
 function regionFor(groups) {
   const lats = groups.map((group) => group.lat);
@@ -151,43 +153,48 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
     [entry, serverUpdatedAt],
   );
 
-  // `region`, not `initialRegion`: `initialRegion` applies once, at mount, and this map takes
-  // no gestures, so a viewport left behind by a memory whose places changed under it could not
-  // be recovered -- the pins would sit off-screen with no pan and no zoom to find them. Editing
-  // a saved memory in place is part of this feature (FR-018), and a refetched entry re-renders
-  // this card without unmounting it. There is no user-adjusted viewport to preserve here, which
-  // is what `initialRegion` is for.
+  // `region`, not `initialRegion`: `initialRegion` applies once, at mount, and a refetched entry
+  // whose places changed re-renders this card without unmounting it, so the opening view has to
+  // be able to follow the pins to where they now are.
   //
-  // Memoized on the groups, because a fresh object on every render would re-apply the region --
-  // and on a real map re-applying it mid-animation is how a map judders.
-  const region = useMemo(() => (groups.length === 0 ? null : regionFor(groups)), [groups]);
+  // The opening region is memoised on its VALUES, not on `groups` (a new array whenever the entry
+  // object is refetched): a refetch with the same places must not reset a viewer's zoom.
+  const fitted = groups.length === 0 ? null : regionFor(groups);
+  const openingKey = fitted
+    ? `${fitted.latitude}|${fitted.longitude}|${fitted.latitudeDelta}|${fitted.longitudeDelta}`
+    : null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const opening = useMemo(() => fitted, [openingKey]);
 
-  // FR-022: a memory with no places shows no map at all -- not an empty one, and not a
-  // heading over nothing. Its card then looks exactly as it does today (SC-008).
-  // Zoom is a multiplier on the opening region, reset when the memory's region changes (a
-  // different memory). Adjusting state during render, as React documents for this case.
-  const [zoom, setZoom] = useState(1);
-  const [zoomBase, setZoomBase] = useState(region);
-  if (zoomBase !== region) {
-    setZoomBase(region);
-    setZoom(1);
+  // FR-022: a memory with no places shows no map at all (below).
+  //
+  // `viewRegion` is what the map is told to show. `currentRef` is what it is actually showing,
+  // reported by `onRegionChangeComplete` after a pinch or a button, so the buttons act from the
+  // on-screen view rather than from the opening one. Reset when the opening region changes (a
+  // different memory) -- adjusting state during render, as React documents for this case.
+  const [viewRegion, setViewRegion] = useState(opening);
+  const [viewBase, setViewBase] = useState(opening);
+  const currentRef = useRef(opening);
+  if (viewBase !== opening) {
+    setViewBase(opening);
+    setViewRegion(opening);
+    currentRef.current = opening;
   }
 
-  // Memoized, so an ordinary re-render hands the map the same object and a pinch is not undone.
-  // (Buttons act from this computed region, so they take over from wherever a pinch left off
-  // only in the sense of the last button zoom -- acceptable.)
-  const zoomedRegion = useMemo(
-    () =>
-      region && {
-        ...region,
-        latitudeDelta: region.latitudeDelta / zoom,
-        longitudeDelta: region.longitudeDelta / zoom,
-      },
-    [region, zoom],
-  );
-
-  const zoomBy = (factor) =>
-    setZoom((current) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current * factor)));
+  // The state object is only replaced by a button press or a reset, so an ordinary re-render
+  // hands the map the same object and a pinch is not undone.
+  const zoomBy = (factor) => {
+    const shown = currentRef.current || opening;
+    if (!opening || !shown) return;
+    const clamp = (delta, base) => Math.min(base / MIN_ZOOM, Math.max(base / MAX_ZOOM, delta / factor));
+    const next = {
+      ...shown,
+      latitudeDelta: clamp(shown.latitudeDelta, opening.latitudeDelta),
+      longitudeDelta: clamp(shown.longitudeDelta, opening.longitudeDelta),
+    };
+    currentRef.current = next;
+    setViewRegion(next);
+  };
 
   if (groups.length === 0) return null;
 
@@ -207,7 +214,10 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
         <MapView
           style={StyleSheet.absoluteFill}
           provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
-          region={zoomedRegion}
+          region={viewRegion}
+          onRegionChangeComplete={(r) => {
+            currentRef.current = r;
+          }}
           showsUserLocation={false}
           showsMyLocationButton={false}
           scrollEnabled={false}
@@ -243,6 +253,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
             testID="memory-route-map-zoom-in"
             accessibilityRole="button"
             accessibilityLabel="Zoom in"
+            hitSlop={HIT_SLOP}
             style={styles.zoomButton}
             onPress={() => zoomBy(2)}
           >
@@ -252,6 +263,7 @@ function MemoryRouteMap({ entry, serverUpdatedAt, onPinPress }) {
             testID="memory-route-map-zoom-out"
             accessibilityRole="button"
             accessibilityLabel="Zoom out"
+            hitSlop={HIT_SLOP}
             style={[styles.zoomButton, styles.zoomButtonGap]}
             onPress={() => zoomBy(0.5)}
           >

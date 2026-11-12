@@ -749,6 +749,16 @@ describe('permission screen (013-capture-fixes row 2)', () => {
     expect(has(tree, 'camera-permission-denied')).toBe(false);
   });
 
+  it('offers Close while the ask is still pending, so a stuck prompt is never a trap', async () => {
+    camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
+    const request = camera.useCameraPermissions()[1];
+    request.mockImplementationOnce(() => new Promise(() => {}));
+    const tree = await render();
+    expect(has(tree, 'camera-permission-checking')).toBe(true);
+    await tap(tree, 'camera-close-button');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('falls through to the denied screen, with a way out, when the ask rejects', async () => {
     camera.__refuseCamera({ granted: false, status: 'undetermined', canAskAgain: true });
     const request = camera.useCameraPermissions()[1];

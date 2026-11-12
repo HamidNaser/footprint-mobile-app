@@ -147,6 +147,14 @@ describe('batchSync and durations', () => {
     expect(sent.creates[0].contentBlocks[1].media[0].duration).toBe(12);
   });
 
+  it('tolerates a null block or media item', async () => {
+    post.mockResolvedValue(acceptedEverything());
+    const entry = { localId: 'L', contentBlocks: [null, { type: 'videos', media: [null, { id: 'm', duration: 1.2 }] }] };
+    await JournalApi.batchSync({ creates: [entry], updates: [], deletes: [] });
+    const sent = post.mock.calls[0][1];
+    expect(sent.creates[0].contentBlocks[1].media[1].duration).toBe(1);
+  });
+
   it('leaves the callers own blocks untouched (local storage keeps the precise value)', async () => {
     post.mockResolvedValue(acceptedEverything());
     const entry = { localId: 'L', contentBlocks: [{ type: 'audio', duration: 4.37 }] };

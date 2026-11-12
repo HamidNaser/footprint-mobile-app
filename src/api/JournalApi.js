@@ -378,7 +378,7 @@ class JournalApiClass {
    */
   _roundDurations(blocks) {
     if (!Array.isArray(blocks)) return blocks;
-    return blocks.map((block) => ({
+    return blocks.map((block) => (!block ? block : {
       ...block,
       ...(block.duration !== undefined ? { duration: wholeSeconds(block.duration) } : {}),
       ...(Array.isArray(block.media)
