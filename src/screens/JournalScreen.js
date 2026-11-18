@@ -54,13 +54,21 @@ import {
   isSameDay as isSameCivilDay,
 } from '../utils/journalDate';
 import { syncBadgeStatus, SyncBadgeStatus } from '../utils/syncStatus';
-import { 
+import {
   DateSwipeContainer,
   QuickCaptureBar,
   EntryGalleryModal,
   FullScreenMediaViewer,
-  CalendarPickerModal,
 } from '../components/journal';
+// 016 FR-001: the Journal's date bar opens the book-style calendar sheet, not the platform's own
+// date picker. `CalendarPickerModal` is deliberately **not** imported here any more -- it stays
+// exactly as it is for `PersonJournalScreen` and `events/DateTimeField`, which still use it
+// (FR-015, research R6), and is still exported from `components/journal/index(.web).js`.
+//
+// Imported by its own path rather than through the barrel: the barrel does not export it, and the
+// two platform entry points (`CalendarSheet.js`, `CalendarSheet.web.js`) are what metro resolves
+// between, exactly as it does for `CalendarPickerModal`.
+import { CalendarSheet } from '../components/journal/CalendarSheet';
 
 // Hooks
 import { useJournalRealtime } from '../hooks/useJournalRealtime';
@@ -73,6 +81,13 @@ import { useAuth } from '../context/AuthContext';
 // Services
 import { SettingsService } from '../services/SettingsService';
 import { JournalService } from '../services/JournalService';
+// 016 FR-010: the calendar and the day it shows read the phone's **whole** journal. The feed
+// hook above is paged (20 at a time), so neither question can be answered by filtering what it
+// has loaded; these two queries are local and read everything.
+import { DatabaseService } from '../services/DatabaseService';
+// `buildIndex` turns `getCalendarIndexRows`'s rows into the counts behind the calendar's faded
+// days; `dayKeyOf` is the one answer to "which civil day is this memory on" for this feature.
+import { buildIndex, dayKeyOf } from '../utils/calendarModel';
 import CaptureDraftStore, { DraftSlot } from '../services/CaptureDraftStore';
 import CaptureLocation from '../services/CaptureLocation';
 
@@ -107,6 +122,15 @@ const KEEPING_NOTE = 'Keeping that note…';
 
 /** How much of an unsaved edit's first note the question that would discard it quotes. */
 const DRAFT_WORDS_LIMIT = 40;
+
+/**
+ * One empty list, shared.
+ *
+ * The day's memories arrive asynchronously now, so there is a moment before the first read lands
+ * in which the feed has nothing to draw. A fresh `[]` each render would be a new array identity
+ * every time and would re-render the list for no reason; this one is stable. Never mutated.
+ */
+const NO_ENTRIES = [];
 
 /**
  * The first words of an unsaved edit, to name it in the question that would throw it away
@@ -256,8 +280,29 @@ export default function JournalScreen({ navigation }) {
   const [viewerMediaType, setViewerMediaType] = useState('photo');
   const [viewerInitialIndex, setViewerInitialIndex] = useState(0);
   
-  // Calendar picker state
-  const [showCalendarPicker, setShowCalendarPicker] = useState(false);
+  // ---------------------------------------------------------------------------------------
+  // The calendar sheet (016 User Story 1)
+  // ---------------------------------------------------------------------------------------
+
+  /** Whether the book-style calendar is up. Only ever set true with an index in hand -- see
+   *  `openCalendar`. */
+  const [showCalendarSheet, setShowCalendarSheet] = useState(false);
+
+  /**
+   * Which days, months and years hold memories, over the whole journal (`calendarIndex` in
+   * `data-model.md`). Null until the first read lands, and never set back to null afterwards.
+   */
+  const [calendarIndex, setCalendarIndex] = useState(null);
+
+  /**
+   * The selected day's memories, read from the phone's own database (FR-004, FR-010).
+   *
+   * **`null` means "not read yet"**, which is a different thing from `[]` ("read, and there are
+   * none"): the empty state below says *"No entries yet"*, and saying that about a day whose
+   * memories are still a microsecond away would be telling somebody their day is empty when it
+   * is not. The list's `ListEmptyComponent` is withheld until there is an answer.
+   */
+  const [dayEntries, setDayEntries] = useState(null);
 
   // Whether a typed note is still being kept. See `handleSendMessage` and `KEEPING_NOTE`.
   const [keepingNote, setKeepingNote] = useState(false);
@@ -372,40 +417,121 @@ export default function JournalScreen({ navigation }) {
 
   const noStoryEntries = useMemo(() => entriesNeedingStory(allEntries), [allEntries]);
 
+  /** The day on screen, as a civil-date key. `selectedDate` is a `Date`, so `toDateKey` is
+   *  the right reader for it -- `dayKeyOf` answers about stored dates and whole entries. */
+  const selectedDateKey = useMemo(() => toDateKey(selectedDate), [selectedDate]);
+
+  // ---------------------------------------------------------------------------------------
+  // The two local reads (016 FR-010): the calendar's index, and the open day's memories.
+  //
+  // Both go to the database rather than to `allEntries`. The feed hook above is paged -- it
+  // asks for 20 and for 20 more at the end of the list -- so filtering what it has loaded
+  // can only ever answer about the newest page. A journal of 100 memories had 80 of them
+  // unreachable from the date bar, and the days they were on were not even arrow stops.
+  // ---------------------------------------------------------------------------------------
+
+  /**
+   * Read the whole journal's index and keep it, answering with it.
+   *
+   * Answers `null` when there is nothing to read from yet or the read failed, which is what
+   * `openCalendar` below tests: a `CalendarSheet` given no index draws **every** day, month and
+   * year faded and inert -- a calendar indistinguishable from an empty journal, with no way
+   * forward but closing it again. Recorded rather than said here, because this runs on arrival
+   * at the Journal without anybody having asked for anything; `openCalendar` is the explicit
+   * action, and that is where a failure is said out loud.
+   */
+  const loadCalendarIndex = useCallback(async () => {
+    if (!journalId) return null;
+    try {
+      const rows = await DatabaseService.getCalendarIndexRows(journalId);
+      const next = buildIndex(rows);
+      setCalendarIndex(next);
+      return next;
+    } catch (error) {
+      console.warn('[JournalScreen] the calendar could not be read', error?.message);
+      return null;
+    }
+  }, [journalId]);
+
+  // The index loads when the journal loads. It is read again when the sheet opens
+  // (`openCalendar`); the remaining freshness triggers -- sync, focus, an edit, a delete,
+  // pull-to-refresh -- are T008's.
+  useEffect(() => {
+    loadCalendarIndex();
+  }, [loadCalendarIndex]);
+
+  /**
+   * Which day read is the current one.
+   *
+   * Two reads can be outstanding at once -- ◄ ► pressed twice in quick succession -- and
+   * without this the slower one would win and put the wrong day's memories under the date on
+   * the bar. Only the newest token may write.
+   */
+  const dayReadRef = useRef(0);
+
+  /**
+   * The open day's memories, newest first, every precision: a day shows what is known to be
+   * that day **and** what is known only to its month or year, which the holding area stores on
+   * the 1st (FR-004, FR-016). `'DESC'` is the feed's own order, kept.
+   */
+  const reloadDay = useCallback(async () => {
+    const token = dayReadRef.current + 1;
+    dayReadRef.current = token;
+
+    if (!journalId || !selectedDateKey) {
+      setDayEntries(NO_ENTRIES);
+      return;
+    }
+
+    try {
+      const found = await DatabaseService.getEntriesInRange(
+        journalId,
+        selectedDateKey,
+        selectedDateKey,
+        null,
+        'DESC',
+      );
+      if (dayReadRef.current === token) setDayEntries(found);
+    } catch (error) {
+      // Recorded, not said: this is a read the person did not ask for, and an alert over
+      // somebody's memories every time a day failed to load would be worse than the empty
+      // page -- which is itself self-evident on screen. The next day change reads again.
+      console.warn('[JournalScreen] the day could not be read', error?.message);
+      if (dayReadRef.current === token) setDayEntries(NO_ENTRIES);
+    }
+  }, [journalId, selectedDateKey]);
+
+  // Whenever the day or the journal changes. The last day's memories are let go of first, so
+  // that nothing is ever drawn under a date it does not belong to.
+  useEffect(() => {
+    setDayEntries(null);
+    reloadDay();
+  }, [reloadDay]);
+
   const displayEntries = useMemo(() => {
     // The worklist ignores the selected day on purpose. Somebody asking what they have
     // never written about wants every such memory, not the ones that happen to share a
-    // date with whatever the calendar was left on -- which would usually be none.
+    // date with whatever the calendar was left on -- which would usually be none. It reads
+    // the loaded feed, exactly as it did before: widening it is not this task's.
     if (noStoryOnly) return noStoryEntries;
 
-    // Filter entries to only show those from the selected date. Use the entry's
-    // journal `date` (when the memory happened) rather than `createdAt` (when the
-    // row was written/synced) so entries land on the correct calendar day. Fall
-    // back to createdAt for legacy/mock entries that have no explicit date.
-    return allEntries.filter(entry => isSameDay(entry.date || entry.createdAt, selectedDate));
-  }, [allEntries, selectedDate, isSameDay, noStoryOnly, noStoryEntries]);
+    return dayEntries || NO_ENTRIES;
+  }, [noStoryOnly, noStoryEntries, dayEntries]);
 
   /**
-   * Dates that have journal entries - for calendar marking
-   * Returns object like { '2024-05-15': { marked: true }, ... }
-   */
-  const markedDates = useMemo(() => {
-    const dates = {};
-    allEntries.forEach(entry => {
-      const key = toDateKey(entry.date || entry.createdAt);
-      if (key) dates[key] = { marked: true };
-    });
-    return dates;
-  }, [allEntries]);
-
-  /**
-   * Sorted civil dates that have entries. Drives the left/right swipe, which
-   * moves to the next/previous day that actually has entries rather than to the
-   * adjacent calendar day.
+   * Sorted civil dates that have entries. Drives ◄ ► and the left/right swipe, which move to
+   * the next/previous day that actually has entries rather than to the adjacent calendar day.
+   *
+   * The calendar index, not the loaded feed (FR-004, FR-010): a day the feed has not reached is
+   * a day the arrows must still stop on. `index.days` counts **day-dated** memories only, which
+   * is also FR-016's rule for the arrows -- a 1st holding nothing but memories known to their
+   * month or year is reached through that month, not by stepping onto it.
+   *
+   * Empty until the index lands, as it was empty until the feed landed before.
    */
   const datesWithEntries = useMemo(
-    () => Object.keys(markedDates).sort(),
-    [markedDates],
+    () => (calendarIndex ? [...calendarIndex.days.keys()].sort() : NO_ENTRIES),
+    [calendarIndex],
   );
 
   // On first load, if the currently selected date (defaults to today) has no
@@ -492,7 +618,6 @@ export default function JournalScreen({ navigation }) {
    * Whether a populated date exists in each direction, so the swipe container
    * can refuse the gesture at either end of the journal.
    */
-  const selectedDateKey = useMemo(() => toDateKey(selectedDate), [selectedDate]);
   const hasNextDate = useMemo(
     () => adjacentDateKey(datesWithEntries, selectedDateKey, 1) !== null,
     [datesWithEntries, selectedDateKey],
@@ -515,6 +640,64 @@ export default function JournalScreen({ navigation }) {
   const goToPreviousDate = useCallback(() => {
     navigateDate(-1);
   }, [navigateDate]);
+
+  /**
+   * Open the book-style calendar from the date bar (FR-001).
+   *
+   * The index is read again on the way in, so the calendar is never a picture of the journal as
+   * it was when the screen loaded.
+   *
+   * ⚠ **It is resolved before the sheet can open, and that is load-bearing.** `CalendarSheet`'s
+   * count is two-valued -- a tile with no count is faded and inert -- so a sheet opened with no
+   * index at all draws every day, every month and every year faded: a wholly dead calendar,
+   * indistinguishable from "you have no memories", with no way forward but closing it again. The
+   * web's 014 calendar made its own count three-valued after hitting exactly that; the decision
+   * taken here (T004's review) was to keep the component simple and put the obligation on this
+   * screen. So `showCalendarSheet` is only ever set true with an index in hand, and
+   * `setCalendarIndex` is never called with anything else -- which is what makes the `index` prop
+   * below non-null for as long as the sheet is up.
+   *
+   * A re-read that fails over an index we already hold opens the calendar anyway: slightly stale
+   * is a calendar, and refusing would take away a working control over a transient. Only with no
+   * index at all does it refuse -- and it says so, rather than being a date that does nothing when
+   * tapped.
+   */
+  const openCalendar = useCallback(async () => {
+    const fresh = await loadCalendarIndex();
+    if (fresh || calendarIndex) {
+      setShowCalendarSheet(true);
+      return;
+    }
+
+    Alert.alert(
+      'Could not open the calendar',
+      'The phone could not read which days hold your memories, so the calendar has not been ' +
+        'opened. Nothing has changed, and your memories are all still here. Please try again.',
+    );
+  }, [loadCalendarIndex, calendarIndex]);
+
+  /**
+   * A day, a month or a year really chosen in the calendar.
+   *
+   * **This screen closes the sheet**, and the sheet does not close itself: a pick calls `onPick`
+   * alone, and `CalendarSheet.test.js` pins that side of it, so closing here is the whole of it
+   * and nothing double-closes.
+   *
+   * Only a day does anything yet. A month and a year arrive with `picked` in T006 and T007; until
+   * then the sheet closes on one and the Journal stays where it was, which is no worse than the
+   * picker this replaces -- that had no month or year view at all.
+   */
+  const handleCalendarPick = useCallback((period) => {
+    setShowCalendarSheet(false);
+
+    if (period?.kind !== 'day') return;
+    // `dayKeyOf` rather than a bare assignment: it is this feature's one answer to "which civil
+    // day is this", and it refuses anything that is not one rather than passing it to the query.
+    const key = dayKeyOf(period.date);
+    if (key) setSelectedDate(parseDateKey(key));
+  }, []);
+
+  const closeCalendar = useCallback(() => setShowCalendarSheet(false), []);
 
   /**
    * Extract photos from entries for the selected date
@@ -611,7 +794,13 @@ export default function JournalScreen({ navigation }) {
   const revealEntry = useCallback((created) => {
     const key = toDateKey(created?.date || created?.createdAt);
     if (key) setSelectedDate(parseDateKey(key));
-  }, []);
+    // The day is its own read now, and choosing the day that is **already** on screen changes
+    // no state, so nothing would re-read it: a memory saved onto today would not appear, and
+    // "a save is always visibly confirmed" is the whole point of this function. A read for the
+    // day being left is harmless -- `dayReadRef` lets only the newest answer through, and the
+    // effect above starts a newer one for the day being arrived at.
+    reloadDay();
+  }, [reloadDay]);
 
   /**
    * One tap from the quick bar into the capture screen, carrying the audience the bar's own
@@ -971,11 +1160,15 @@ export default function JournalScreen({ navigation }) {
    */
   const handleReact = useCallback(async (entryId, reactionKey) => {
     console.log('[JournalScreen] React:', entryId, reactionKey);
-    
-    // Find the entry
-    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+
+    // The memory is resolved from the cards **on screen**, not from the loaded feed (analyze
+    // round 3, finding G1). It was `allEntries`, which is the feed's current page: on a day the
+    // feed has not reached -- now reachable, which is the whole point of this task -- the
+    // memory was not in it, so this returned here and the like went nowhere at all. Silently:
+    // the heart was tapped and nothing happened, on screen or on the server.
+    const entry = displayEntries.find(e => e.localId === entryId || e.id === entryId);
     if (!entry) return;
-    
+
     // Get server ID (for synced entries)
     const serverId = entry.serverId || entry.id;
     
@@ -1000,13 +1193,15 @@ export default function JournalScreen({ navigation }) {
         await ReactionsApi.likeEntry(serverId);
         console.log('[JournalScreen] Liked entry');
       }
-      
-      // Refresh to get updated reaction counts
+
+      // Both: the feed behind the worklist, and the open day, which is a separate read and
+      // would otherwise go on showing the counts it was drawn with.
       await refresh();
+      await reloadDay();
     } catch (error) {
       console.error('[JournalScreen] Failed to react:', error);
     }
-  }, [allEntries, authUser?.id, refresh]);
+  }, [displayEntries, authUser?.id, refresh, reloadDay]);
 
   /**
    * Handle adding a comment/response to an entry
@@ -1015,11 +1210,12 @@ export default function JournalScreen({ navigation }) {
     console.log('[JournalScreen] Add response:', entryId, text);
     
     if (!text?.trim()) return;
-    
-    // Find the entry
-    const entry = allEntries.find(e => e.localId === entryId || e.id === entryId);
+
+    // From the cards on screen, for the same reason `handleReact` does (finding G1): a reply
+    // typed on a card from a day beyond the loaded feed used to be dropped here.
+    const entry = displayEntries.find(e => e.localId === entryId || e.id === entryId);
     if (!entry) return;
-    
+
     // Get server ID
     const serverId = entry.serverId || entry.id;
     
@@ -1031,13 +1227,14 @@ export default function JournalScreen({ navigation }) {
     try {
       await CommentsApi.addComment(serverId, text.trim());
       console.log('[JournalScreen] Comment added');
-      
-      // Refresh to get updated comments
+
+      // The feed and the open day, as above.
       await refresh();
+      await reloadDay();
     } catch (error) {
       console.error('[JournalScreen] Failed to add comment:', error);
     }
-  }, [allEntries, refresh]);
+  }, [displayEntries, refresh, reloadDay]);
 
   /**
    * The audience chosen again for a memory whose share the server would not apply (FR-011).
@@ -1073,7 +1270,11 @@ export default function JournalScreen({ navigation }) {
 
     try {
       await JournalService.reshareEntry(localId, visibility);
+      // The feed, and the open day: a re-share is a card action like the two above, and the
+      // card it was tapped on is in the day's own list, which is a separate read. Without this
+      // the card goes on saying "Not shared" about a memory that has just been shared.
       await refresh();
+      await reloadDay();
     } catch (error) {
       console.warn('[JournalScreen] the memory could not be shared again', error);
       Alert.alert(
@@ -1085,7 +1286,7 @@ export default function JournalScreen({ navigation }) {
           : 'It is still on this phone and still not shared with anyone. Please try again.',
       );
     }
-  }, [refresh]);
+  }, [refresh, reloadDay]);
 
   /**
    * Key extractor
@@ -1281,7 +1482,7 @@ export default function JournalScreen({ navigation }) {
         date={selectedDate}
         onPrevious={() => navigateDate(-1)}
         onNext={() => navigateDate(1)}
-        onDatePress={() => setShowCalendarPicker(true)}
+        onDatePress={openCalendar}
       />
 
       {/* Content - Journal Entries Feed */}
@@ -1316,7 +1517,15 @@ export default function JournalScreen({ navigation }) {
             }
             onEndReached={loadMore}
             onEndReachedThreshold={0.5}
-            ListEmptyComponent={<EmptyFeed />}
+            /*
+              "No entries yet" is withheld until the day has actually been read. The day's
+              memories now come from the database rather than from a filter over the loaded
+              feed, so there is a moment between a day being chosen and its memories arriving --
+              and telling somebody their day is empty during it would be saying the one thing
+              this task exists to stop the screen saying. `dayEntries === null` is "not read
+              yet"; `[]` is "read, and there are none", which does get the empty state.
+            */
+            ListEmptyComponent={noStoryOnly || dayEntries ? <EmptyFeed /> : null}
           />
         )}
       </DateSwipeContainer>
@@ -1388,14 +1597,22 @@ export default function JournalScreen({ navigation }) {
         primaryColor={PRIMARY_COLOR}
       />
 
-      {/* Calendar Picker Modal */}
-      <CalendarPickerModal
-        visible={showCalendarPicker}
-        selectedDate={selectedDate}
-        onSelectDate={(date) => setSelectedDate(date)}
-        onClose={() => setShowCalendarPicker(false)}
-        markedDates={markedDates}
-        primaryColor={PRIMARY_COLOR}
+      {/*
+        The book-style calendar (FR-001), in place of the platform's own white date picker.
+
+        `picked` is one prop with three kinds, and `data-model.md` keeps `selectedDate` for day
+        mode beside `picked`, so the two are mapped into it here. There is no `picked` state yet
+        -- month and year modes are T006 and T007 -- so for now this is always the day on screen.
+
+        `index` cannot be null while `visible` is true: `openCalendar` resolves one first, and
+        nothing ever sets it back. See its comment for why that matters.
+      */}
+      <CalendarSheet
+        visible={showCalendarSheet}
+        picked={{ kind: 'day', date: selectedDateKey }}
+        index={calendarIndex}
+        onPick={handleCalendarPick}
+        onClose={closeCalendar}
       />
     </SafeAreaView>
   );

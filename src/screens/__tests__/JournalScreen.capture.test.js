@@ -278,7 +278,54 @@ jest.mock('../../hooks/useJournal', () => {
     __setEntries: (entries) => {
       feed.entries = entries;
     },
+    // What is on the phone, for the day query below to answer from. See its comment.
+    __entries: () => feed.entries,
   };
+});
+
+/**
+ * The phone's own journal, which since 016 T005 is where the **day** on screen comes from.
+ *
+ * The Journal's date bar used to show `allEntries.filter(sameDay)` -- the feed's loaded page --
+ * and now reads `DatabaseService.getEntriesInRange` instead, so that a day the paged feed has
+ * not reached still shows all of its memories (016 FR-004, FR-010). Nothing in *this* file is
+ * about that: every case here puts a memory on screen through the feed box above and then does
+ * something to its card. So the two calendar queries answer from that same box, and
+ * `__setEntries` goes on meaning "these are the memories this screen can show".
+ *
+ * Deliberately not faithful about order: `'DESC'` hands back the box in the box's own order,
+ * which is what the feed filter did and what the cases below are written against. The real
+ * query's ordering, precision filter and civil-day arithmetic are
+ * `DatabaseService.calendar.test.js`'s and `JournalScreen.calendar.test.js`'s, both of which
+ * run against a real SQLite engine.
+ */
+jest.mock('../../services/DatabaseService', () => {
+  const { dayKeyOf } = require('../../utils/calendarModel');
+  const onPhone = () => require('../../hooks/useJournal').__entries() || [];
+
+  const service = {
+    getEntriesInRange: jest.fn(async (journalId, fromKey, toKey) =>
+      onPhone().filter((entry) => {
+        const key = dayKeyOf(entry);
+        return key && key >= fromKey && key <= toKey;
+      })),
+    getCalendarIndexRows: jest.fn(async () => {
+      const counts = new Map();
+      onPhone().forEach((entry) => {
+        const key = dayKeyOf(entry);
+        if (!key) return;
+        const id = `${key}|${entry.datePrecision || 'day'}`;
+        counts.set(id, (counts.get(id) || 0) + 1);
+      });
+      return [...counts.entries()].sort().map(([id, count]) => ({
+        day: id.split('|')[0],
+        date_precision: id.split('|')[1],
+        count,
+      }));
+    }),
+  };
+
+  return { __esModule: true, DatabaseService: service, default: service };
 });
 
 /**
