@@ -42,6 +42,13 @@ import renderer, { act } from 'react-test-renderer';
 import CalendarSheetBody from '../CalendarSheetBody';
 import { buildIndex, monthKey } from '../../../utils/calendarModel';
 
+// This file mounts the same full CalendarSheetBody tree CalendarSheet.test.js does, which is
+// exactly the shape every suite in this repo that flaked under parallel load shares (mount an RN
+// tree, no raised timeout) and every one of them stopped flaking once raised. Alone and warm this
+// file's first test is well under a second; under load the whole suite file has measured at
+// 11.4 s against jest's 5 s default. Comfortably above that and well below jest's own patience.
+jest.setTimeout(15000);
+
 // ---------------------------------------------------------------------------
 // Fixtures -- a small slice of November 2026, chosen so a day with two memories, a day with
 // one, and a faded day all exist at once, and so the month and the year carry a real count

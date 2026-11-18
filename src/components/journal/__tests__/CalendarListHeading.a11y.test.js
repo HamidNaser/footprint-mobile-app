@@ -18,6 +18,12 @@ import { TouchableOpacity, View } from 'react-native';
 
 import { CalendarListHeading } from '../CalendarListHeading';
 
+// This feature's other new test file mounts a real React Native tree the same way
+// CalendarSheet.a11y.test.js does (it renders an expo/vector-icons Icon, which schedules its own
+// async setState outside this test's act()) and had the same omission: no raised timeout. Matching
+// CalendarSheet.a11y.test.js and the other suites in this repo that mount an RN tree.
+jest.setTimeout(15000);
+
 const render = (props) => {
   let tree;
   act(() => {
