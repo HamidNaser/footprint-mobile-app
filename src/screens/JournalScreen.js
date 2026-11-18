@@ -197,6 +197,16 @@ function draftFirstWords(draft) {
  * rather than asked for as "all of them" (`null`), so a fourth precision added one day is not
  * silently swept into a year nobody taught it to.
  *
+ * ⚠ **That naming is asymmetric with the single day's own read, on purpose only on this side.**
+ * A day calls `getEntriesInRange` with `precisions = null` ("every precision, whatever it is"),
+ * so a memory whose `date_precision` were none of today's three would still show on its own day;
+ * this function would call the same row unreadable for a month or a year (it is none of the
+ * three named above), and `calendarModel.buildIndex` drops it outright, fail-closed by its own
+ * build-time ruling -- so that memory would be visible on its day, invisible in its month and
+ * year, and uncounted by the index. No such precision exists today (`date_precision` is
+ * `NOT NULL DEFAULT 'day'` and every writer emits one of the three), so this is a note for
+ * whoever adds a fourth, not a live defect.
+ *
  * `null` for anything this cannot read, and that is the fail-closed answer: an unreadable period
  * must not become a query for some other range.
  *
@@ -1648,63 +1658,6 @@ export default function JournalScreen({ navigation }) {
   const closeCalendar = useCallback(() => setShowCalendarSheet(false), []);
 
   /**
-   * Extract photos from entries for the selected date
-   */
-  const photosForDate = useMemo(() => {
-    const photos = [];
-    displayEntries.forEach(entry => {
-      if (entry.contentBlocks) {
-        entry.contentBlocks.forEach(block => {
-          if (block.type === 'image' || block.type === 'photo' || block.type === 'photos') {
-            const mediaItems = block.media || [block];
-            mediaItems.forEach(media => {
-              photos.push({
-                id: media.id || `${entry.localId}-${photos.length}`,
-                localPath: media.localPath,
-                serverUrl: media.serverUrl,
-                thumbnailUri: media.thumbnailUri || media.localPath || media.serverUrl,
-                location: media.location || entry.location,
-                entryId: entry.localId,
-                createdAt: entry.createdAt,
-              });
-            });
-          }
-        });
-      }
-    });
-    return photos;
-  }, [displayEntries]);
-
-  /**
-   * Extract videos from entries for the selected date
-   */
-  const videosForDate = useMemo(() => {
-    const videos = [];
-    displayEntries.forEach(entry => {
-      if (entry.contentBlocks) {
-        entry.contentBlocks.forEach(block => {
-          if (block.type === 'video') {
-            const mediaItems = block.media || [block];
-            mediaItems.forEach(media => {
-              videos.push({
-                id: media.id || `${entry.localId}-${videos.length}`,
-                localPath: media.localPath,
-                serverUrl: media.serverUrl,
-                thumbnailUri: media.thumbnailUri || media.localPath,
-                location: media.location || entry.location,
-                duration: media.duration,
-                entryId: entry.localId,
-                createdAt: entry.createdAt,
-              });
-            });
-          }
-        });
-      }
-    });
-    return videos;
-  }, [displayEntries]);
-
-  /**
    * Handle gallery icon press on entry card - opens entry-specific gallery
    */
   const handleEntryGalleryPress = useCallback((entry) => {
@@ -1741,7 +1694,14 @@ export default function JournalScreen({ navigation }) {
    */
   const revealEntry = useCallback((created) => {
     const key = toDateKey(created?.date || created?.createdAt);
-    if (key) setSelectedDate(parseDateKey(key));
+    if (key) {
+      // Clear any picked month or year before moving the day underneath it (016 FR-012's own
+      // rule, applied here too): without this, a save landing while a month or year was picked
+      // would move `selectedDate` to the new entry's day while the date bar and the list stayed
+      // on the picked period, showing neither the old day nor the new one.
+      setPicked(null);
+      setSelectedDate(parseDateKey(key));
+    }
     // The day and the index are their own reads now, and choosing the day that is **already**
     // on screen changes no state, so nothing would re-read either: a memory saved onto today
     // would not appear, and "a save is always visibly confirmed" is the whole point of this

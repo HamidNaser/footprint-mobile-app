@@ -1810,6 +1810,45 @@ describe('a whole month (User Story 2)', () => {
   });
 
   /**
+   * **Whole-branch review, item 4.** `revealEntry` (reached, as in the day-mode case above,
+   * through the one path left to it — `ComposeModal`'s own `onSave`) used to move
+   * `selectedDate` without clearing `picked`. With March picked, that left the date bar and the
+   * list reading "March 2026" over a `selectedDate` that had quietly moved to the new memory's
+   * own day underneath it — neither the month nor the day a person could actually see. Saving
+   * through this handler is meant to always "visibly confirm" where a memory landed (the
+   * function's own comment); showing the day it lands on means leaving the picked month first.
+   */
+  it('leaves a picked month and shows the day a save lands on, instead of a month showing neither the old nor the new day', async () => {
+    const NEW_DAY = '2026-08-15';
+    const tree = await onMarch();
+    await tapBarSaying(tree, MARCH_LABEL);
+
+    try {
+      await act(async () => {
+        await tree.root.findByType(ComposeModal).props.onSave({
+          contentBlocks: [{ type: 'text', content: 'a memory saved with a month picked', order: 0 }],
+          visibility: 'private',
+          locationSharing: 'private',
+          date: NEW_DAY,
+        });
+      });
+      await settle();
+
+      // The picked month is gone and the bar names the day the save actually landed on — not
+      // March, and not silently still on March's own label.
+      expect(barShows(tree, NEW_DAY)).toBe(true);
+      expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
+      expect(headingLabels(tree)).toEqual([]);
+    } finally {
+      const db = await DatabaseService.getDb();
+      await db.runAsync('DELETE FROM journal_entries WHERE date = ? AND journal_id = ?', [
+        NEW_DAY,
+        MONTHS,
+      ]);
+    }
+  });
+
+  /**
    * **Fix round 1, finding A.** Three gates decide what a readable month is — `rangeFor` here,
    * and `calendarModel`'s `neighbourMonth` and `monthRows` — and they have to agree. The model's
    * two refuse a year its own four-digit keys cannot be compared against; `rangeFor` was checking
