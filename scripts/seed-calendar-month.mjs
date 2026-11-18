@@ -37,9 +37,18 @@
  * same account is an idempotent no-op in `BatchSync`, not a duplicate -- so running this
  * script twice for the same month does not double the count.
  *
- * Each seeded memory carries one text content block (`{ type: 'text', content, order: 0 }`),
- * which is all `JournalEntryCard` needs to draw a card -- no photo/audio/video upload is
- * attempted, since this is about list and scroll performance (SC-005), not media rendering.
+ * Each seeded memory carries one text content block (`{ type: 'text', content }`), which is all
+ * `JournalEntryCard` needs to draw a card -- no photo/audio/video upload is attempted, since
+ * that would need the upload pipeline and is out of this task's scope.
+ *
+ * ⚠ **This is a real limitation of what a clean SC-005 walk over this seed proves, not just an
+ * implementation shortcut, and it is stated here so it is not read as settled.** List-scroll
+ * stutter on a mid-range phone is very often driven by per-row image decode and layout cost,
+ * not row count alone, and this app's cards commonly carry photos. A month of 300 text-only
+ * memories that scrolls smoothly is real evidence for SC-005's row-count claim -- it does
+ * **not** also clear a photo-heavy month, which this script cannot seed without the upload
+ * pipeline. The owner should read a clean walk over this data as "list and scroll with up to
+ * 300 rows, text-only, does not stutter," not as the whole of SC-005.
  *
  * USAGE
  *   export FOOTPRINT_TOKEN="eyJ..."     # the signed-in account's access token
@@ -235,11 +244,13 @@ function formatEntryForWire({ date, journalId, seq, ordinalInDay }) {
     date,
     datePrecision: 'day',
     visibility: 'private',
+    // ContentBlockRequest has no `order` property (only `type`, `content`, `media`,
+    // `capturedAt`, `duration`, `location`) -- the server would silently drop one, so none is
+    // sent. A single block needs no explicit order anyway.
     contentBlocks: [
       {
         type: 'text',
         content: `Seed memory for SC-005 -- ${date}, #${seq + 1} of the month.`,
-        order: 0,
       },
     ],
   };
@@ -405,6 +416,11 @@ const isMain = !!process.argv[1] && import.meta.url === pathToFileURL(process.ar
 if (isMain) {
   main().catch((err) => {
     console.error('Seed failed:', err.message);
+    // Whatever got through before the failure is not a problem to clean up: a repeated
+    // clientId is an idempotent no-op per account (see the header comment), so running the
+    // same command again tops up rather than duplicating anything already created.
+    console.error('It is safe to run this command again -- already-created memories will not');
+    console.error('be duplicated (each one\'s clientId is a no-op on a repeat).');
     process.exit(1);
   });
 }
