@@ -217,14 +217,69 @@ jest.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'user-1', name: 'Sam' }, isAuthenticated: true }),
 }));
 
-jest.mock('../../hooks/useJournalRealtime', () => ({
-  useJournalRealtime: () => ({}),
-}));
+/**
+ * The realtime feed, as one live object for the whole file so a case can turn the
+ * **"N new entries — tap to refresh"** banner on.
+ *
+ * That banner's press is `handleRefresh`, the very handler pull-to-refresh uses, and T008 makes
+ * it re-read the day and the index as well as the paged feed (research R5, F1). `clearNewEntries`
+ * is a real function here because `handleRefresh` calls it first: with the `{}` this used to be,
+ * the first pull-to-refresh in the suite would have thrown rather than refreshed.
+ */
+jest.mock('../../hooks/useJournalRealtime', () => {
+  const state = {
+    hasNewEntries: false,
+    newEntryCount: 0,
+    clearNewEntries: jest.fn(),
+    isConnected: true,
+  };
+  return { useJournalRealtime: () => state, __realtime: state };
+});
 
-jest.mock('@react-navigation/native', () => ({
-  useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
-  useFocusEffect: jest.fn(),
-}));
+/**
+ * `useFocusEffect` runs, and **blur and focus are two separate moments.**
+ *
+ * It was a `jest.fn()` that swallowed what it was given, which no case up to T007 needed. T008
+ * does: the Journal records what the journal held at the moment it was left and compares it when
+ * it comes back, so a memory has to be able to be saved *in between* — which the `__refocus()`
+ * helper the other screens' suites use (blur and focus in one call) cannot express.
+ *
+ * The effect runs on mount, as React Navigation runs it on focus. `__blur()` runs each mounted
+ * effect's latest cleanup and leaves it blurred; `__focus()` runs the effect again and keeps the
+ * new cleanup for the unmount. Running them in that order with the test's own work in between is
+ * the journey this file could not otherwise reach: leave the Journal, save a memory on the
+ * capture screen, come back.
+ */
+jest.mock('@react-navigation/native', () => {
+  const React = require('react');
+  /** The cleanup each mounted focus effect last returned, by effect. Null while blurred. */
+  const focused = new Map();
+  return {
+    useNavigation: () => ({ navigate: jest.fn(), goBack: jest.fn() }),
+    useFocusEffect: (effect) => {
+      React.useEffect(() => {
+        focused.set(effect, effect());
+        return () => {
+          const cleanup = focused.get(effect);
+          focused.delete(effect);
+          if (typeof cleanup === 'function') cleanup();
+        };
+      }, [effect]);
+    },
+    __blur: () => {
+      focused.forEach((cleanup, effect) => {
+        if (typeof cleanup === 'function') cleanup();
+        focused.set(effect, null);
+      });
+    },
+    __focus: () => {
+      focused.forEach((cleanup, effect) => {
+        if (typeof cleanup === 'function') cleanup();
+        focused.set(effect, effect());
+      });
+    },
+  };
+});
 
 jest.mock('../../services/LocationService', () => ({
   __esModule: true,
@@ -307,6 +362,11 @@ import { JournalEntryCard as CardProbe } from '../../components/journal/JournalE
 // path, which is what the fix-round-1 case at the foot of this file needs.
 import { JournalComposeModal as ComposeModal } from '../../components/journal/JournalComposeModal';
 import { DatabaseService } from '../../services/DatabaseService';
+// The real service, left real like the rest of the journal stack: `entryUpdated` and
+// `entryDeleted` are what T008 listens for, and the only honest way to make one happen is to
+// edit or delete a memory for real (`entryCreated` is never emitted — research R5).
+import { JournalService } from '../../services/JournalService';
+import { SyncEngine, SyncEvent } from '../../sync/SyncEngine';
 import { SettingsService } from '../../services/SettingsService';
 import { ReactionsApi } from '../../api';
 import { parseDateKey, toDateKey } from '../../utils/journalDate';
@@ -358,12 +418,21 @@ const serverPhoto = () => [{
 
 const note = (words) => [{ type: 'text', content: words, order: 0 }];
 
-async function store({ localId, date, datePrecision = 'day', createdAt, contentBlocks }) {
+async function store({
+  localId,
+  date,
+  datePrecision = 'day',
+  createdAt,
+  contentBlocks,
+  // Whose memory it is. The reader's unless a case says otherwise — T008's save detection turns
+  // on this field, because a friend's memory arriving in a sync must not be taken for a save.
+  userId = 'user-1',
+}) {
   await DatabaseService.insertEntry({
     localId,
     serverId: `server-${localId}`,
     journalId: JOURNAL,
-    userId: 'user-1',
+    userId,
     date,
     datePrecision,
     createdAt,
@@ -790,6 +859,61 @@ const measureHeading = async (tree, label, height) => {
 const sheet = (tree) => tree.root.findByType(CalendarSheet);
 
 /**
+ * The person leaving the Journal — for the capture screen, say — and coming back to it.
+ *
+ * Two moments, not one, because everything T008 does about a saved memory happens between them:
+ * the Journal records what the journal held as it is left, and compares it as it comes back
+ * (research R5). Whatever a case does in between is what the person did while they were away.
+ */
+const leaveJournal = async () => {
+  await act(async () => {
+    require('@react-navigation/native').__blur();
+  });
+  await settle();
+};
+
+const returnToJournal = async () => {
+  await act(async () => {
+    require('@react-navigation/native').__focus();
+  });
+  await settle();
+};
+
+/** The "No story yet · N" chip, which is on screen only while there is something in it. */
+const storyChip = (tree) => tree.root
+  .findAllByType(TouchableOpacity)
+  .find((node) => textsIn(node).some((said) => said.startsWith('No story yet')));
+
+/** Whether the chip is lit — what a person sees, through the state the chip announces. */
+const chipIsOn = (tree) => storyChip(tree).props.accessibilityState.selected;
+
+const tapChip = async (tree) => {
+  const chip = storyChip(tree);
+  if (!chip) throw new Error('the "No story yet" chip is not on screen');
+  await act(async () => {
+    chip.props.onPress();
+  });
+  await settle();
+};
+
+/** The list pulled down — `RefreshControl`'s own `onRefresh`, which is the screen's handler. */
+const pullToRefresh = async (tree) => {
+  await act(async () => {
+    await list(tree).props.refreshControl.props.onRefresh();
+  });
+  await settle();
+};
+
+/**
+ * A `created_at` unambiguously **after** the blur that has just happened.
+ *
+ * The clock is read in whole milliseconds and a test does its work inside one, so "now" would
+ * leave "after the moment the Journal was left" a coin toss. A second later is what a memory
+ * really saved on the capture screen looks like, and it is the same side of the comparison.
+ */
+const momentsLater = () => Date.now() + 1000;
+
+/**
  * The screen records a line of its own on each read it could not make. Deliberate, and kept —
  * but it belongs in a production console, not in this suite's output. Restored by `afterEach`.
  */
@@ -909,7 +1033,12 @@ describe('the date bar opens the book-style calendar (FR-001)', () => {
       .mockRejectedValue(new Error('the database is unreadable'));
 
     const tree = await render();
-    await tapDateBar(tree, NEWEST_DAY);
+    // **Today**, not the newest day of the journal: since T008 the day the Journal lands on comes
+    // from the calendar index rather than from the paged feed, and here the index is exactly what
+    // could not be read. That is the honest answer — the arrows have no stops either, and the
+    // calendar is about to refuse to open — rather than a day chosen on the strength of a page
+    // (`lands on the newest day from the index` is the other side of this).
+    await tapDateBar(tree, toDateKey(new Date()));
 
     expect(sheet(tree).props.visible).toBe(false);
     expect(alert).toHaveBeenCalled();
@@ -1643,43 +1772,121 @@ describe('a whole month (User Story 2)', () => {
   });
 
   /**
-   * The "needs a story" worklist is memories from across the whole journal, not a period — so
-   * while it is on, nothing on screen may describe a period: not the date bar, and not the
-   * arrows behind it. The pick is kept, so turning the chip off puts the month back.
+   * **FR-013, and the case this replaces.** T006 kept a pick made while the worklist was on, and
+   * kept it *invisibly*: the list, the headings, the date bar and even the reopened sheet all
+   * went on showing the day, so the tap on March looked dead and March surfaced later, when the
+   * chip happened to be switched off. The case here used to assert exactly that deferred reveal.
    *
-   * FR-013 makes the two exclusive outright (the chip switches off when a period is picked), and
-   * that is T008's. This case is about the meantime being honest rather than about that rule.
+   * FR-013 is the proper fix and makes the two mutually exclusive: **picking a period switches
+   * the chip off, visibly**, so the pick is what is on screen the moment it is made and there is
+   * no kept-but-hidden period left for anything to describe.
    */
-  it('does not name a month over the worklist, and gives it back when the chip goes off', async () => {
+  it('switches the "No story yet" chip off when a month is picked, and shows the month (FR-013)', async () => {
     const tree = await render();
-    const chipSaying = () => tree.root
-      .findAllByType(TouchableOpacity)
-      .find((node) => textsIn(node).some((said) => said.startsWith('No story yet')));
 
-    await act(async () => {
-      chipSaying().props.onPress();
-    });
-    await settle();
+    await tapChip(tree);
+    expect(chipIsOn(tree)).toBe(true);
     expect(cardIds(tree)).toEqual(['jun-10']);
+    expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
 
     await tapDateBar(tree, MONTHS_NEWEST_DAY);
     await tap(tree, 'calendar-view-month');
     await tap(tree, 'calendar-month-tile-2026-03');
 
-    // The worklist is still what is on screen, so the bar still names a day and says no count.
-    expect(cardIds(tree)).toEqual(['jun-10']);
-    expect(headingLabels(tree)).toEqual([]);
-    expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
-    expect(textsIn(tree.root)).not.toContain('1 memory');
-
-    await act(async () => {
-      chipSaying().props.onPress();
-    });
-    await settle();
-
-    // And March, which was never thrown away, is what the chip going off reveals.
+    // The chip is visibly off — it is the chip's own announced state, which is what a person
+    // sees — and March is on screen at once rather than when the chip is next touched.
+    expect(chipIsOn(tree)).toBe(false);
     expect(textsIn(tree.root)).toContain(MARCH_LABEL);
     expect(cardIds(tree)).toEqual(['mar-03', 'mar-14', 'mar-22-a', 'mar-22-b']);
+    expect(headingLabels(tree)).toEqual(['Tue 3 March', 'Sat 14 March', 'Sun 22 March']);
+  });
+
+  /**
+   * FR-013 names three picks, and `handleCalendarPick` answers each of them in a branch of its
+   * own — so each one is asked here. A day and a year go through the same sheet and the same
+   * journal; the chip is on screen in this one because `jun-10` is a photograph with nothing
+   * said about it.
+   */
+  it('switches it off when a day is picked, and when a year is (FR-013)', async () => {
+    const tree = await render();
+
+    await tapChip(tree);
+    expect(chipIsOn(tree)).toBe(true);
+
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-date');
+    // With nothing picked the sheet opens on the month the selected day is in, so March is three
+    // ◄ back — unlike the cases above, which reopen the sheet over a picked March.
+    for (let i = 0; i < monthsBetween(MONTHS_NEWEST_DAY, '2026-03-22'); i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await tap(tree, 'calendar-prev');
+    }
+    await tap(tree, dayTileId('2026-03-22'));
+
+    expect(chipIsOn(tree)).toBe(false);
+    expect(barShows(tree, '2026-03-22')).toBe(true);
+    expect(cardIds(tree)).toEqual(['mar-22-b', 'mar-22-a']);
+
+    await tapChip(tree);
+    expect(chipIsOn(tree)).toBe(true);
+
+    // Switching the chip *on* over a day moves nothing, so the bar still names the 22nd — the
+    // newest-day rule is for a picked month or year (the case below).
+    await tapDateBar(tree, '2026-03-22');
+    await tap(tree, 'calendar-view-year');
+    await tap(tree, 'calendar-year-tile-2026');
+
+    expect(chipIsOn(tree)).toBe(false);
+    expect(textsIn(tree.root)).toContain('2026');
+    expect(monthHeadingLabels(tree)).toEqual([
+      'January 2026', 'March 2026', 'June 2026', '2026, month not known',
+    ]);
+  });
+
+  /**
+   * **The other half of the rule, from the spec's own Edge Cases:** *"Turning it on while a month
+   * or year is shown closes that month or year and shows the filtered memories on the newest day,
+   * as from a day."*
+   *
+   * Easy to miss, and not symmetrical with the half above: it is not enough to drop the pick,
+   * because the day underneath is wherever the person left it — and that is what they are given
+   * back when the chip goes off again. So the day is the newest day with memories, exactly as
+   * FR-012 lands a save, which is what "as from a day" means. The case starts by stepping ◄ off
+   * the newest day, so "it landed on the newest day" cannot pass by the day never having moved.
+   */
+  it('closes a picked month when the chip goes on, and lands on the newest day (Edge Cases)', async () => {
+    const tree = await render();
+
+    await tapDateArrow(tree, -1);
+    expect(barShows(tree, '2026-03-22')).toBe(true);
+
+    await tapDateBar(tree, '2026-03-22');
+    await tap(tree, 'calendar-view-month');
+    await tap(tree, 'calendar-month-tile-2026-03');
+    expect(textsIn(tree.root)).toContain(MARCH_LABEL);
+
+    await tapChip(tree);
+
+    // March is closed, not merely covered: nothing on screen names it, and the list has gone
+    // back to the shape a day has — no headings at all.
+    expect(chipIsOn(tree)).toBe(true);
+    expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
+    expect(headingLabels(tree)).toEqual([]);
+    expect(barShows(tree, MONTHS_NEWEST_DAY)).toBe(true);
+
+    await tapChip(tree);
+
+    // And the day underneath is the newest day — not the 22nd of March the person had stepped
+    // back to, and not March itself.
+    //
+    // ⚠ The chip's own state is asserted because in this journal it is the **only** thing that
+    // tells the two apart: the one memory with nothing said about it is `jun-10`, which is also
+    // the only memory on the newest day, so the worklist and that day draw the same single card
+    // (found by the mutation sweep — a chip that never switched off again passed everything).
+    expect(chipIsOn(tree)).toBe(false);
+    expect(barShows(tree, MONTHS_NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual(['jun-10']);
+    expect(headingLabels(tree)).toEqual([]);
   });
 
   /**
@@ -2368,5 +2575,454 @@ describe('a whole year (User Story 3)', () => {
     expect(swipe(tree).props.hasNext).toBe(false);
     await tapDateArrow(tree, -1);
     expect(textsIn(control(tree, 'date-bar-period'))).toEqual(['2022', '0 memories']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 016 T008 — the cross-cutting half: what happens after a memory is created, keeping the lists
+// and the calendar index fresh, and the "needs a story" chip's rule.
+//
+// **Why this section exists at all.** Before T005 the Journal's day was `allEntries.filter(
+// sameDay)`, and `useJournal` keeps `allEntries` live through `JournalService`'s own events, so
+// every mutation reached the day instantly from anywhere — the capture screen, a detail view, a
+// sync pull. T005 replaced that live projection with an independent read of `getEntriesInRange`,
+// refreshed only on a day or journal change and after a card action. So a memory saved on the
+// capture screen did not appear, and a deleted card stayed on screen — which reads to a person
+// as a failed delete rather than as a stale list. Everything below is that gap closed, trigger
+// by trigger.
+//
+// The save itself is detected by comparing what the journal held when the Journal was left
+// against what it holds when it comes back (research R5): `JournalService` never emits
+// `entryCreated`, so there is no event to listen for, and the comparison also catches a memory
+// saved while the app was in the background. Three conditions, and the three negative cases
+// below are each the control for one of them.
+// ---------------------------------------------------------------------------
+
+describe('the Journal keeps up with what changes while nobody is looking (T008)', () => {
+  /**
+   * Back to the journal this file opens with — the 100 memories across 98 days.
+   *
+   * ⚠ **Said out loud rather than left to the default**, which this is the first block in the
+   * file to need. `jest.spyOn` over a property that is **already** a `jest.fn` (as this one is,
+   * from the module factory above) returns that very mock and registers nothing to restore, so
+   * neither `restoreAllMocks` nor `clearAllMocks` in `afterEach` puts back the default: the
+   * months and years blocks' `mockResolvedValue` outlives them. Nothing ran after those blocks
+   * until now, which is why it has never shown. Naming the journal here is both the fix and the
+   * pattern those two blocks already follow.
+   */
+  beforeEach(() => {
+    jest.spyOn(SettingsService, 'getOrCreateDefaultJournal').mockResolvedValue(JOURNAL);
+  });
+
+  /** One ◄ back from the newest day — somewhere that is *not* where a save would land. */
+  const SECOND_NEWEST_DAY = shiftDay(NEWEST_DAY, -1);
+
+  /** Two days after the newest, so a memory saved on it becomes the newest day of the journal. */
+  const SAVED_DAY = shiftDay(NEWEST_DAY, 2);
+
+  /** Rows put in by a case, taken out again however the case ends: every case in this file
+   *  counts on this journal holding exactly the 100 memories it was seeded with. */
+  const added = [];
+
+  const addMemory = async (memory) => {
+    added.push(memory.localId);
+    await store(memory);
+  };
+
+  afterEach(async () => {
+    const db = await DatabaseService.getDb();
+    while (added.length) {
+      // eslint-disable-next-line no-await-in-loop
+      await db.runAsync('DELETE FROM journal_entries WHERE local_id = ?', [added.pop()]);
+    }
+    const { __realtime } = require('../../hooks/useJournalRealtime');
+    __realtime.hasNewEntries = false;
+    __realtime.newEntryCount = 0;
+  });
+
+  /** The Journal on the day before the newest one, reached the way a person reaches it. */
+  const onSecondNewestDay = async () => {
+    const tree = await render();
+    await tapDateArrow(tree, -1);
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+    return tree;
+  };
+
+  /** The Journal with September 2026 picked — a whole month, which a save must close (FR-012). */
+  const onSeptember = async () => {
+    const tree = await render();
+    await tapDateBar(tree, NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    await tap(tree, 'calendar-month-tile-2026-09');
+    expect(textsIn(tree.root)).toContain('September 2026');
+    return tree;
+  };
+
+  // -------------------------------------------------------------------------
+  // handleRefresh: pull-to-refresh and the banner (research R5, F1; FR-004)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Pulling the list down reloaded the **paged feed** and nothing else (analyze round 2, U2), so
+   * the one gesture a person makes when they think the screen is stale left the two things the
+   * screen is actually drawn from — the day and the calendar index — exactly as they were.
+   */
+  it('re-reads the day and the index when the list is pulled down', async () => {
+    const tree = await onSecondNewestDay();
+    const reads = rangeReads.mock.calls.length;
+    const indexes = indexReads.mock.calls.length;
+
+    await pullToRefresh(tree);
+
+    expect(rangeReads.mock.calls.length).toBeGreaterThan(reads);
+    expect(rangeReads).toHaveBeenLastCalledWith(
+      JOURNAL, SECOND_NEWEST_DAY, SECOND_NEWEST_DAY, null, 'DESC',
+    );
+    expect(indexReads.mock.calls.length).toBeGreaterThan(indexes);
+    // And what the gesture already did is still done: the "new entries" marker is cleared.
+    expect(require('../../hooks/useJournalRealtime').__realtime.clearNewEntries)
+      .toHaveBeenCalled();
+  });
+
+  /**
+   * The **"N new entries — tap to refresh"** banner is the same handler, which is the whole of
+   * why fixing `handleRefresh` fixes both — so this case asserts that it *is* the same function
+   * rather than a second path that happens to behave alike today.
+   */
+  it('re-reads them from the "N new entries" banner too, which is the same handler', async () => {
+    const { __realtime } = require('../../hooks/useJournalRealtime');
+    __realtime.hasNewEntries = true;
+    __realtime.newEntryCount = 3;
+
+    const tree = await onSecondNewestDay();
+    const banner = tree.root
+      .findAllByType(TouchableOpacity)
+      .find((node) => textsIn(node).some((said) => said.includes('Tap to refresh')));
+    expect(banner).toBeDefined();
+    expect(banner.props.onPress).toBe(list(tree).props.refreshControl.props.onRefresh);
+
+    const reads = rangeReads.mock.calls.length;
+    const indexes = indexReads.mock.calls.length;
+    await act(async () => {
+      await banner.props.onPress();
+    });
+    await settle();
+
+    expect(rangeReads.mock.calls.length).toBeGreaterThan(reads);
+    expect(indexReads.mock.calls.length).toBeGreaterThan(indexes);
+  });
+
+  // -------------------------------------------------------------------------
+  // A memory created on the capture screen (FR-012, research R5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * **The gap at its most visible.** Creation moved to 013's capture screen, and
+   * `JournalService` emits no `entryCreated` — so nothing told this screen, and a memory saved
+   * onto the very day on screen did not appear on it.
+   *
+   * ⚠ **Saved onto the day the Journal is already on, deliberately**, which is what makes this a
+   * case about freshness rather than about FR-012: the newest day of the journal is the day on
+   * screen, so nothing moves and no day change re-reads anything. The only thing that can put
+   * that card on screen is the day being read again.
+   */
+  it('shows a memory saved onto the day already on screen', async () => {
+    const tree = await render();
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual([dayEntryId(NEWEST_DAY)]);
+
+    await leaveJournal();
+    await addMemory({
+      localId: 'saved-on-this-day',
+      date: NEWEST_DAY,
+      createdAt: momentsLater(),
+      contentBlocks: note('saved on the capture screen'),
+    });
+    await returnToJournal();
+
+    // Newest first, as a day has always been ordered (FR-004).
+    expect(cardIds(tree)).toEqual(['saved-on-this-day', dayEntryId(NEWEST_DAY)]);
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+  });
+
+  /**
+   * **FR-012.** A memory saved from the "+" on any tab lands wherever it is dated, and the
+   * Journal shows **the newest day**, closing any picked month or year — the same rule as the
+   * web's, and a replacement for "land on the saved memory's day".
+   *
+   * Everything is asked at once here because it is one behaviour: the month closes, the day is
+   * the newest day of the journal, the memory is on it, and the new day is a real day of the
+   * journal — a stop for ◄ ► without the calendar having been reopened.
+   */
+  it('closes a picked month and shows the newest day after a memory is saved (FR-012)', async () => {
+    const tree = await onSeptember();
+
+    await leaveJournal();
+    await addMemory({
+      localId: 'saved-on-capture',
+      date: SAVED_DAY,
+      createdAt: momentsLater(),
+      contentBlocks: note('a memory of a day beyond the journal'),
+    });
+    await returnToJournal();
+
+    expect(textsIn(tree.root)).not.toContain('September 2026');
+    expect(headingLabels(tree)).toEqual([]);
+    expect(barShows(tree, SAVED_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual(['saved-on-capture']);
+    // A real day of the journal: ◄ steps off it and ► comes back, which is the calendar index
+    // having been re-read beside the day (the pair T005 merged into one function).
+    expect(swipe(tree).props.hasNext).toBe(false);
+    await tapDateArrow(tree, -1);
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    await tapDateArrow(tree, 1);
+    expect(barShows(tree, SAVED_DAY)).toBe(true);
+  });
+
+  /**
+   * **Discard changes nothing** (tasks.md). The control for the case above, by the same route
+   * with nothing saved: the picked month is still what is on screen, and the memories under it
+   * are the same ones in the same order.
+   *
+   * But the lists are read again all the same, because a sync could have landed while the screen
+   * was away — so "nothing changed" is about where the Journal is, never about how stale it is.
+   */
+  it('changes nothing when the capture screen is closed with nothing saved (Discard)', async () => {
+    const tree = await onSeptember();
+    const september = rowsInList(tree);
+    const reads = rangeReads.mock.calls.length;
+
+    await leaveJournal();
+    await returnToJournal();
+
+    expect(textsIn(tree.root)).toContain('September 2026');
+    expect(rowsInList(tree)).toEqual(september);
+    expect(rangeReads.mock.calls.length).toBeGreaterThan(reads);
+  });
+
+  /**
+   * **Research R5, round 4, N1.** The app syncs straight after a save, so sync status is no help
+   * in telling a save from a pull — which leaves whose memory it is. A friend's memory arriving
+   * in a sync while the person was away is not something they saved, and jumping the Journal to
+   * the newest day over it would move them off the day they were reading.
+   *
+   * It must still *appear*, because the day is read again either way, and that is the half of
+   * this case which proves the jump was withheld rather than the whole re-read being missed.
+   */
+  it('does not take a friend’s memory arriving in a sync for a save', async () => {
+    const tree = await onSecondNewestDay();
+
+    await leaveJournal();
+    await addMemory({
+      localId: 'pulled-from-a-friend',
+      date: SECOND_NEWEST_DAY,
+      createdAt: momentsLater(),
+      userId: 'friend-2',
+      contentBlocks: note('a friend’s memory, pulled by the sync'),
+    });
+    await returnToJournal();
+
+    // Still the day they were reading, not the newest day of the journal.
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+    // And the day is fresh: the friend's memory is on it.
+    expect(cardIds(tree)).toEqual(['pulled-from-a-friend', dayEntryId(SECOND_NEWEST_DAY)]);
+  });
+
+  /**
+   * The second condition's own control: **`created_at` after the moment the Journal was left.**
+   * An older memory of the reader's own, pulled down by a sync, is not a save either — the same
+   * sync that brings a friend's memory brings the reader's own from another device.
+   */
+  it('does not take an older memory of the reader’s own for a save', async () => {
+    const tree = await onSecondNewestDay();
+
+    await leaveJournal();
+    await addMemory({
+      localId: 'pulled-from-another-phone',
+      date: SECOND_NEWEST_DAY,
+      // ⚠ **Written before the blur, but newer than everything else in this journal** — above
+      // the 1_000_000-and-up stamps the fixture uses, and a lifetime below the clock. Both
+      // halves are needed: it has to be inside the window of newest-written memories the screen
+      // compares, or the case would pass because the memory was never looked at rather than
+      // because its `created_at` is older than the moment the Journal was left. (Found by the
+      // mutation sweep: with a stamp of 5_000 it was outside that window, and dropping the
+      // `created_at` test altogether still passed.)
+      createdAt: 1_500_000,
+      contentBlocks: note('written on another phone, months ago'),
+    });
+    await returnToJournal();
+
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+    // On screen, and at the top of the day: it is the newest-*written* memory of this journal,
+    // which is what a day's newest-first order goes by within one date (FR-004).
+    expect(cardIds(tree)).toEqual(['pulled-from-another-phone', dayEntryId(SECOND_NEWEST_DAY)]);
+  });
+
+  /**
+   * The third condition's own control: **the memory's `local_id` was not there when the Journal
+   * was left.** It is what keeps a clock from being the whole answer — a memory already on
+   * screen whose stored `created_at` is in the future (a phone whose clock was wrong when it was
+   * written, or a server copy stamped ahead) is not something anybody has just saved.
+   */
+  it('does not take a memory that was already there for a save, whatever its created_at says', async () => {
+    await addMemory({
+      localId: 'stamped-in-the-future',
+      date: SECOND_NEWEST_DAY,
+      createdAt: Date.now() + 600_000,
+      contentBlocks: note('written by a phone whose clock was wrong'),
+    });
+
+    const tree = await onSecondNewestDay();
+    expect(cardIds(tree)).toEqual(['stamped-in-the-future', dayEntryId(SECOND_NEWEST_DAY)]);
+
+    await leaveJournal();
+    await returnToJournal();
+
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // The rest of the freshness triggers (research R5, rounds 2–4)
+  // -------------------------------------------------------------------------
+
+  /**
+   * A sync pull is the one source of new memories nobody on this phone asked for, and
+   * `SYNC_COMPLETED` is the only thing that announces it. The screen already listened — to adopt
+   * the server's journal id and refresh the paged feed — so this is that handler widened rather
+   * than a second subscription.
+   */
+  it('re-reads the day and the index when a sync completes', async () => {
+    const tree = await onSecondNewestDay();
+    const listeners = SyncEngine.addListener.mock.calls;
+    const announce = listeners[listeners.length - 1][0];
+
+    await addMemory({
+      localId: 'arrived-in-a-sync',
+      date: SECOND_NEWEST_DAY,
+      createdAt: momentsLater(),
+      contentBlocks: note('pulled down by the sync'),
+    });
+    const indexes = indexReads.mock.calls.length;
+
+    await act(async () => {
+      await announce(SyncEvent.SYNC_COMPLETED);
+    });
+    await settle();
+
+    expect(cardIds(tree)).toEqual(['arrived-in-a-sync', dayEntryId(SECOND_NEWEST_DAY)]);
+    expect(indexReads.mock.calls.length).toBeGreaterThan(indexes);
+  });
+
+  /**
+   * **The worst of the failures this task closes.** A memory deleted elsewhere — the detail view,
+   * another device's delete arriving — left its card on the day, and a card still there after a
+   * delete reads as a delete that failed, not as a list that is stale.
+   *
+   * Driven through the real service, so what is asserted is this screen listening to the event it
+   * really emits. The day loses the card, and the index loses the day: ► can no longer reach it.
+   */
+  it('takes a deleted memory off the day, and the day off the arrows', async () => {
+    const tree = await render();
+    expect(cardIds(tree)).toEqual([dayEntryId(NEWEST_DAY)]);
+
+    try {
+      await act(async () => {
+        await JournalService.deleteEntry(dayEntryId(NEWEST_DAY));
+      });
+      await settle();
+
+      expect(cardIds(tree)).toEqual([]);
+      expect(textsIn(tree.root)).toContain('No entries yet');
+
+      // The index too: the newest day holds nothing now, so stepping back from it is a one-way
+      // trip — ► has nowhere to go.
+      await tapDateArrow(tree, -1);
+      expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+      expect(swipe(tree).props.hasNext).toBe(false);
+    } finally {
+      const db = await DatabaseService.getDb();
+      await db.runAsync(
+        'UPDATE journal_entries SET deleted_at = NULL WHERE local_id = ?',
+        [dayEntryId(NEWEST_DAY)],
+      );
+    }
+  });
+
+  /**
+   * An edit saved anywhere — the capture screen, a sync — reaches the day the same way, through
+   * `entryUpdated`. `useJournal` replaces the entry it holds for itself, but the day on screen is
+   * a read of its own now, so the card would otherwise go on showing the memory as it was before
+   * the edit.
+   */
+  it('redraws a memory the moment an edit to it is saved', async () => {
+    const tree = await render();
+    expect(cardProps(tree, dayEntryId(NEWEST_DAY)).entry.visibility).toBe('private');
+
+    try {
+      await act(async () => {
+        await JournalService.updateEntry(dayEntryId(NEWEST_DAY), { visibility: 'family' });
+      });
+      await settle();
+
+      // Read back out of the database, not patched in place: this is the card the day's own
+      // query handed over.
+      expect(cardProps(tree, dayEntryId(NEWEST_DAY)).entry.visibility).toBe('family');
+    } finally {
+      await DatabaseService.updateEntry(dayEntryId(NEWEST_DAY), { visibility: 'private' });
+    }
+  });
+
+  /**
+   * **The day the Journal lands on comes from the calendar index**, which is where everything
+   * else on this screen now comes from. It used to be worked out from the paged feed, so a
+   * journal whose feed could not be read at all left somebody on today — an empty page, with the
+   * memories of 98 days sitting on the phone behind it.
+   */
+  /**
+   * The other half of the landing rule, which is older than this feature and is kept: **a day
+   * that already holds memories is not left behind.** It only shows itself where there is a
+   * *later* day in the journal than the one the screen starts on — a memory dated ahead of today,
+   * which a date picker will take and a phone with a wrong clock will write by itself.
+   *
+   * Found by the mutation sweep: with no journal in this file holding anything dated today, the
+   * guard could be deleted and every case still passed.
+   */
+  it('stays on today when today holds memories, even with a later day in the journal', async () => {
+    const today = toDateKey(new Date());
+
+    await addMemory({
+      localId: 'a-memory-of-today',
+      date: today,
+      createdAt: momentsLater(),
+      contentBlocks: note('something that happened today'),
+    });
+    await addMemory({
+      localId: 'a-memory-dated-ahead',
+      date: shiftDay(today, 1),
+      createdAt: momentsLater(),
+      contentBlocks: note('something dated tomorrow'),
+    });
+
+    const tree = await render();
+
+    expect(barShows(tree, today)).toBe(true);
+    expect(cardIds(tree)).toEqual(['a-memory-of-today']);
+  });
+
+  it('lands on the newest day from the index, not from the page the feed loaded', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    // `getEntriesByJournalId` is the feed's read **and** the one the screen takes a note of the
+    // journal with as it is left, so breaking it makes the screen record that second failure on
+    // the way out of the case. Deliberate, and a line in a production console rather than in
+    // this suite's output.
+    silenceWarnings();
+    jest
+      .spyOn(DatabaseService, 'getEntriesByJournalId')
+      .mockRejectedValue(new Error('the feed is unreadable'));
+
+    const tree = await render();
+
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual([dayEntryId(NEWEST_DAY)]);
   });
 });

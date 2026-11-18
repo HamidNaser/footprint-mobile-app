@@ -51,7 +51,6 @@ import {
   toDateKey,
   parseDateKey,
   adjacentDateKey,
-  isSameDay as isSameCivilDay,
 } from '../utils/journalDate';
 import { syncBadgeStatus, SyncBadgeStatus } from '../utils/syncStatus';
 import {
@@ -266,6 +265,62 @@ function periodLabel(picked) {
   const range = rangeFor(picked);
   return range ? formatPeriodDate(range.from, picked.kind) : null;
 }
+
+/**
+ * The newest civil day the journal holds a day-dated memory on, or null (016 FR-012).
+ *
+ * **The calendar index, which is the whole journal** -- the same answer `datesWithEntries` gives
+ * the arrows, taken from an index in hand rather than from the state, so that the day a save
+ * lands on can be worked out from the index that read has *just* returned instead of waiting a
+ * render for it.
+ *
+ * `index.days` counts **day-dated** memories only, which is deliberate and is FR-016's rule for
+ * the arrows too: a 1st holding nothing but memories known to their month or year is reached
+ * through that month, not by landing on it. So a memory saved as "sometime in 1998" does not
+ * become the newest day, and the newest day is always a day ◄ ► can stand on.
+ *
+ * Null for no index, an index that could not be read, and a journal with no day-dated memory in
+ * it -- three things with one honest answer: there is no day to show.
+ */
+function newestDayWithMemories(index) {
+  if (!index?.days) return null;
+
+  let newest = null;
+  // Keys are `YYYY-MM-DD`, where lexicographic order *is* chronological order -- the property
+  // this whole feature leans on, and the reason no date is parsed into an instant to compare it.
+  index.days.forEach((_count, key) => {
+    if (!newest || key > newest) newest = key;
+  });
+  return newest;
+}
+
+/**
+ * When a memory was written, in milliseconds, or null when that cannot be read (research R5).
+ *
+ * `created_at` is a number everywhere it is written -- `Date.now()` for a memory saved on this
+ * phone, `new Date(serverEntry.createdAt).getTime()` for one pulled from the server -- and
+ * `_mapEntryRow` hands the column over untouched. Anything else answers **null**, and the one
+ * caller reads null as "not a save": "cannot tell when this was written" must not become "written
+ * at the beginning of time", which would make a memory of unknown age look like one just saved.
+ */
+function createdAtMs(entry) {
+  const created = entry?.createdAt;
+  return typeof created === 'number' && Number.isFinite(created) ? created : null;
+}
+
+/**
+ * How many of the newest-written memories are compared across a visit to the capture screen.
+ *
+ * A memory just saved is the newest thing in the journal by `created_at`, so a window of the
+ * newest few is all it takes to find it -- and all it takes to know it was not there before.
+ * Reading the whole journal on every blur would be a per-row `JSON.parse` of every memory
+ * somebody has ever written, for a question about one of them.
+ *
+ * Fifty rather than one, because the window has to be wide enough that a sync landing between
+ * the two reads cannot push the saved memory out of it. Being wrong in that direction costs the
+ * jump to the newest day and nothing else: the lists and the index are re-read either way.
+ */
+const SAVE_WINDOW = 50;
 
 /**
  * Date selector component -- the date bar at the top of the feed.
@@ -537,28 +592,9 @@ export default function JournalScreen({ navigation }) {
     autoFetch: !!journalId, // Only fetch when journalId is available
   });
 
-  // The sync bootstrap adopts the user's *server* journal id as the default and
-  // stores it. JournalScreen reads the default once on mount, which can race
-  // ahead of that reconciliation (leaving it pointed at a stale local journal id
-  // with no entries). Once the first pull completes, re-read the default journal
-  // id and adopt it so the screen queries the same journal the pulled entries
-  // were stored under; otherwise just refresh in place.
-  useEffect(() => {
-    const unsubscribe = SyncEngine.addListener(async (event) => {
-      if (event !== SyncEvent.SYNC_COMPLETED) return;
-      try {
-        const latest = await SettingsService.getDefaultJournalId();
-        if (latest && latest !== journalId) {
-          setJournalId(latest);
-        } else if (journalId) {
-          refresh();
-        }
-      } catch (err) {
-        console.warn('[JournalScreen] post-sync journal adoption failed:', err?.message);
-      }
-    });
-    return unsubscribe;
-  }, [journalId, refresh]);
+  // The sync listener used to sit here, where its subject (`journalId`, `refresh`) is. It is now
+  // below the two local reads, because T008 has it re-read those as well and a `const` declared
+  // further down this function cannot be named in a dependency array up here.
 
   // User display info - uses authUser from context
   const user = useMemo(() => ({
@@ -566,14 +602,10 @@ export default function JournalScreen({ navigation }) {
     avatarUrl: authUser?.avatarUrl || 'https://randomuser.me/api/portraits/women/47.jpg',
   }), [authUser]);
 
-  /**
-   * Check if a timestamp is on the same day as the selected date
-   */
-  // Entry dates are floating civil dates, compared as YYYY-MM-DD keys so a
-  // stored date is never re-parsed as an instant. Re-parsing was what made
-  // entries land on the wrong day west of Greenwich, and would also slide them
-  // when the user crosses timezones. See src/utils/journalDate.js.
-  const isSameDay = useCallback((value, date) => isSameCivilDay(value, date), []);
+  // `isSameDay` -- a civil-day comparison over the loaded feed -- lived here, and T008 took its
+  // last caller away: the day the Journal lands on is now asked of the calendar index, which
+  // answers in `YYYY-MM-DD` keys and needs no comparison of its own. `journalDate.isSameDay` is
+  // still the one place that rule lives, for everything else that needs it.
 
   /**
    * All entries used for both display and calendar marking. Always the user's
@@ -628,10 +660,9 @@ export default function JournalScreen({ navigation }) {
   }, [journalId]);
 
   // The index loads when the journal loads. It is read again on the way into the sheet
-  // (`openCalendar`) and alongside the day (`reloadDayAndIndex`); the remaining freshness
-  // triggers -- sync, focus, an edit, a delete, pull-to-refresh, and a memory saved on the
-  // capture screen -- are T008's, and until they land neither the day nor the index follows
-  // those events on its own.
+  // (`openCalendar`) and, with the day and the picked period, by every freshness trigger --
+  // a sync, the Journal coming back into view, an edit, a delete, pull-to-refresh, a card
+  // action. All of them go through `reloadListsAndIndex`; see the block beside it.
   useEffect(() => {
     loadCalendarIndex();
   }, [loadCalendarIndex]);
@@ -764,9 +795,11 @@ export default function JournalScreen({ navigation }) {
   }, [reloadPeriod]);
 
   /**
-   * Both local reads again: the open day, and the calendar's index.
+   * **Everything this screen reads from the phone, read again: the open day, the picked period,
+   * and the calendar's index.** Every freshness trigger below goes through here and nothing adds
+   * a read of its own.
    *
-   * **One function, because the two must not drift apart.** They were two calls and the second
+   * **One function, because the three must not drift apart.** They were two calls and the second
    * was missed where it mattered most: a memory saved onto a day that had none appeared on the
    * day it was saved to, and then that day was *not* a stop for ◄ ►, and its tile in the
    * calendar was faded and untappable, until the sheet happened to be opened again. Before this
@@ -777,10 +810,24 @@ export default function JournalScreen({ navigation }) {
    * A card action does not change which days hold memories, so for a like or a reply the index
    * half is insurance rather than a fix -- and cheap, being one grouped read of the phone's own
    * database. Having one function spend it is worth more than having two that can diverge.
+   *
+   * ⚠ **It re-reads; it never resets.** The reads it calls are the token-guarded ones, and
+   * neither of them touches `openMonths` -- which only the period-change effect above lets go
+   * of. A freshness trigger that shut the months somebody had opened would be the most visible
+   * regression available in this screen (T007's own case asserts they survive).
+   *
+   * **Renamed from `reloadDayAndIndex` (T008)**, which named two of its three reads: T006 added
+   * the period to it and kept the old name deliberately, to preserve the line references the
+   * remaining task briefs carried. This is the last task to edit these call sites.
+   *
+   * **It answers with the index it read**, or null if that read failed, so a caller that has to
+   * know which day is newest can ask the answer it has just fetched rather than waiting a render
+   * for the state to catch up. That is FR-012's whole difficulty: the day a save lands on is
+   * decided from an index that includes the save.
    */
-  const reloadDayAndIndex = useCallback(async () => {
+  const reloadListsAndIndex = useCallback(async () => {
     await reloadDay();
-    // The picked month with them, for the same reason the index is here: a like tapped on a card
+    // The picked period with them, for the same reason the index is here: a like tapped on a card
     // in a month list leaves that list a separate read, which would go on showing the counts it
     // was drawn with. Extended rather than paired with a second function of its own, so the three
     // reads behind one screen cannot drift apart -- which is the mistake this function was merged
@@ -788,38 +835,327 @@ export default function JournalScreen({ navigation }) {
     // month mode: it is one grouped read of the phone's own database, and without it a person who
     // liked a memory in March and then picked its own day would be shown the count from before.
     await reloadPeriod();
-    await loadCalendarIndex();
+    return loadCalendarIndex();
   }, [reloadDay, reloadPeriod, loadCalendarIndex]);
 
   /**
-   * The period the list is really showing, or `null` for one day's worth of memories.
+   * Show the newest day, closing any picked month or year (016 FR-012).
    *
-   * `picked`, **except while the "needs a story" worklist is on**: that is memories from across
-   * the whole journal and not a period at all, so a date bar naming March over it, and ◄ ►
-   * stepping months behind it, would both be describing something that is not on screen. The
-   * pick itself is kept rather than cleared, so turning the chip off puts March back.
+   * **The one home of "the newest day"**, which two rules ask for: the Journal after a memory is
+   * created (FR-012), and the "needs a story" chip being switched on over a month or a year
+   * (FR-013's other half, the spec's Edge Cases -- *"shows the filtered memories on the newest
+   * day, as from a day"*). Both mean the same thing and must not drift into meaning two.
    *
-   * FR-013 makes the two exclusive outright -- the chip switches off when a period is picked, and
-   * turning it on closes the period -- which is T008's. That makes this guard moot rather than
-   * wrong: it is here so that nothing on screen can describe something else in the meantime.
+   * `index` is the index to decide the day from -- the one a re-read has just returned where a
+   * memory has just been saved, and the one in hand where nothing has changed.
+   *
+   * **The period is closed whether or not there is a newest day to go to.** The two halves are
+   * separate facts: a month left on screen after a save is how a memory saved outside that month
+   * becomes invisible, which is what FR-012 exists to prevent, and that is true even when the
+   * index could not be read. With no newest day the day underneath is left exactly as it was --
+   * there is no day this screen could claim to know about -- and a day is at least a live list.
    */
-  const periodOnScreen = noStoryOnly ? null : picked;
+  const showNewestDay = useCallback((index) => {
+    setPicked(null);
+
+    const newest = newestDayWithMemories(index);
+    if (newest) setSelectedDate(parseDateKey(newest));
+  }, []);
+
+  // ---------------------------------------------------------------------------------------
+  // Keeping all three fresh (016 FR-004, FR-012; research R5)
+  //
+  // ⚠ **The day used to be a live projection of the journal and is not any more**, and these
+  // are what put that back. It was `allEntries.filter(sameDay)`, and `useJournal` keeps
+  // `allEntries` live through `JournalService`'s events, so *every* mutation reached the day
+  // instantly from anywhere -- the capture screen, a detail view, a sync pull. T005 replaced
+  // that projection with an independent read of the database, which answers once and then sits
+  // there. So a memory saved on the capture screen did not appear, and a deleted card stayed on
+  // screen, which reads to a person as a delete that failed rather than as a list that is stale.
+  //
+  // Six triggers, every one of them through `reloadListsAndIndex` and none of them with a read
+  // of its own:
+  //
+  //   1. the journal or the day changing            -- the two effects above
+  //   2. a card action (a like, a reply, a reshare)  -- T005's call sites
+  //   3. `SYNC_COMPLETED`                            -- below
+  //   4. `entryUpdated` / `entryDeleted`             -- below (`entryCreated` is never emitted)
+  //   5. the Journal coming back into view           -- below, which is also where a save is
+  //                                                     detected (FR-012)
+  //   6. pull-to-refresh and the "N new entries" banner -- `handleRefresh`
+  // ---------------------------------------------------------------------------------------
+
+  /**
+   * A sync landing: the journal id adopted, the feed refreshed, and now the three local reads.
+   *
+   * The adoption half is pre-existing and unchanged. The sync bootstrap adopts the user's
+   * *server* journal id as the default and stores it, and this screen reads the default once on
+   * mount, which can race ahead of that reconciliation -- leaving it pointed at a stale local
+   * journal id with no entries. Once the first pull completes, the default is re-read and
+   * adopted so the screen queries the same journal the pulled entries were stored under.
+   *
+   * **Adopting a different journal needs nothing else**: all three reads are keyed on
+   * `journalId`, so their own effects re-run and re-read everything. It is the other branch --
+   * the same journal, with new memories in it -- that T008 adds the re-read to. A sync pull is
+   * the one source of new memories nobody on this phone asked for, and this is the only thing
+   * that announces it.
+   *
+   * Widened rather than given a second subscription of its own, so there is one listener and one
+   * order of work after a sync.
+   */
+  useEffect(() => {
+    const unsubscribe = SyncEngine.addListener(async (event) => {
+      if (event !== SyncEvent.SYNC_COMPLETED) return;
+      try {
+        const latest = await SettingsService.getDefaultJournalId();
+        if (latest && latest !== journalId) {
+          setJournalId(latest);
+          return;
+        }
+        if (journalId) {
+          refresh();
+          await reloadListsAndIndex();
+        }
+      } catch (err) {
+        console.warn('[JournalScreen] post-sync journal adoption failed:', err?.message);
+      }
+    });
+    return unsubscribe;
+  }, [journalId, refresh, reloadListsAndIndex]);
+
+  /**
+   * A memory edited or deleted **anywhere**, as the service announces it.
+   *
+   * `useJournal` has listened to these two since long before this feature, and that is exactly
+   * why the day stopped following them: it replaces the entry in `allEntries`, which the day is
+   * no longer drawn from. The day, the picked period and the index are read again here, from the
+   * one function that reads all three.
+   *
+   * **A delete is the one this matters most for.** A card still on the day after the memory has
+   * gone reads as a delete that did not work -- and the delete may have happened anywhere: the
+   * detail view, the capture screen, another device's delete arriving in a pull.
+   *
+   * There is no `entryCreated` to listen for: `JournalService` does not emit one (it says so at
+   * its own create path, and `useJournal` synthesises it for itself), which is why a memory
+   * created on the capture screen is detected by comparing the journal across a visit instead.
+   *
+   * Not filtered by journal: the reads are scoped to this screen's `journalId` anyway, so an
+   * event about another journal costs one grouped local read and can change nothing on screen.
+   */
+  useEffect(() => {
+    const unsubscribers = [
+      JournalService.on('entryUpdated', () => { reloadListsAndIndex(); }),
+      JournalService.on('entryDeleted', () => { reloadListsAndIndex(); }),
+    ];
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe());
+  }, [reloadListsAndIndex]);
+
+  /**
+   * What the journal held the moment the Journal was last left, so a memory saved while it was
+   * away can be told from one that merely arrived (research R5).
+   *
+   * `{at, ids}`: the instant of the blur, and a promise of the `local_id`s of the newest-written
+   * memories at that instant. **A promise and not a set**, because a cleanup function cannot
+   * wait for anything -- so the read is started at the blur and awaited on the way back in, which
+   * is a second or more later in every case but a tab tapped twice.
+   *
+   * Null while the Journal is on screen and has not been left.
+   */
+  const whatTheJournalHeld = useRef(null);
+
+  /**
+   * The newest-written memories of this journal, or **null** if they cannot be read.
+   *
+   * Null is load-bearing: the one caller counts a save only against an answer it really has, so
+   * a failed read means no save is counted -- the Journal stays where it is and the lists are
+   * read again anyway. The opposite reading (an empty answer, "nothing was here") would make the
+   * next memory a sync happened to bring look like something the person had just saved.
+   *
+   * Newest-written rather than the whole journal: see `SAVE_WINDOW`. `created_at` and not `date`,
+   * because this is about when a memory was *written*, never about when it happened -- a memory
+   * saved today of a day in 1998 is as much a save as any other.
+   *
+   * On the web build the database shim ignores an `ORDER BY` and a `LIMIT` and hands back the
+   * journal whole (see `DatabaseService`'s note on it). That is a superset of this window and
+   * answers the same question, so no second path is needed here.
+   */
+  const newestWritten = useCallback(async () => {
+    if (!journalId) return null;
+    try {
+      return await DatabaseService.getEntriesByJournalId(journalId, {
+        limit: SAVE_WINDOW,
+        orderBy: 'created_at',
+        order: 'DESC',
+      });
+    } catch (error) {
+      // Recorded, not said: nobody asked for this read, and all it decides is whether the
+      // Journal moves itself to the newest day.
+      console.warn('[JournalScreen] could not tell what the journal held', error?.message);
+      return null;
+    }
+  }, [journalId]);
+
+  /**
+   * The moving parts the focus effect below needs, as of the last render.
+   *
+   * ⚠ **A ref and not a dependency list, deliberately.** `reloadListsAndIndex`'s identity
+   * changes with the journal, the day and the pick, and React Navigation's `useFocusEffect`
+   * re-runs the whole effect -- cleanup and body -- whenever its callback's identity changes.
+   * Depending on it would therefore record a blur and compare a journal against itself every
+   * time somebody stepped a day, which is two database reads and a comparison for an event that
+   * did not happen. The effect is keyed on nothing instead, so it runs once per real focus and
+   * once per real blur, and reads the current values from here.
+   */
+  const onFocusWork = useRef(null);
+  useEffect(() => {
+    onFocusWork.current = {
+      reloadListsAndIndex, newestWritten, showNewestDay, reader: authUser?.id,
+    };
+  });
+
+  /**
+   * Coming back to the Journal: read everything again, and if a memory was saved while it was
+   * away, show the newest day (FR-012).
+   *
+   * **Both, in that order, and the first happens whether or not the second does.** A sync can
+   * land while the screen is away, so the lists and the index are read again on every return;
+   * and the day FR-012 lands on is decided from the index *that* read returned, so it is an
+   * index that already holds the saved memory.
+   *
+   * **How a save is told from anything else** (research R5, round 4, N1). `JournalService` emits
+   * no `entryCreated`, so there is nothing to listen for: creation moved to 013's capture screen,
+   * which is a different screen, and the comparison across a blur/focus pair also catches a
+   * memory saved while the app was in the background. A memory counts as just saved only when
+   *
+   *   - its `local_id` was **not** in the journal when the Journal was left, and
+   *   - its `created_at` is **after** the moment it was left, and
+   *   - its `user_id` is the **reader's own**,
+   *
+   * **whatever its sync status**, because the app syncs straight after saving and a saved memory
+   * is "synced" within the second. All three, and each rules out something real: a friend's
+   * memory arriving in a pull (the third), the reader's own older memory arriving from another
+   * device (the second), and a memory already on screen whose stored `created_at` is in the
+   * future -- a phone whose clock was wrong, or a server copy stamped ahead (the first).
+   *
+   * Discarding, closing the capture screen, or switching tabs and coming back changes nothing:
+   * no new memory, no jump.
+   *
+   * **It fails closed towards not moving the screen.** No reader, no snapshot, a read that
+   * failed: all of them mean "no save counted", which leaves somebody looking at the day they
+   * chose. The opposite failure -- moving the Journal off the day somebody was reading because a
+   * sync brought somebody else's memory -- is the one with something to lose.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      const work = onFocusWork.current;
+      const held = whatTheJournalHeld.current;
+      whatTheJournalHeld.current = null;
+
+      let left = false;
+
+      // **Arriving for the first time is not coming back**, and nothing is read again for it.
+      // With nothing held there was no blur, so this is the screen's own first focus and the
+      // three effects above are reading all of it as this runs; reading it again here would
+      // double every read on arrival. It is also the one focus at which no memory can have been
+      // saved in between. (A memory saved from another tab before the Journal was ever opened is
+      // not lost by this: the first index read lands the Journal on the newest day of the
+      // journal, which is that memory's day.)
+      if (held && work) {
+        (async () => {
+          const index = await work.reloadListsAndIndex();
+          if (left) return;
+
+          const before = await held.ids;
+          const now = await work.newestWritten();
+          if (left || !before || !now || !work.reader) return;
+
+          const saved = now.some((entry) => {
+            if (entry?.userId !== work.reader) return false;
+            if (before.has(entry.localId)) return false;
+            const written = createdAtMs(entry);
+            return written !== null && written > held.at;
+          });
+
+          if (saved) work.showNewestDay(index);
+        })();
+      }
+
+      return () => {
+        // ⚠ Nothing started above may write after this point: the screen is not on screen any
+        // more, and `showNewestDay` would move the Journal under somebody on their way back to
+        // it. (The reads themselves are token-guarded for the same reason.)
+        left = true;
+
+        // What the journal holds, as it is left. The read is started and not waited for -- a
+        // cleanup cannot wait -- and is awaited on the way back in. Recorded on **every** blur,
+        // including the first, which is the whole point of registering a cleanup even where
+        // there was nothing to compare on the way in.
+        whatTheJournalHeld.current = {
+          at: Date.now(),
+          ids: onFocusWork.current
+            ? onFocusWork.current
+              .newestWritten()
+              .then((rows) => (rows ? new Set(rows.map((entry) => entry.localId)) : null))
+            : Promise.resolve(null),
+        };
+      };
+    }, []),
+  );
+
+  /**
+   * The "needs a story" worklist on or off (016 FR-013).
+   *
+   * **The chip and a picked period are mutually exclusive, and this is one of the two places
+   * that makes them so.** The other is `handleCalendarPick`, which switches the chip off when a
+   * day, a month or a year is picked. Here it is the other way round, which the spec's Edge
+   * Cases spell out and which is easy to miss: *turning it on while a month or year is shown
+   * closes that month or year and shows the filtered memories on the newest day, as from a day.*
+   *
+   * So the period is not merely dropped -- the day underneath is the newest day, exactly as a
+   * save lands (FR-012), through the same `showNewestDay`. Dropping the pick alone would leave
+   * the person on whatever day the calendar was last on, which is what they would be given back
+   * when the chip went off again: a day they never chose.
+   *
+   * T006 kept the pick instead, and hid it: `periodOnScreen = noStoryOnly ? null : picked` made
+   * the bar, the list, the arrows and the reopened sheet all go on showing the day, so the tap on
+   * March looked dead and March surfaced later, when the chip happened to be switched off. That
+   * guard is **gone** rather than guarding an unreachable state: with the two exclusive, there is
+   * no `noStoryOnly && picked` left for anything to describe, and everything on this screen reads
+   * `picked` directly.
+   *
+   * Switching the chip **off** moves nothing: the day underneath is the one the chip arrived on.
+   */
+  const toggleNoStory = useCallback(() => {
+    if (noStoryOnly) {
+      setNoStoryOnly(false);
+      return;
+    }
+
+    // Nothing is re-read on the way: switching a filter on changes no memory, so the index in
+    // hand is the index. (A period is only pickable at all because the index already holds it.)
+    if (picked) showNewestDay(calendarIndex);
+    setNoStoryOnly(true);
+  }, [noStoryOnly, picked, showNewestDay, calendarIndex]);
 
   const displayEntries = useMemo(() => {
     // The worklist ignores the selected day on purpose. Somebody asking what they have
     // never written about wants every such memory, not the ones that happen to share a
     // date with whatever the calendar was left on -- which would usually be none. It reads
     // the loaded feed, exactly as it did before: widening it is not this task's.
+    //
+    // Asked first, and the order does not matter: FR-013 makes the chip and a pick exclusive, so
+    // `noStoryOnly` and `picked` are never both on. It stays first because this is the branch a
+    // reader expects to be checked first.
     if (noStoryOnly) return noStoryEntries;
 
-    // A picked month, or the open day. **This is the one answer to "which memories are on
+    // A picked month or year, or the open day. **This is the one answer to "which memories are on
     // screen"**, which is what the card actions resolve a tapped memory from (finding G1) and
     // what the rows below are built out of -- so a like in a month list reaches the right memory
     // without a second notion of what is on screen to keep in step.
-    if (periodOnScreen) return periodEntries || NO_ENTRIES;
+    if (picked) return periodEntries || NO_ENTRIES;
 
     return dayEntries || NO_ENTRIES;
-  }, [noStoryOnly, noStoryEntries, periodOnScreen, periodEntries, dayEntries]);
+  }, [noStoryOnly, noStoryEntries, picked, periodEntries, dayEntries]);
 
   /**
    * The rows of a month or year list, or **null** in day mode (research R8).
@@ -838,10 +1174,11 @@ export default function JournalScreen({ navigation }) {
    * rows" are different things: a day draws its entries directly, exactly as it does today.
    */
   const displayRows = useMemo(() => {
-    // The worklist is a list of memories and not of a period, so it keeps the day feed's shape.
-    if (!periodOnScreen) return null;
+    // A day, or the worklist -- which is a list of memories and not of a period, and cannot be
+    // on with a period picked (FR-013). Either way the day feed's own shape.
+    if (!picked) return null;
 
-    const chosen = buildRows(displayEntries, periodOnScreen, openMonths);
+    const chosen = buildRows(displayEntries, picked, openMonths);
 
     /*
      * FR-006: **the first heading is open** when a year is picked -- and which month that is can
@@ -871,8 +1208,8 @@ export default function JournalScreen({ navigation }) {
     }
 
     const open = new Set([chosen.rows[chosen.stickyIndices[0]].key]);
-    return { ...buildRows(displayEntries, periodOnScreen, open), open };
-  }, [periodOnScreen, displayEntries, openMonths]);
+    return { ...buildRows(displayEntries, picked, open), open };
+  }, [picked, displayEntries, openMonths]);
 
   /**
    * The months really open on screen -- which is `openMonths` once somebody has chosen, and
@@ -912,7 +1249,7 @@ export default function JournalScreen({ navigation }) {
    * `null` is "no answer yet" and `[]` is "read, and there are none" -- the distinction the two
    * reads above keep, and the one the empty state and the date bar's count both depend on.
    */
-  const listAnswered = noStoryOnly || (periodOnScreen ? periodEntries !== null : dayEntries !== null);
+  const listAnswered = noStoryOnly || (picked ? periodEntries !== null : dayEntries !== null);
 
   /**
    * What the date bar calls the period on screen (FR-007), worked out once per period.
@@ -923,7 +1260,7 @@ export default function JournalScreen({ navigation }) {
    * parsing, for an answer that can only change when the picked period does. SC-005 asks for a
    * month of 300 memories scrolling without visible stutter, measured on a real device at T011.
    */
-  const periodName = useMemo(() => periodLabel(periodOnScreen), [periodOnScreen]);
+  const periodName = useMemo(() => periodLabel(picked), [picked]);
 
   /**
    * Sorted civil dates that have entries. Drives ◄ ► and the left/right swipe, which move to
@@ -941,36 +1278,48 @@ export default function JournalScreen({ navigation }) {
     [calendarIndex],
   );
 
-  // On first load, if the currently selected date (defaults to today) has no
-  // entries but the journal does, jump to the most recent entry's date so the
-  // synced data is visible immediately. Entries are date-stamped for when the
-  // memory happened, which may be well before today. Runs once.
+  /**
+   * On first load, if today -- which is where `selectedDate` starts -- holds no memories but the
+   * journal does, land on the newest day instead, so that what is on the phone is visible on
+   * arrival. Memories are dated for when they happened, which may be years before today. Runs
+   * once.
+   *
+   * **The calendar index, which is where everything else on this screen now comes from (T008).**
+   * It was the paged feed: `entries.reduce(...)` over the twenty memories the first page held.
+   * The feed is ordered by date and could usually answer this, but it is a page, it can fail on
+   * its own, and it reads a 1st holding nothing but a memory known to its month as a day -- which
+   * ◄ ► will not stand on (FR-016). The index answers all three the same way the arrows do, and
+   * `newestDayWithMemories` is the one reading of "the newest day" that FR-012 and the chip rule
+   * also use.
+   *
+   * ⚠ **With no index there is no jump**, where the feed used to offer one. That is the state in
+   * which the arrows have no stops and the calendar refuses to open -- the screen cannot say
+   * where this journal's memories are at all -- so landing somewhere on the strength of a page
+   * would be a claim it cannot support. The day is read and drawn either way, and the next index
+   * read (a sync, a pull-to-refresh) answers this again.
+   */
   const didInitialDateJump = useRef(false);
   useEffect(() => {
     if (didInitialDateJump.current) return;
-    if (!entries || entries.length === 0) return;
 
-    const hasEntryOnSelected = entries.some(
-      (e) => isSameDay(e.date || e.createdAt, selectedDate),
-    );
-    if (hasEntryOnSelected) {
-      didInitialDateJump.current = true;
-      return;
-    }
+    const newestKey = newestDayWithMemories(calendarIndex);
+    // Nothing to land on yet: no index, or a journal with no day-dated memory in it. Not
+    // recorded as done, so the first index that has one still gets to answer -- which is what
+    // the feed's own `entries.length === 0` guard did.
+    if (!newestKey) return;
 
-    // Compare as civil-date keys (lexicographic == chronological) and rebuild a
-    // local Date from the winner. Going via new Date(key).getTime() would pick
-    // UTC midnight and land the screen on the previous day west of Greenwich.
-    const newestKey = entries.reduce((latest, e) => {
-      const key = toDateKey(e.date || e.createdAt);
-      return key && key > latest ? key : latest;
-    }, '');
-    if (newestKey) {
-      setSelectedDate(parseDateKey(newestKey));
-    }
     didInitialDateJump.current = true;
-  }, [entries, selectedDate, isSameDay]);
-  
+
+    // Already on a day with memories -- today, or a day a `revealEntry` has already chosen:
+    // stay there. A memory dated tomorrow would otherwise move the screen off a day that has
+    // something on it.
+    if (calendarIndex.days.has(selectedDateKey)) return;
+
+    // Rebuilt from the key with `parseDateKey`, numeric parts and local: `new Date(key)` would
+    // pick UTC midnight and land the screen on the previous day west of Greenwich.
+    setSelectedDate(parseDateKey(newestKey));
+  }, [calendarIndex, selectedDateKey]);
+
   /**
    * Get user info for an entry (for rendering cards)
    * In dev mode, looks up mock users; in production, uses authUser or entry.author
@@ -995,14 +1344,24 @@ export default function JournalScreen({ navigation }) {
   const isOnline = isConnected;
 
   /**
-   * Handle refresh
+   * The list pulled down, **and** the "N new entries -- tap to refresh" banner pressed: one
+   * handler for both, which is why both are fixed by fixing this one (research R5, F1).
+   *
+   * It reloaded the paged feed and nothing else, which since T005 is not what the screen is drawn
+   * from: the day, the picked period and the calendar index are reads of their own. So the one
+   * gesture a person makes when they think the screen is stale was the gesture that left the
+   * stale part of it alone (analyze round 2, finding U2).
+   *
+   * The feed first and the lists second, in that order: the feed is what the worklist chip and
+   * its count are drawn from, and the lists are what is under them.
    */
   const handleRefresh = useCallback(async () => {
     // Clear new entry indicators
     clearNewEntries();
     // Refresh entries from local database
     await refresh();
-  }, [clearNewEntries, refresh]);
+    await reloadListsAndIndex();
+  }, [clearNewEntries, refresh, reloadListsAndIndex]);
 
   /**
    * Navigate to the next/previous date that actually has entries.
@@ -1017,22 +1376,22 @@ export default function JournalScreen({ navigation }) {
     // months that hold nothing rather than stepping onto an empty one, and stop where there is no
     // further month at all rather than wrapping round. FR-008: +1 is the later one, in a month
     // exactly as in a day.
-    if (periodOnScreen?.kind === 'month') {
-      const target = neighbourMonth(calendarIndex, periodOnScreen, direction);
+    if (picked?.kind === 'month') {
+      const target = neighbourMonth(calendarIndex, picked, direction);
       if (target) setPicked(target);
       return;
     }
     // And the same for a year, over the years with memories (FR-007, FR-008). Both neighbour
     // functions answer for a period that is no longer in the index, which is what keeps ◄ ►
     // working from a month or a year that has just lost its last memory (spec Edge Cases).
-    if (periodOnScreen?.kind === 'year') {
-      const target = neighbourYear(calendarIndex, periodOnScreen, direction);
+    if (picked?.kind === 'year') {
+      const target = neighbourYear(calendarIndex, picked, direction);
       if (target) setPicked(target);
       return;
     }
     // A period of some kind this does not step: it stays where it is rather than being stepped as
     // a day, which would move the bar off the thing the list is showing.
-    if (periodOnScreen) return;
+    if (picked) return;
 
     setSelectedDate(prev => {
       const target = adjacentDateKey(datesWithEntries, toDateKey(prev), direction);
@@ -1041,7 +1400,7 @@ export default function JournalScreen({ navigation }) {
       // date keeps the screen stable rather than jumping somewhere arbitrary.
       return target ? parseDateKey(target) : prev;
     });
-  }, [datesWithEntries, periodOnScreen, calendarIndex]);
+  }, [datesWithEntries, picked, calendarIndex]);
 
   /**
    * Whether a period with memories exists in each direction, so the swipe container can refuse
@@ -1049,15 +1408,15 @@ export default function JournalScreen({ navigation }) {
    * index's.
    */
   const hasNeighbour = useCallback((direction) => {
-    if (periodOnScreen?.kind === 'month') {
-      return neighbourMonth(calendarIndex, periodOnScreen, direction) !== null;
+    if (picked?.kind === 'month') {
+      return neighbourMonth(calendarIndex, picked, direction) !== null;
     }
-    if (periodOnScreen?.kind === 'year') {
-      return neighbourYear(calendarIndex, periodOnScreen, direction) !== null;
+    if (picked?.kind === 'year') {
+      return neighbourYear(calendarIndex, picked, direction) !== null;
     }
-    if (periodOnScreen) return false;
+    if (picked) return false;
     return adjacentDateKey(datesWithEntries, selectedDateKey, direction) !== null;
-  }, [periodOnScreen, calendarIndex, datesWithEntries, selectedDateKey]);
+  }, [picked, calendarIndex, datesWithEntries, selectedDateKey]);
 
   const hasNextDate = useMemo(() => hasNeighbour(1), [hasNeighbour]);
   const hasPreviousDate = useMemo(() => hasNeighbour(-1), [hasNeighbour]);
@@ -1135,6 +1494,12 @@ export default function JournalScreen({ navigation }) {
    * A pick this cannot read changes nothing whatever, rather than clearing what is on screen:
    * somebody who tapped March must not be left looking at an arbitrary day because the pick was
    * malformed.
+   *
+   * ⚠ **A pick that is honoured switches the "needs a story" filter off (FR-013)**, in all three
+   * branches, and a pick that is refused leaves it exactly as it was -- the same rule as the rest
+   * of this handler, which is that a refusal changes nothing whatever. The chip is a worklist
+   * from across the whole journal, so leaving it on would mean the picked day or period was not
+   * what came up: the tap would look dead, which is what it did until this landed.
    */
   const handleCalendarPick = useCallback((period) => {
     setShowCalendarSheet(false);
@@ -1144,6 +1509,7 @@ export default function JournalScreen({ navigation }) {
       // day is this", and it refuses anything that is not one rather than passing it to the query.
       const key = dayKeyOf(period.date);
       if (key) {
+        setNoStoryOnly(false);
         setPicked(null);
         setSelectedDate(parseDateKey(key));
       }
@@ -1154,11 +1520,13 @@ export default function JournalScreen({ navigation }) {
     // the thing on screen: the date bar would name it and the list would sit empty under it
     // for ever, with no read to answer and nothing said.
     if (period?.kind === 'month' && rangeFor(period)) {
+      setNoStoryOnly(false);
       setPicked({ kind: 'month', year: period.year, month: period.month });
       return;
     }
 
     if (period?.kind === 'year' && rangeFor(period)) {
+      setNoStoryOnly(false);
       setPicked({ kind: 'year', year: period.year });
     }
   }, []);
@@ -1268,8 +1636,8 @@ export default function JournalScreen({ navigation }) {
     // what the live feed used to do by itself. A read for the day being left is harmless:
     // `dayReadRef` lets only the newest answer through, and the effect above starts a newer one
     // for the day being arrived at.
-    reloadDayAndIndex();
-  }, [reloadDayAndIndex]);
+    reloadListsAndIndex();
+  }, [reloadListsAndIndex]);
 
   /**
    * One tap from the quick bar into the capture screen, carrying the audience the bar's own
@@ -1666,11 +2034,11 @@ export default function JournalScreen({ navigation }) {
       // The feed behind the worklist, and then the open day and the index, which are separate
       // reads and would otherwise go on showing the counts they were drawn with.
       await refresh();
-      await reloadDayAndIndex();
+      await reloadListsAndIndex();
     } catch (error) {
       console.error('[JournalScreen] Failed to react:', error);
     }
-  }, [displayEntries, authUser?.id, refresh, reloadDayAndIndex]);
+  }, [displayEntries, authUser?.id, refresh, reloadListsAndIndex]);
 
   /**
    * Handle adding a comment/response to an entry
@@ -1699,11 +2067,11 @@ export default function JournalScreen({ navigation }) {
 
       // The feed, and then the open day and the index, as above.
       await refresh();
-      await reloadDayAndIndex();
+      await reloadListsAndIndex();
     } catch (error) {
       console.error('[JournalScreen] Failed to add comment:', error);
     }
-  }, [displayEntries, refresh, reloadDayAndIndex]);
+  }, [displayEntries, refresh, reloadListsAndIndex]);
 
   /**
    * The audience chosen again for a memory whose share the server would not apply (FR-011).
@@ -1743,7 +2111,7 @@ export default function JournalScreen({ navigation }) {
       // above, and the card it was tapped on is in the day's own list, which is a separate read.
       // Without this the card goes on saying "Not shared" about a memory just shared.
       await refresh();
-      await reloadDayAndIndex();
+      await reloadListsAndIndex();
     } catch (error) {
       console.warn('[JournalScreen] the memory could not be shared again', error);
       Alert.alert(
@@ -1755,7 +2123,7 @@ export default function JournalScreen({ navigation }) {
           : 'It is still on this phone and still not shared with anyone. Please try again.',
       );
     }
-  }, [refresh, reloadDayAndIndex]);
+  }, [refresh, reloadListsAndIndex]);
 
   /**
    * Key extractor -- for a day's entry, and for a month or year list's rows (research R8).
@@ -1869,12 +2237,12 @@ export default function JournalScreen({ navigation }) {
      * own** pinned heading is added, and the piece lands just below it (FR-017).
      *
      * **A day and a month pass the offset unchanged**, because neither has a pinned heading: it is
-     * asked of `periodOnScreen` rather than of the measurement, so a height left over from a year
-     * cannot push a month's pressed pin a heading too far.
+     * asked of the period on screen rather than of the measurement, so a height left over from a
+     * year cannot push a month's pressed pin a heading too far.
      */
-    const pinned = periodOnScreen?.kind === 'year' ? pinnedHeadingHeight(index) : 0;
+    const pinned = picked?.kind === 'year' ? pinnedHeadingHeight(index) : 0;
     listRef.current?.scrollToIndex({ index, viewOffset: pinned - offset, animated: true });
-  }, [periodOnScreen, pinnedHeadingHeight]);
+  }, [picked, pinnedHeadingHeight]);
 
   /**
    * A row the list had not laid out after all: the memory stays where it is.
@@ -1994,7 +2362,7 @@ export default function JournalScreen({ navigation }) {
               nothing reads as broken rather than as good news. */}
           {noStoryEntries.length > 0 && (
             <TouchableOpacity
-              onPress={() => setNoStoryOnly(on => !on)}
+              onPress={toggleNoStory}
               accessibilityRole="button"
               accessibilityState={{ selected: noStoryOnly }}
               accessibilityLabel={`No story yet, ${noStoryEntries.length} memories`}
@@ -2063,7 +2431,7 @@ export default function JournalScreen({ navigation }) {
       <DateSelector
         date={selectedDate}
         label={periodName}
-        count={periodOnScreen && listAnswered ? displayEntries.length : null}
+        count={picked && listAnswered ? displayEntries.length : null}
         onPrevious={() => navigateDate(-1)}
         onNext={() => navigateDate(1)}
         onDatePress={openCalendar}
@@ -2202,18 +2570,21 @@ export default function JournalScreen({ navigation }) {
         The book-style calendar (FR-001), in place of the platform's own white date picker.
 
         `picked` is one prop with three kinds, and `data-model.md` keeps `selectedDate` for day
-        mode beside `picked`, so the two are mapped into it here: a picked month as it is, and
-        otherwise the day on screen -- `periodOnScreen` rather than `picked`, so the sheet opens
-        on what the list is showing. The sheet reads it to decide which view it opens in, so
+        mode beside `picked`, so the two are mapped into it here: a picked month or year as it is,
+        and otherwise the day on screen. The sheet reads it to decide which view it opens in, so
         reopening it over a month puts somebody back in Month view on that month rather than
-        making them find it again (`initialView`). Year mode is T007's.
+        making them find it again (`initialView`).
+
+        The pick itself is enough now that FR-013 makes the chip and a period exclusive: with the
+        worklist on there is never a pick to be reopened over (T008). T006's `periodOnScreen`
+        guard was here for the state in between, which no longer exists.
 
         `index` cannot be null while `visible` is true: `openCalendar` resolves one first, and
         nothing ever sets it back. See its comment for why that matters.
       */}
       <CalendarSheet
         visible={showCalendarSheet}
-        picked={periodOnScreen || { kind: 'day', date: selectedDateKey }}
+        picked={picked || { kind: 'day', date: selectedDateKey }}
         index={calendarIndex}
         onPick={handleCalendarPick}
         onClose={closeCalendar}

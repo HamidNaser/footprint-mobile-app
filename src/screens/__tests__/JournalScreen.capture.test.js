@@ -304,6 +304,19 @@ jest.mock('../../services/DatabaseService', () => {
   const onPhone = () => require('../../hooks/useJournal').__entries() || [];
 
   const service = {
+    /*
+     * The newest-written memories, which 016 T008 reads as the Journal is left and again as it
+     * comes back: a memory that was not there before, written since, by the reader, is one they
+     * have just saved on the capture screen, and the Journal then shows the newest day (016
+     * FR-012). Answering from the same box as the two queries below, newest-written first.
+     *
+     * Nothing in *this* file is about that rule — but `__refocus()` below is a real blur and
+     * focus, so the read really happens, and a `DatabaseService` without it would have the
+     * screen reporting a read it could not make on every refocus.
+     */
+    getEntriesByJournalId: jest.fn(async (journalId, { limit = 50 } = {}) => [...onPhone()]
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+      .slice(0, limit)),
     getEntriesInRange: jest.fn(async (journalId, fromKey, toKey) =>
       onPhone().filter((entry) => {
         const key = dayKeyOf(entry);
