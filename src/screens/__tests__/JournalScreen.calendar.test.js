@@ -1204,7 +1204,7 @@ describe('a whole month (User Story 2)', () => {
     const tree = await render();
     await tapDateBar(tree, MONTHS_NEWEST_DAY);
     await tap(tree, 'calendar-view-month');
-    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+    await tap(tree, 'calendar-month-tile-2026-03');
     return tree;
   };
 
@@ -1257,7 +1257,7 @@ describe('a whole month (User Story 2)', () => {
     const tree = await render();
     await tapDateBar(tree, MONTHS_NEWEST_DAY);
     await tap(tree, 'calendar-view-month');
-    await tap(tree, `calendar-month-tile-${'2026-01'}`);
+    await tap(tree, 'calendar-month-tile-2026-01');
 
     // The holding area stores a memory known only to 2026 on 1 January. It belongs to the year,
     // and January is not where somebody goes looking for it — the same answer the calendar's own
@@ -1409,7 +1409,7 @@ describe('a whole month (User Story 2)', () => {
     // Journal nothing until a month is really chosen.
     await tap(tree, 'calendar-prev');
     await tap(tree, 'calendar-prev');
-    await tap(tree, `calendar-month-tile-${'2024-07'}`);
+    await tap(tree, 'calendar-month-tile-2024-07');
 
     expect(rowsOnScreen(tree)).toEqual([
       'heading:Fri 19 July',
@@ -1447,6 +1447,38 @@ describe('a whole month (User Story 2)', () => {
   });
 
   /**
+   * **Fix round 1, finding A.** Three gates decide what a readable month is — `rangeFor` here,
+   * and `calendarModel`'s `neighbourMonth` and `monthRows` — and they have to agree. The model's
+   * two refuse a year its own four-digit keys cannot be compared against; `rangeFor` was checking
+   * only that the year was a whole number.
+   *
+   * So a month with a year of 5 would have been accepted, read as `'5-03-01'` (which
+   * `getEntriesInRange` refuses and answers nothing for), and then drawn: `formatPeriodDate` has
+   * no words for a year that is not four digits, so the bar would have fallen back to naming a
+   * **day** while the list sat empty under it and said *"No entries yet"* — a claim that the day
+   * on the bar holds nothing, which is the one thing the three-valued read exists to prevent.
+   *
+   * Not reachable from the sheet, whose grid can only report a real year, so it is driven through
+   * the sheet's own `onPick` contract — the gate itself, rather than a route to it.
+   */
+  it('refuses a month it could not read, and leaves what is on screen alone (fix round 1, A)', async () => {
+    const tree = await onMarch();
+    const before = rangeReads.mock.calls.length;
+
+    await act(async () => {
+      sheet(tree).props.onPick({ kind: 'month', year: 5, month: 3 });
+    });
+    await settle();
+
+    // March is untouched: the pick changed nothing whatever, which is the fail-closed answer.
+    expect(textsIn(tree.root)).toContain(MARCH_LABEL);
+    expect(cardIds(tree)).toEqual(['mar-03', 'mar-14', 'mar-22-a', 'mar-22-b']);
+    expect(textsIn(tree.root)).not.toContain('No entries yet');
+    // And nothing was asked of the database about a month that is not one.
+    expect(rangeReads.mock.calls.length).toBe(before);
+  });
+
+  /**
    * The "needs a story" worklist is memories from across the whole journal, not a period — so
    * while it is on, nothing on screen may describe a period: not the date bar, and not the
    * arrows behind it. The pick is kept, so turning the chip off puts the month back.
@@ -1468,7 +1500,7 @@ describe('a whole month (User Story 2)', () => {
 
     await tapDateBar(tree, MONTHS_NEWEST_DAY);
     await tap(tree, 'calendar-view-month');
-    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+    await tap(tree, 'calendar-month-tile-2026-03');
 
     // The worklist is still what is on screen, so the bar still names a day and says no count.
     expect(cardIds(tree)).toEqual(['jun-10']);
@@ -1503,7 +1535,7 @@ describe('a whole month (User Story 2)', () => {
     jest
       .spyOn(DatabaseService, 'getEntriesInRange')
       .mockRejectedValue(new Error('the month is unreadable'));
-    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+    await tap(tree, 'calendar-month-tile-2026-03');
 
     const said = textsIn(tree.root);
     expect(cardIds(tree)).toEqual([]);

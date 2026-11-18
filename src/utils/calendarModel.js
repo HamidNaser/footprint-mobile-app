@@ -34,6 +34,8 @@
  *   `buildRows`                                 the month and year lists (T006, T007)
  *   `filterRange`                               the web build's stand-in for T003's SQL
  *   `isDescending`                              the one reading of `order` (`filterRange`, T003)
+ *   `fourDigitYear`                             the one reading of "is this a year at all" --
+ *                                               asked here and by `JournalScreen.rangeFor` (T006)
  *
  * Days are **not** stepped here: `journalDate.adjacentDateKey` already does that, and it is
  * the one place that answers it (research R7). Months and years are what it cannot take.
@@ -362,8 +364,16 @@ export function buildIndex(rows) {
  * comparison above is a string comparison. A three-digit year would sort `'999'` *after*
  * `'2026'` and answer with a straight face; there is no such journal, so the honest answer is
  * no answer.
+ *
+ * **Exported because a third caller asks it** (T006 fix round 1, finding A): `JournalScreen`'s
+ * `rangeFor` decides whether a picked month is readable at all, and `neighbourMonth` and
+ * `monthRows` here both refuse a year this answers `false` for. Three gates have to agree on what
+ * a readable month is, or the screen reads a range the model then returns no rows for -- and an
+ * empty answer on a *readable* month is drawn as "0 memories / No entries yet", which is a
+ * positive claim that somebody's month is empty. Two copies of "is this a four-digit year" agree
+ * only until one of them is corrected, so there is one copy and it is this one.
  */
-function fourDigitYear(year) {
+export function fourDigitYear(year) {
   return Number.isInteger(year) && year >= 1000 && year <= 9999;
 }
 

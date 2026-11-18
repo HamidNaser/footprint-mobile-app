@@ -98,6 +98,7 @@ import {
   buildRows,
   dayKeyOf,
   daysInMonth,
+  fourDigitYear,
   monthKey,
   neighbourMonth,
 } from '../utils/calendarModel';
@@ -184,6 +185,15 @@ function draftFirstWords(draft) {
  * must not become a query for some other range. A year is T007's and is answered `null` here
  * until then rather than silently read as something else.
  *
+ * ⚠ **The year test is `calendarModel`'s own `fourDigitYear`, and sharing it is the point** (fix
+ * round 1, finding A). Three gates decide what a readable month is -- this one, and the model's
+ * `neighbourMonth` and `monthRows` -- and a disagreement between them is not an inert one: a
+ * month this accepted and the model then returned no rows for would be read, answered with
+ * nothing, and drawn as a period that really holds nothing. `Number.isInteger(year)` alone let
+ * `{year: 5, month: 3}` through, which `formatPeriodDate` has no words for either, so the bar
+ * fell back to naming a **day** with *"No entries yet"* under it -- a claim about that day's
+ * memories with no basis at all.
+ *
  * `'ASC'` is the calendar order FR-005 asks for -- oldest first, within a day too. (Only a
  * single day reads `'DESC'`, which is the order the feed has today; `DatabaseService` reads the
  * word through `calendarModel.isDescending`, so anything else means ascending anyway.)
@@ -192,7 +202,7 @@ function rangeFor(picked) {
   if (picked?.kind !== 'month') return null;
 
   const { year, month } = picked;
-  if (!Number.isInteger(year) || !Number.isInteger(month)) return null;
+  if (!fourDigitYear(year) || !Number.isInteger(month)) return null;
   if (month < 1 || month > 12) return null;
 
   const key = monthKey(year, month);
@@ -766,6 +776,17 @@ export default function JournalScreen({ navigation }) {
    * reads above keep, and the one the empty state and the date bar's count both depend on.
    */
   const listAnswered = noStoryOnly || (periodOnScreen ? periodEntries !== null : dayEntries !== null);
+
+  /**
+   * What the date bar calls the period on screen (FR-007), worked out once per period.
+   *
+   * Memoised rather than called in the JSX (fix round 1, finding B). This screen re-renders on
+   * every change to the viewable-key set, which is to say repeatedly while somebody scrolls, and
+   * the words behind it are not free: `monthKey`, `daysInMonth` and `formatPeriodDate`'s own
+   * parsing, for an answer that can only change when the picked period does. SC-005 asks for a
+   * month of 300 memories scrolling without visible stutter, measured on a real device at T011.
+   */
+  const periodName = useMemo(() => periodLabel(periodOnScreen), [periodOnScreen]);
 
   /**
    * Sorted civil dates that have entries. Drives ◄ ► and the left/right swipe, which move to
@@ -1819,7 +1840,7 @@ export default function JournalScreen({ navigation }) {
       */}
       <DateSelector
         date={selectedDate}
-        label={periodLabel(periodOnScreen)}
+        label={periodName}
         count={periodOnScreen && listAnswered ? displayEntries.length : null}
         onPrevious={() => navigateDate(-1)}
         onNext={() => navigateDate(1)}

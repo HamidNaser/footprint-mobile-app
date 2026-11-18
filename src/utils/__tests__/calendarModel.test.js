@@ -38,6 +38,7 @@ import {
   buildRows,
   filterRange,
   isDescending,
+  fourDigitYear,
 } from '../calendarModel';
 // Imported to state a contract, not because `calendarModel` uses it: the fallback below must
 // place a dateless memory on the same day the Journal's own helper would.
@@ -808,6 +809,49 @@ describe('SC-004: a date that carries a time never moves day', () => {
  * month list that read oldest-first on a phone and newest-first on the web build would be two
  * different screens, and two copies of "`'DESC'` in any case" agree only until one is changed.
  */
+describe('fourDigitYear', () => {
+  /**
+   * Exported for a third caller (T006 fix round 1, finding A): `JournalScreen.rangeFor` decides
+   * whether a picked month is readable at all, and `neighbourMonth` and `buildRows` here both
+   * refuse a year this answers `false` for. The three have to agree -- a screen that reads a
+   * range the model then returns no rows for draws "0 memories / No entries yet" over a month it
+   * believed was readable, which is a positive claim that somebody's month is empty.
+   *
+   * The cases below are the ones the rule exists for: the index's own keys are four digits wide
+   * and compared as strings, so `'999'` would sort *after* `'2026'` and answer with a straight
+   * face.
+   */
+  it('is a year the four-digit keys of the index can be compared against', () => {
+    expect(fourDigitYear(2026)).toBe(true);
+    expect(fourDigitYear(1000)).toBe(true);
+    expect(fourDigitYear(9999)).toBe(true);
+  });
+
+  it('refuses anything that is not one, rather than answering wrongly', () => {
+    expect(fourDigitYear(999)).toBe(false);
+    expect(fourDigitYear(5)).toBe(false);
+    expect(fourDigitYear(0)).toBe(false);
+    expect(fourDigitYear(-2026)).toBe(false);
+    expect(fourDigitYear(10000)).toBe(false);
+    expect(fourDigitYear(2026.5)).toBe(false);
+    expect(fourDigitYear('2026')).toBe(false);
+    expect(fourDigitYear(null)).toBe(false);
+    expect(fourDigitYear(undefined)).toBe(false);
+    expect(fourDigitYear(NaN)).toBe(false);
+  });
+
+  it('is the very rule the two functions that already asked it apply', () => {
+    // Not a restatement: the same year, refused in all three places, is what stops the three
+    // gates from disagreeing about what a readable month is.
+    const index = buildIndex([{ day: '2026-03-05', precision: 'day', count: 1 }]);
+
+    expect(fourDigitYear(5)).toBe(false);
+    expect(neighbourMonth(index, { year: 5, month: 3 }, 1)).toBeNull();
+    expect(buildRows([], { kind: 'month', year: 5, month: 3 }))
+      .toEqual({ rows: [], stickyIndices: [] });
+  });
+});
+
 describe('isDescending', () => {
   it('reads only DESC as newest first, and without regard to case', () => {
     expect(isDescending('DESC')).toBe(true);
