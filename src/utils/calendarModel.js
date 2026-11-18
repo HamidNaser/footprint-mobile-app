@@ -25,7 +25,8 @@
  * Who reads what:
  *
  *   `dayKeyOf`                                  which civil day an entry is on (T005-T007)
- *   `daysInMonth`, `monthGrid`, `monthKey`      the sheet's Date view (T004)
+ *   `daysInMonth`, `monthGrid`, `monthKey`,
+ *   `WEEKDAY_NAMES`                             the sheet's Date view (T004)
  *   `stepMonth`, `stepYear`, `stepWindow`,
  *   `windowStartFor`                            the sheet's ◄ ► (T004)
  *   `neighbourMonth`, `neighbourYear`           the date bar's ◄ ► and the swipe (T006, T007)
@@ -56,8 +57,14 @@ import { daysInMonth, monthName, formatPeriodDate } from './periodDate';
  * month names: a heading read out of the device's locale would change wording from phone to
  * phone, and FR-005 words these headings exactly ("Thu 5 March"). `periodDate` has no
  * weekdays of its own -- it never needs one -- so this is the only list here.
+ *
+ * Exported since T004, for the one other thing that needs these seven words: the column heads
+ * over the calendar sheet's day grid. They are the same seven words in the same order, and a
+ * second copy of them in a component -- in **two** components, since the sheet has a `.web.js`
+ * variant -- is two more things to keep in step with a day heading. So the list stays here,
+ * which is where this file's header already says it belongs, and the sheet reads it.
  */
-const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+export const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 /** The leading civil date of a day key or of a full instant -- the day part, and no more. */
 const DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})/;
