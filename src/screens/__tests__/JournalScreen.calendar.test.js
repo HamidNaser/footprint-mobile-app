@@ -486,7 +486,7 @@ const Y2026_LABEL = '2026';
 const YEAR_2026_READ = [YEARS, '2026-01-01', '2026-12-31', ['day', 'month', 'year'], 'ASC'];
 
 /**
- * Thirteen memories across three years, chosen so each of User Story 3's scenarios is a real
+ * Fourteen memories across four years, chosen so each of User Story 3's scenarios is a real
  * question rather than a restatement.
  *
  * - **2026** holds memories in exactly **nine** months — October, November and December hold
@@ -498,8 +498,12 @@ const YEAR_2026_READ = [YEARS, '2026-01-01', '2026-12-31', ['day', 'month', 'yea
  *   "2019, month not known" heading, after a month heading rather than instead of one.
  * - **2022** is the one year between them with memories, so ◄ ► skipping 2020, 2021 and 2023–25
  *   is a behaviour rather than a coincidence (FR-007, FR-008).
+ * - **2016** holds *nothing but* a memory dated only "2016", so its "month not known" heading is
+ *   the only heading it has — and therefore the first one, which is the one FR-006 opens (fix
+ *   round 1, C). It is also the oldest year here, which is where ◄ stops.
  */
 const YEARS_MEMORIES = [
+  { localId: 'y16-rough', date: '2016-01-01', datePrecision: 'year', createdAt: 900_000 },
   { localId: 'y19-rough', date: '2019-01-01', datePrecision: 'year', createdAt: 1_000_000 },
   { localId: 'y19-05-20', date: '2019-05-20', createdAt: 1_100_000 },
   { localId: 'y22-08-09', date: '2022-08-09', createdAt: 1_200_000 },
@@ -1688,7 +1692,7 @@ describe('a whole month (User Story 2)', () => {
    * memories that it has no basis for.
    */
   it('says nothing about a month it could not read, rather than that it is empty', async () => {
-    silenceWarnings();
+    const warnings = silenceWarnings();
     const tree = await render();
     await tapDateBar(tree, MONTHS_NEWEST_DAY);
     await tap(tree, 'calendar-view-month');
@@ -1696,6 +1700,14 @@ describe('a whole month (User Story 2)', () => {
       .spyOn(DatabaseService, 'getEntriesInRange')
       .mockRejectedValue(new Error('the month is unreadable'));
     await tap(tree, 'calendar-month-tile-2026-03');
+
+    // Recorded rather than said to the person, and recorded in words that name what failed: one
+    // `catch` serves a month and a year, so "the period could not be read" is what it must say
+    // whichever of the two it was (T007 fix round 1, A).
+    expect(warnings).toHaveBeenCalledWith(
+      '[JournalScreen] the period could not be read',
+      'the month is unreadable',
+    );
 
     const said = textsIn(tree.root);
     expect(cardIds(tree)).toEqual([]);
@@ -1809,9 +1821,13 @@ describe('a whole year (User Story 3)', () => {
       'card:y26-01-05',
     ]);
 
-    // Open is something a person can see: one chevron down, among headings that all point
-    // forward. (The ninth heading is below the ten rows a `FlatList` draws to begin with.)
-    expect(headingChevrons(tree).filter(([, icon]) => icon !== 'chevron-forward'))
+    // Open is something a person can see. Every heading the list has drawn, in the order the
+    // model has them, so a heading that did not draw at all fails here rather than slipping past
+    // a filter (fix round 1, D) — and then only the first of them points down.
+    const drawn = headingChevrons(tree);
+    expect(drawn.length).toBeGreaterThan(1);
+    expect(drawn.map(([label]) => label)).toEqual(monthHeadingLabels(tree).slice(0, drawn.length));
+    expect(drawn.filter(([, icon]) => icon !== 'chevron-forward'))
       .toEqual([['January 2026', 'chevron-down']]);
 
     // The whole year from the phone's own database, every precision, oldest first.
@@ -1917,6 +1933,31 @@ describe('a whole year (User Story 3)', () => {
   });
 
   /**
+   * **Fix round 1, C.** FR-006's "the first heading MUST be open" says nothing about which *kind*
+   * of heading it is, and a year whose only memories are dated to the year has no month heading
+   * at all — its "month not known" heading is both the final one and the first one. `yearRows`
+   * pushes it through the same `pushHeading`, so it lands in `stickyIndices` like any other and
+   * the screen reads `stickyIndices[0]` without caring; this is the path nothing else exercises.
+   */
+  it('opens the “month not known” heading when it is the only one a year has (FR-006)', async () => {
+    const tree = await render();
+    await tapDateBar(tree, YEARS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-year');
+    await tap(tree, 'calendar-prev');
+    await tap(tree, 'calendar-year-tile-2016');
+
+    expect(rowsInList(tree)).toEqual([
+      'heading:2016, month not known',
+      'card:y16-rough',
+    ]);
+    expect(headingChevrons(tree)).toEqual([['2016, month not known', 'chevron-down']]);
+    expect(textsIn(control(tree, 'date-bar-period'))).toEqual(['2016', '1 memory']);
+    // The oldest year in this journal, so ◄ has nowhere to go — the other end of the stop
+    // `stops where there is no further year with memories` pins for ►.
+    expect(swipe(tree).props.hasPrevious).toBe(false);
+  });
+
+  /**
    * FR-005's grey sub-heading inside an open month says "April 2026" — the same words as the
    * pinned heading above it. That redundancy is specified verbatim and was settled in T004's
    * review, so it is asserted positionally here rather than treated as a defect.
@@ -1938,10 +1979,10 @@ describe('a whole year (User Story 3)', () => {
 
   it('names the year and its count on the date bar (FR-007)', async () => {
     const tree = await on2026();
-    const said = textsIn(tree.root);
 
-    expect(said).toContain(Y2026_LABEL);
-    expect(said).toContain('10 memories');
+    // The bar itself, rather than anywhere on screen: every open month heading says a count of
+    // its own, so "somewhere a count is said" would be satisfied by one of those.
+    expect(textsIn(control(tree, 'date-bar-period'))).toEqual([Y2026_LABEL, '10 memories']);
     // And it no longer names a day, which is the thing a year is not.
     expect(barShows(tree, YEARS_NEWEST_DAY)).toBe(false);
   });
@@ -2039,6 +2080,37 @@ describe('a whole year (User Story 3)', () => {
     expect(scrollToIndex).toHaveBeenLastCalledWith({ index: 7, viewOffset: 60 - 160, animated: true });
   });
 
+  /**
+   * **Fix round 1, B.** The headings are not all the same height — "2026, month not known" is a
+   * longer label than "March 2026" and wraps at a large text size on a narrow screen — so the
+   * gap a pressed pin has to clear is **that row's own** pinned heading, not whichever heading
+   * happened to lay out most recently. With one shared number, a tall heading below January would
+   * make a pin pressed in January clear a gap a line too big.
+   */
+  it('clears the heading pinned above the pressed card, not whichever measured last (FR-017)', async () => {
+    const scrollToIndex = jest
+      .spyOn(FlatList.prototype, 'scrollToIndex')
+      .mockImplementation(() => {});
+    const tree = await on2026();
+    await tapHeading(tree, 'February 2026');
+
+    // February measures taller than January, and measures **after** it.
+    await measureHeading(tree, 'January 2026', 44);
+    await measureHeading(tree, 'February 2026', 72);
+
+    // A card in January clears January's heading, although February's is the last one measured.
+    await act(async () => {
+      cardProps(tree, 'y26-01-05').onRequestScrollTo(160);
+    });
+    expect(scrollToIndex).toHaveBeenLastCalledWith({ index: 2, viewOffset: 44 - 160, animated: true });
+
+    // And a card in February clears February's.
+    await act(async () => {
+      cardProps(tree, 'y26-02-07').onRequestScrollTo(160);
+    });
+    expect(scrollToIndex).toHaveBeenLastCalledWith({ index: 5, viewOffset: 72 - 160, animated: true });
+  });
+
   it('does not throw when a pin is pressed on the very last row of the list (FR-017)', async () => {
     silenceWarnings();
     // 2019, because its whole list is four rows and the memory below the last heading really is
@@ -2120,8 +2192,10 @@ describe('a whole year (User Story 3)', () => {
     const tree = await on2019();
 
     // 2020 and 2021 hold nothing, so ► reaches 2022 rather than stepping onto an empty year.
+    // Both directions are offered: 2016 is behind this year and 2022 ahead of it, and the two
+    // ends of the journal are pinned by their own cases.
     expect(swipe(tree).props.hasNext).toBe(true);
-    expect(swipe(tree).props.hasPrevious).toBe(false);
+    expect(swipe(tree).props.hasPrevious).toBe(true);
 
     await tapDateArrow(tree, 1);
     expect(textsIn(tree.root)).toContain('2022');
@@ -2228,7 +2302,7 @@ describe('a whole year (User Story 3)', () => {
    * somebody's own memories that it has no basis for.
    */
   it('says nothing about a year it could not read, rather than that it is empty', async () => {
-    silenceWarnings();
+    const warnings = silenceWarnings();
     const tree = await render();
     await tapDateBar(tree, YEARS_NEWEST_DAY);
     await tap(tree, 'calendar-view-year');
@@ -2236,6 +2310,13 @@ describe('a whole year (User Story 3)', () => {
       .spyOn(DatabaseService, 'getEntriesInRange')
       .mockRejectedValue(new Error('the year is unreadable'));
     await tap(tree, 'calendar-year-tile-2026');
+
+    // The same line, from the same `catch`, naming the period rather than a month — which is the
+    // half of it only a year can prove (fix round 1, A).
+    expect(warnings).toHaveBeenCalledWith(
+      '[JournalScreen] the period could not be read',
+      'the year is unreadable',
+    );
 
     const said = textsIn(tree.root);
     expect(cardIds(tree)).toEqual([]);
@@ -2248,24 +2329,44 @@ describe('a whole year (User Story 3)', () => {
 
   /**
    * And the other half, which is that case's control: a year really read and really empty does
-   * say so. Reached the way the spec's edge case describes it — the period on screen losing its
-   * last memory — and ◄ ► still move from it, because `neighbourYear` answers for a year that is
-   * no longer in the index.
+   * say so.
+   *
+   * Reached exactly as the spec's edge case describes it (fix round 1, D) — **the year on screen
+   * losing its last memory**, rather than by stepping onto an empty one. 2026 stays picked, and
+   * both reads behind it are made to answer as they would after a sync had deleted everything in
+   * it: no memories, and a calendar index that no longer lists 2026 at all. A card action is what
+   * re-reads the two together, which is the route a deletion elsewhere takes.
+   *
+   * That is also what makes the claim about the arrows real: ◄ still reaches 2022 **from a year
+   * that is no longer in the index**, which is `neighbourYear` searching from where 2026 would
+   * sort rather than from whether it is there (verified under Task 2's review).
    */
-  it('does say a year is empty once it has really been read and really is', async () => {
+  it('keeps a year on screen, empty, when it loses its last memory', async () => {
     const tree = await on2026();
-    jest.spyOn(DatabaseService, 'getEntriesInRange').mockResolvedValue([]);
 
-    await tapDateArrow(tree, -1);
+    jest.spyOn(DatabaseService, 'getEntriesInRange').mockResolvedValue([]);
+    jest.spyOn(DatabaseService, 'getCalendarIndexRows').mockResolvedValue([
+      { day: '2019-05-20', precision: 'day', count: 1 },
+      { day: '2022-08-09', precision: 'day', count: 1 },
+    ]);
+
+    await act(async () => {
+      await cardProps(tree, 'y26-01-05').onReact('y26-01-05', 'heart');
+    });
+    await settle();
 
     const said = textsIn(tree.root);
-    expect(said).toContain('2022');
+    // Still 2026, and now honestly empty: the count reads 0 rather than being withheld.
+    expect(textsIn(control(tree, 'date-bar-period'))).toEqual([Y2026_LABEL, '0 memories']);
     expect(cardIds(tree)).toEqual([]);
     expect(monthHeadingLabels(tree)).toHaveLength(0);
     expect(said).toContain('No entries yet');
-    expect(said).toContain('0 memories');
-    // And the arrows still work from a year with nothing left in it.
-    expect(swipe(tree).props.hasNext).toBe(true);
+
+    // And ◄ still moves, from a year the index no longer holds — 2022 is the earlier year with
+    // memories, and there is no later one.
     expect(swipe(tree).props.hasPrevious).toBe(true);
+    expect(swipe(tree).props.hasNext).toBe(false);
+    await tapDateArrow(tree, -1);
+    expect(textsIn(control(tree, 'date-bar-period'))).toEqual(['2022', '0 memories']);
   });
 });

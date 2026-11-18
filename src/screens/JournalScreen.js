@@ -736,12 +736,16 @@ export default function JournalScreen({ navigation }) {
       if (periodReadRef.current === token) setPeriodEntries(found);
     } catch (error) {
       // ⚠ Left exactly as it was -- `null` after a period change, which the list draws as nothing
-      // at all and the date bar as a month with no count. This query is its own SQL, with its own
+      // at all and the date bar as a period with no count. This query is its own SQL, with its own
       // precision clause, so it can fail while the rest of the screen looks perfectly healthy;
       // answering `[]` here would put *"No entries yet"* over a March holding twenty memories.
       // Recorded rather than said, as the day's read is: nobody asked for this read, and an alert
       // over somebody's memories on every failed month would be worse than a quiet page.
-      console.warn('[JournalScreen] the month could not be read', error?.message);
+      //
+      // **"period", not "month"** (T007 fix round 1, A): this `catch` is the one a year's failed
+      // read lands in too, and a line naming a month would send whoever read it in a production
+      // console looking at the wrong half of the screen.
+      console.warn('[JournalScreen] the period could not be read', error?.message);
     }
   }, [journalId, picked]);
 
@@ -850,10 +854,17 @@ export default function JournalScreen({ navigation }) {
      * somebody has, their answer stands, including "all of them closed".
      *
      * The second `buildRows` is the price of asking the model which heading is first rather than
-     * working it out here (which would be row shaping in the screen, in a second implementation
-     * to keep in step). It is not the expensive half: a closed heading builds none of its rows
-     * (`yearRows` takes its children as a function for exactly this reason), so the first call
-     * costs one row per month with memories and the second builds the one open month.
+     * working it out here, which would be row shaping in the screen in a second implementation to
+     * keep in step.
+     *
+     * ⚠ **What repeats is more than the headings** (fix round 1, E): the second call re-places
+     * every entry of the period (`entries.map(place)`) and re-groups them by month, not just the
+     * one row per month with memories. What it does *not* repeat is the expensive half -- a closed
+     * heading builds none of its rows, `yearRows` taking its children as a function for exactly
+     * this reason -- so at SC-005's 300 memories it is sub-millisecond string work. And it happens
+     * **once per pick and once per re-read, never on a scroll**: this memo's dependencies cannot
+     * change while somebody scrolls, which is the property Task 6 measured and this keeps. It also
+     * stops altogether the moment anybody taps a heading, because `openMonths` is no longer null.
      */
     if (openMonths !== null || chosen.stickyIndices.length === 0) {
       return { ...chosen, open: openMonths || NO_OPEN_MONTHS };
@@ -865,8 +876,15 @@ export default function JournalScreen({ navigation }) {
 
   /**
    * The months really open on screen -- which is `openMonths` once somebody has chosen, and
-   * FR-006's first heading before that. The same object `openMonths` holds whenever there is one,
-   * so this does not change identity on a re-read and neither does the toggle below.
+   * FR-006's first heading before that.
+   *
+   * Depended on rather than the whole of `displayRows`, which is the narrower dependency for the
+   * toggle below. ⚠ **It is not a claim that the toggle's identity is stable** (fix round 1, E):
+   * once somebody has tapped a heading this *is* the `openMonths` object and so is stable across
+   * a re-read, but while `openMonths` is `null` -- every freshly picked year, until the first tap
+   * -- the derivation allocates a fresh `Set` each time it runs, so this changes identity on a
+   * re-read and `toggleMonth` and `renderRow` change with it. The consequence is nil either way:
+   * a re-read hands the list a new `data` array, so its cells re-render regardless.
    */
   const openNow = displayRows?.open || NO_OPEN_MONTHS;
 
@@ -1771,25 +1789,55 @@ export default function JournalScreen({ navigation }) {
   const listRef = useRef(null);
 
   /**
-   * How tall the pinned month heading of a year list is, as the heading itself last reported it.
+   * How tall each month heading of a year list is, **by heading**, as each one last reported it.
    *
-   * A ref and not state, because nothing on screen is drawn from it: it is read at the one moment
-   * a pin is pressed, and holding it as state would re-render the whole list the first time a
-   * heading measured itself, for no visible change (SC-005 asks for 300 memories scrolling
+   * Refs and not state, because nothing on screen is drawn from them: they are read at the one
+   * moment a pin is pressed, and holding them as state would re-render the whole list the first
+   * time a heading measured itself, for no visible change (SC-005 asks for 300 memories scrolling
    * without stutter).
    *
-   * `0` until a heading has reported anything, which leaves the offset exactly as a month's. That
-   * is reachable only before the first heading has laid out, and a map pin cannot be pressed
-   * before then -- a card draws its map only while the list says the card is on screen, and the
-   * heading above it laid out in the same pass.
+   * ⚠ **By heading, and that is not pedantry** (T007 fix round 1, B). One shared number would hold
+   * whichever heading laid out most recently, and the month headings are *not* all the same
+   * height: `"2026, month not known"` is a longer label than `"March 2026"` and wraps to a second
+   * line at a large text size on a narrow screen. With one number, that heading laying out last
+   * would make a pin pressed in March clear a gap a line too big. The pinned heading above a row
+   * is the one that has to be cleared, so it is the one measured and the one read.
+   *
+   * `lastHeadingHeightRef` is the fallback for a heading that has somehow not reported yet --
+   * better than nothing, since every month heading is within a line of the others -- and `0`, the
+   * month list's own offset, is the fallback for a list with no heading above the row at all.
    */
-  const pinnedHeadingRef = useRef(0);
+  const headingHeightsRef = useRef(new Map());
+  const lastHeadingHeightRef = useRef(0);
 
-  /** A month heading reporting its own height (FR-017). Nothing else can measure it. */
-  const measurePinnedHeading = useCallback((event) => {
+  /** One month heading reporting its own height (FR-017). Nothing else can measure it. */
+  const measurePinnedHeading = useCallback((key, event) => {
     const height = event?.nativeEvent?.layout?.height;
-    if (typeof height === 'number' && height > 0) pinnedHeadingRef.current = height;
+    if (typeof height !== 'number' || height <= 0) return;
+    headingHeightsRef.current.set(key, height);
+    lastHeadingHeightRef.current = height;
   }, []);
+
+  /**
+   * How tall the heading pinned above row `rowIndex` is -- the nearest month heading at or above
+   * it, which is the one `stickyHeaderIndices` has stuck to the top of the screen while that row
+   * is being looked at.
+   *
+   * The walk is backwards from the row and stops at the first heading, so it is a few steps in a
+   * year of twelve months and it happens once, on a press, never on a render or a scroll.
+   */
+  const pinnedHeadingHeight = useCallback((rowIndex) => {
+    const rows = displayRows?.rows;
+    if (!rows) return 0;
+
+    for (let i = Math.min(rowIndex, rows.length - 1); i >= 0; i -= 1) {
+      if (rows[i]?.kind === 'monthHeading') {
+        const measured = headingHeightsRef.current.get(rows[i].key);
+        return measured || lastHeadingHeightRef.current;
+      }
+    }
+    return 0;
+  }, [displayRows]);
 
   /**
    * Bring a piece into view, for a pin pressed on the card in row `index` (FR-025).
@@ -1817,16 +1865,16 @@ export default function JournalScreen({ navigation }) {
      * ⚠ **A year is the one list with something already at the top of it** (research R8's one
      * adjustment, analyze round 3's finding C1). `viewOffset: -offset` puts the pressed piece at
      * the very top of the list -- which in a year is exactly where the pinned month heading sits,
-     * so the piece lands *under* the words naming its month. The heading's measured height is
-     * added, and the piece lands just below it (FR-017).
+     * so the piece lands *under* the words naming its month. The measured height of **that row's
+     * own** pinned heading is added, and the piece lands just below it (FR-017).
      *
      * **A day and a month pass the offset unchanged**, because neither has a pinned heading: it is
      * asked of `periodOnScreen` rather than of the measurement, so a height left over from a year
      * cannot push a month's pressed pin a heading too far.
      */
-    const pinned = periodOnScreen?.kind === 'year' ? pinnedHeadingRef.current : 0;
+    const pinned = periodOnScreen?.kind === 'year' ? pinnedHeadingHeight(index) : 0;
     listRef.current?.scrollToIndex({ index, viewOffset: pinned - offset, animated: true });
-  }, [periodOnScreen]);
+  }, [periodOnScreen, pinnedHeadingHeight]);
 
   /**
    * A row the list had not laid out after all: the memory stays where it is.
@@ -1900,7 +1948,7 @@ export default function JournalScreen({ navigation }) {
           // that gets pinned -- so it is the one measured (FR-017). A grey day heading is neither:
           // it is told nothing, and so draws itself as the plain text it is.
           onPress={isMonth ? () => toggleMonth(item.key) : undefined}
-          onLayout={isMonth ? measurePinnedHeading : undefined}
+          onLayout={isMonth ? (event) => measurePinnedHeading(item.key, event) : undefined}
         />
       );
     }
