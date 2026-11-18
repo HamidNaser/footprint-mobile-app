@@ -50,8 +50,39 @@
  * pipeline. The owner should read a clean walk over this data as "list and scroll with up to
  * 300 rows, text-only, does not stutter," not as the whole of SC-005.
  *
+ * ⚠⚠ **THIS WRITES REAL, PERMANENT MEMORIES INTO WHATEVER ACCOUNT THE TOKEN BELONGS TO -- IT IS
+ * NOT A SANDBOX AND THERE IS NO SERVER-SIDE UNDO.** This is a limitation of what the script
+ * does, in the same voice as the two above, not a footnote: the ~300 entries it creates are
+ * ordinary memories, stored exactly as anything typed into the app would be, and they sync to
+ * *every* device that account is signed in on -- the owner's phone, any other phone, the web
+ * client -- for good, the same as any other memory. Undoing it by hand afterwards is 300
+ * individual deletes on a phone. **Run this against a throwaway or test account, never the
+ * owner's real journal**, unless the point of the run is specifically to seed the owner's own
+ * account for T011's device walk (in which case the owner should expect the month named below
+ * to carry these seeds afterwards, and use `--undo` -- see below -- to remove them again).
+ *
+ * UNDO
+ * `--undo` removes exactly the memories a matching `--month`/`--count` run of this script
+ * created, and nothing else. It cannot do this in one step: the sync endpoint's delete contract
+ * takes a *server* id (`BatchSyncRequest.Deletes: List<string>`, resolved with
+ * `journalEntryRepository.GetByIdAsync` -- read off `JournalsController.cs` and `JournalDtos.cs`
+ * the same way as the rest of this header), never the `clientId` this script invents, and nothing
+ * the Hub exposes resolves a `clientId` to a server id except the sync endpoint's own idempotent
+ * create path. So `--undo` works in two calls: first it re-sends the *same* `creates` this
+ * script would send for that exact `{year, month, count}` -- which the idempotency rule above
+ * makes a no-op against anything already seeded, returning each one's server id rather than a
+ * duplicate -- and then it sends those server ids back as `deletes`. **It can therefore never
+ * delete an entry it did not itself derive the id for**: the ids it asks about come only from
+ * `planUndo`, a pure function over the same `{year, month, count}` this script's own creation
+ * path uses, never from a search, a list or any other query over the account's entries, and
+ * never from a wildcard or prefix match on a stored id or date. Mismatch `--month`/`--count`
+ * against what was actually seeded and `--undo` simply will not find those entries to resolve.
+ * `--dry-run --undo` prints the plan -- which ids it would ask to resolve and delete -- and
+ * sends nothing, exactly as plain `--dry-run` does for creation.
+ *
  * USAGE
- *   export FOOTPRINT_TOKEN="eyJ..."     # the signed-in account's access token
+ *   export FOOTPRINT_TOKEN="eyJ..."     # the signed-in account's access token -- real and
+ *                                       # permanent for that account; see above
  *                                       # (same token scripts/seed-events.mjs asks for --
  *                                       #  on the phone/web client:
  *                                       #  AsyncStorage.getItem('@footprint/access_token'))
@@ -60,6 +91,8 @@
  *   node scripts/seed-calendar-month.mjs --month=2026-03      # a named month instead
  *   node scripts/seed-calendar-month.mjs --count=150           # fewer/more than ~300
  *   node scripts/seed-calendar-month.mjs --dry-run              # print the plan, send nothing
+ *   node scripts/seed-calendar-month.mjs --undo                 # remove this month's seeds again
+ *   node scripts/seed-calendar-month.mjs --undo --dry-run        # print what --undo would remove
  *   node scripts/seed-calendar-month.mjs --help
  *
  * Optional environment:
@@ -70,11 +103,14 @@
  * (`GET /api/v1/journals`) and uses the first one -- the same journal `SyncBootstrap`
  * (`reconcileDefaultJournal`) adopts as the phone's own default, so the seeded memories land
  * in the journal the Journal screen actually queries. If the account has none yet, one is
- * created ("My Journal"), the same fallback `resolveImportJournal.js` uses.
+ * created ("My Journal"), the same fallback `resolveImportJournal.js` uses. `--undo` never
+ * creates a journal: if the account has none, there is nothing to undo.
  *
  * WHAT TO DO ON THE PHONE AFTERWARDS
  * Open the app (or pull-to-refresh the Journal, or background/foreground it) so a sync pull
- * runs. The seeded month then shows up in Month and Year mode exactly like any other memory.
+ * runs. The seeded month then shows up in Month and Year mode exactly like any other memory --
+ * and, just the same, a pull after `--undo` is what removes them from the phone's own local
+ * database.
  *
  * Re-running for the same month is safe (see idempotent clientId above) and running it again
  * with a larger --count only adds the difference, since each memory's clientId is keyed by
@@ -89,6 +125,7 @@ const JOURNAL_ID_OVERRIDE = process.env.FOOTPRINT_JOURNAL_ID;
 
 const argv = process.argv.slice(2);
 const DRY_RUN = argv.includes('--dry-run');
+const UNDO = argv.includes('--undo');
 const HELP = argv.includes('--help') || argv.includes('-h');
 
 function flagValue(name) {
@@ -103,9 +140,21 @@ function usage() {
   return [
     'Seed ~300 memories into one calendar month, via the Hub API (016 T010, SC-005).',
     '',
+    '⚠ This writes REAL, PERMANENT memories into whatever account the token belongs to. They',
+    '  sync to every device that account is signed in on, the same as any memory typed into the',
+    '  app, and there is no server-side undo beyond this script\'s own --undo (below). Run this',
+    '  against a throwaway or test account, never the owner\'s real journal, unless the point of',
+    '  the run is to seed the owner\'s own account on purpose for the device walk.',
+    '',
     'Usage:',
     '  export FOOTPRINT_TOKEN="eyJ..."',
     '  node scripts/seed-calendar-month.mjs [--month=YYYY-MM] [--count=300] [--dry-run]',
+    '  node scripts/seed-calendar-month.mjs --undo [--month=YYYY-MM] [--count=300] [--dry-run]',
+    '',
+    '--undo removes exactly the memories a matching --month/--count run of this script',
+    '  created, and nothing else -- never a search or a wildcard match over the account\'s',
+    '  entries. --month/--count must match what was actually seeded, or there is nothing for',
+    '  it to find. --dry-run --undo prints what it would ask to delete and sends nothing.',
     '',
     'Env:',
     '  FOOTPRINT_TOKEN       required unless --dry-run (the signed-in account\'s access token)',
@@ -113,7 +162,8 @@ function usage() {
     '  FOOTPRINT_JOURNAL_ID  optional; default is the account\'s first journal (created if none)',
     '',
     'After it runs: open the app on the phone, or pull-to-refresh the Journal, so a sync pull',
-    'brings the seeded month down into the phone\'s own local database.',
+    'brings the seeded month down into the phone\'s own local database -- or, after --undo,',
+    'removes them from it.',
   ].join('\n');
 }
 
@@ -231,15 +281,33 @@ export function checkPlan(plan, { year, month, count }) {
   return { ok: problems.length === 0, problems, emptyDays, byDate, max };
 }
 
+/**
+ * The one place this script turns a planned entry into the id the server idempotency key is
+ * built from. Keyed by the date plus the entry's position *within that day* (not the plan's
+ * global sequence number), so that re-running with a different --count keeps the same clientId
+ * for a day's first N entries as long as that day still gets at least N of them -- which is
+ * what makes "running it again with a larger --count only adds the difference" true rather
+ * than merely asserted, and what makes `--undo` (below) incapable of naming any id outside the
+ * exact `{year, month, count}` it was given: nothing else ever constructs this string.
+ */
+export function clientIdFor({ date, ordinalInDay }) {
+  return `cal-seed-${date}-${pad2(ordinalInDay)}`;
+}
+
+/**
+ * Every clientId `--month`/`--count` would create, in the same order -- pure, network-free,
+ * and `--undo`'s only source of what to ask the server about. Never a query over the account's
+ * entries and never a wildcard or prefix match: the ids named here are exactly, and only, the
+ * ones `planCalendarMonth` plus `clientIdFor` would construct for these same arguments, so this
+ * function cannot name anything a seed run with different arguments created.
+ */
+export function planUndo({ year, month, count }) {
+  return planCalendarMonth({ year, month, count }).map((entry) => clientIdFor(entry));
+}
+
 function formatEntryForWire({ date, journalId, seq, ordinalInDay }) {
   return {
-    // Keyed by the date plus the entry's position *within that day* (not the plan's global
-    // sequence number), so that re-running with a different --count keeps the same clientId
-    // for a day's first N entries as long as that day still gets at least N of them -- which
-    // is what makes "running it again with a larger --count only adds the difference" true
-    // rather than merely asserted. The global `seq` is used only in the content text, which
-    // carries no idempotency weight.
-    clientId: `cal-seed-${date}-${pad2(ordinalInDay)}`,
+    clientId: clientIdFor({ date, ordinalInDay }),
     journalId,
     date,
     datePrecision: 'day',
@@ -302,18 +370,27 @@ async function resolveJournalId() {
   return created.id;
 }
 
-async function sendBatch(entries, journalId) {
-  const payload = {
-    creates: entries.map((e) => formatEntryForWire({ ...e, journalId })),
-    updates: [],
-    deletes: [],
-    clientTimestamp: new Date().toISOString(),
-  };
+/**
+ * The same lookup `resolveJournalId` does, but for `--undo`: it never creates a journal. If the
+ * account has none, nothing was ever seeded into it by this script, so there is nothing to
+ * undo -- a `null` here means exactly that, not a failure.
+ */
+async function resolveJournalIdReadOnly() {
+  if (JOURNAL_ID_OVERRIDE) return JOURNAL_ID_OVERRIDE;
 
+  const listRes = await fetch(`${API}/api/v1/journals`, { headers: authHeaders(TOKEN) });
+  if (!listRes.ok) {
+    throw new Error(`Could not list journals: HTTP ${listRes.status} ${await listRes.text()}`);
+  }
+  const journals = asJournalList(await listRes.json());
+  return journals.length > 0 ? journals[0].id : null;
+}
+
+async function postSync(payload) {
   const res = await fetch(`${API}/api/v1/journals/sync`, {
     method: 'POST',
     headers: authHeaders(TOKEN),
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ clientTimestamp: new Date().toISOString(), ...payload }),
   });
 
   const text = await res.text();
@@ -330,6 +407,115 @@ async function sendBatch(entries, journalId) {
   return body;
 }
 
+function sendBatch(entries, journalId) {
+  return postSync({
+    creates: entries.map((e) => formatEntryForWire({ ...e, journalId })),
+    updates: [],
+    deletes: [],
+  });
+}
+
+/**
+ * The second half of `--undo`: delete exactly these server ids, nothing else. Never called with
+ * anything but ids this same run resolved a moment earlier from `planUndo`'s own clientIds.
+ */
+function sendDeletes(serverIds) {
+  return postSync({ creates: [], updates: [], deletes: serverIds });
+}
+
+/**
+ * `--undo`. Two sync calls, never one: the delete contract takes a server id, which nothing but
+ * the sync endpoint's own idempotent create path can hand back for a `clientId` (see the header
+ * comment for why). Every id either call touches comes from `planUndo({ year, month, count })`
+ * -- the same pure function, the same arguments the creation path was given -- so this can
+ * never reach an entry outside that one plan.
+ */
+async function runUndo({ year, month, count }) {
+  const ids = planUndo({ year, month, count });
+  console.log(
+    `--undo: ${ids.length} memories planned for ${year}-${pad2(month)}, count=${count}` +
+      (DRY_RUN ? ' (dry run)' : '')
+  );
+
+  if (ids.length === 0) {
+    console.log('Nothing to undo: count is 0.');
+    return;
+  }
+
+  if (DRY_RUN) {
+    console.log('\nFirst three ids that would be resolved, then deleted:');
+    for (const id of ids.slice(0, 3)) console.log(`  ${id}`);
+    console.log(
+      `\nDry run: --undo would ask the server to resolve and delete these ${ids.length} ids. ` +
+        'Nothing was sent.'
+    );
+    return;
+  }
+
+  if (!TOKEN) {
+    console.error('FOOTPRINT_TOKEN is not set.\n');
+    console.error(usage());
+    process.exit(1);
+  }
+
+  console.log(`Resolving against ${API} ...`);
+  const journalId = await resolveJournalIdReadOnly();
+  if (!journalId) {
+    console.log('No journal exists yet on this account -- nothing was ever seeded. Nothing to undo.');
+    return;
+  }
+  console.log(`  journal: ${journalId}`);
+
+  // Step 1: resolve every planned clientId to its server id. Idempotent against anything this
+  // script already seeded (see the header's idempotency note); an id this script did NOT
+  // already seed is, at worst, created here and removed again by step 2 a moment later, never
+  // left behind.
+  const plan = planCalendarMonth({ year, month, count });
+  const resolveResult = await sendBatch(plan, journalId);
+  const resolved = resolveResult.created || [];
+  const serverIds = resolved.map((item) => item.serverId).filter(Boolean);
+
+  console.log(`  resolved: ${serverIds.length} of ${ids.length}`);
+  const resolveConflicts = resolveResult.conflicts || [];
+  if (resolveConflicts.length > 0) {
+    console.error(`  conflicts while resolving: ${resolveConflicts.length}`);
+    for (const c of resolveConflicts.slice(0, 10)) {
+      console.error(`    ${c.clientId}: ${c.reason}`);
+    }
+  }
+
+  if (serverIds.length === 0) {
+    console.log('\nNothing resolved; nothing to delete.');
+    process.exit(resolveConflicts.length > 0 ? 1 : 0);
+  }
+
+  // Step 2: delete exactly those server ids.
+  const deleteResult = await sendDeletes(serverIds);
+  const deleted = deleteResult.deleted || [];
+  const deleteConflicts = deleteResult.conflicts || [];
+
+  console.log(`  deleted: ${deleted.length}`);
+  if (deleteConflicts.length > 0) {
+    console.error(`  conflicts while deleting: ${deleteConflicts.length}`);
+    for (const c of deleteConflicts.slice(0, 10)) {
+      console.error(`    ${c.serverId}: ${c.reason}`);
+    }
+  }
+
+  console.log(
+    `\nDone. ${deleted.length} of ${serverIds.length} resolved memories deleted` +
+      (deleteConflicts.length ? `, ${deleteConflicts.length} conflicts` : '') +
+      '.'
+  );
+  console.log('Open the app (or pull-to-refresh the Journal) so the next sync removes them from the phone too.');
+
+  process.exit(
+    resolveConflicts.length > 0 || deleteConflicts.length > 0 || serverIds.length !== ids.length
+      ? 1
+      : 0
+  );
+}
+
 async function main() {
   if (HELP) {
     console.log(usage());
@@ -338,6 +524,11 @@ async function main() {
 
   const { year, month } = resolveTargetMonth();
   const count = flagValue('count') != null ? Number(flagValue('count')) : 300;
+
+  if (UNDO) {
+    await runUndo({ year, month, count });
+    return;
+  }
 
   const plan = planCalendarMonth({ year, month, count });
   const check = checkPlan(plan, { year, month, count });
