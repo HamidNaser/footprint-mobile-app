@@ -69,6 +69,19 @@ const textStyle = (tree, words) => {
   return flatten(node.props.style);
 };
 
+/**
+ * Every layout callback a real view in the tree would be measured through.
+ *
+ * The host views, not the composite props: React Native calls `onLayout` on the view it has
+ * actually measured, so a heading that took the prop and never put it on a view would report a
+ * height to nobody. `TouchableOpacity` forwards `onLayout` to the view it draws, which is why
+ * this finds it through either shape of month heading.
+ */
+const layoutHandlers = (tree) =>
+  tree.root
+    .findAll((node) => typeof node.type === 'string' && typeof node.props?.onLayout === 'function')
+    .map((node) => node.props.onLayout);
+
 describe('the grey day heading (FR-005)', () => {
   it('draws the day it is given, and nothing else', () => {
     const tree = render({ kind: 'dayHeading', label: 'Thu 5 March' });
@@ -89,6 +102,16 @@ describe('the grey day heading (FR-005)', () => {
     const tree = render({ kind: 'dayHeading', label: 'Thu 5 March' });
 
     expect(tree.root.findAllByType(TouchableOpacity)).toHaveLength(0);
+  });
+
+  it('is not what a year measures, because a day heading is never the pinned one', () => {
+    // Only month heading rows are sticky (research R8), so a grey day heading has nothing
+    // scrolling under it and no height anybody needs. Measuring it instead would hand the screen
+    // the wrong number for the gap a pressed pin has to clear.
+    const onLayout = jest.fn();
+    const tree = render({ kind: 'dayHeading', label: 'Thu 5 March', onLayout });
+
+    expect(layoutHandlers(tree)).not.toContain(onLayout);
   });
 
   it('ignores a count and an open flag, which belong to a month heading', () => {
@@ -158,6 +181,29 @@ describe('the month heading of a year list (FR-006)', () => {
     // word, which is the convention the rest of the app's disclosures follow.
     expect(iconNames(closed)).toContain('chevron-forward');
     expect(iconNames(open)).toContain('chevron-down');
+  });
+
+  /**
+   * T007, research R8: a year pins this heading, so a card's map pin has to be scrolled to a
+   * place *below* it — `scrollToIndex`'s `viewOffset` otherwise puts the piece at the very top of
+   * the list, which is exactly where the pinned heading is, and the piece lands under it. The
+   * screen therefore needs this heading's **measured** height rather than a guess at it, and the
+   * only thing that can measure a view is the view itself.
+   */
+  it('reports its own height, so a year can scroll a piece clear of the pinned heading', () => {
+    const onLayout = jest.fn();
+    const tree = render({ ...MONTH, onPress: jest.fn(), onLayout });
+
+    expect(layoutHandlers(tree)).toContain(onLayout);
+  });
+
+  it('reports it whether or not the month can be opened', () => {
+    // A heading with nothing listening for a tap is a plain view, and it is still the thing
+    // standing between the list's top and the cards, so it is still what must be measured.
+    const onLayout = jest.fn();
+    const tree = render({ ...MONTH, onLayout });
+
+    expect(layoutHandlers(tree)).toContain(onLayout);
   });
 
   it('is opaque, because a year pins it over the cards it names', () => {

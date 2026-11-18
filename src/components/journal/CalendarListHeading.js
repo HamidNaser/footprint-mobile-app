@@ -26,6 +26,14 @@
  * **It owns no state.** Whether a month is open belongs to the screen (`openMonths` in
  * `data-model.md`); this component is told, and reports a tap.
  *
+ * **It measures nothing, and reports its own height when asked.** `onLayout` is handed to the
+ * **month** heading's own row, because in a year that row is pinned (`stickyHeaderIndices`,
+ * research R8) and the screen needs its real height: a card's map pin is brought into view with
+ * `scrollToIndex`'s `viewOffset`, which puts the piece at the very top of the list -- which in a
+ * year is exactly where this heading sits, so without that height the piece lands *under* it
+ * (FR-017, analyze round 3's C1). A **day** heading is never pinned and so is never measured: its
+ * height is not the gap anything has to clear, and handing it over would be the wrong number.
+ *
  * **A heading it does not recognise draws nothing** -- not an empty grey bar in the middle of
  * somebody's memories, which reads as a defect. `buildRows` emits only the two kinds above, so
  * anything else is a row this file does not understand, and drawing a blank one would be
@@ -76,7 +84,14 @@ export function memoriesLabel(count) {
 /** Whether a label is a label, rather than absent or a run of spaces. */
 const worded = (label) => typeof label === 'string' && label.trim().length > 0;
 
-export const CalendarListHeading = ({ kind, label, count, open = false, onPress = null }) => {
+export const CalendarListHeading = ({
+  kind,
+  label,
+  count,
+  open = false,
+  onPress = null,
+  onLayout = null,
+}) => {
   if (!worded(label)) return null;
 
   if (kind === 'dayHeading') {
@@ -107,11 +122,11 @@ export const CalendarListHeading = ({ kind, label, count, open = false, onPress 
   // Nothing listening means nothing to open: a heading that dimmed under a tap and then left the
   // month exactly as it was would be offering something it cannot do.
   if (typeof onPress !== 'function') {
-    return <View style={styles.monthRow}>{body}</View>;
+    return <View style={styles.monthRow} onLayout={onLayout}>{body}</View>;
   }
 
   return (
-    <TouchableOpacity style={styles.monthRow} onPress={onPress}>
+    <TouchableOpacity style={styles.monthRow} onPress={onPress} onLayout={onLayout}>
       {body}
     </TouchableOpacity>
   );

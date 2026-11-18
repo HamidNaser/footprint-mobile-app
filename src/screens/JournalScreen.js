@@ -92,7 +92,8 @@ import { DatabaseService } from '../services/DatabaseService';
 // `buildIndex` turns `getCalendarIndexRows`'s rows into the counts behind the calendar's faded
 // days; `dayKeyOf` is the one answer to "which civil day is this memory on" for this feature;
 // `buildRows` turns a picked period's memories into the flat rows a month or year list draws
-// (research R8); `neighbourMonth` is what ◄ ► step over in month mode (FR-007, FR-008).
+// (research R8); `neighbourMonth` and `neighbourYear` are what ◄ ► step over with a month or a
+// year picked (FR-007, FR-008).
 import {
   buildIndex,
   buildRows,
@@ -101,6 +102,7 @@ import {
   fourDigitYear,
   monthKey,
   neighbourMonth,
+  neighbourYear,
 } from '../utils/calendarModel';
 // FR-007's wording for the period on the date bar, from the one module that words this
 // feature's dates -- so "March 2026" on the bar and "March 2026" on a heading cannot differ.
@@ -150,6 +152,15 @@ const DRAFT_WORDS_LIMIT = 40;
 const NO_ENTRIES = [];
 
 /**
+ * One empty set of open months, shared -- `NO_ENTRIES`' counterpart for a year list.
+ *
+ * `buildRows` reads it to decide which month headings are open (FR-006). A fresh `new Set()` each
+ * render would be a new identity every time, which is a rebuild of a year's rows on every render
+ * for an answer that has not changed. Never mutated: a toggle builds a new set.
+ */
+const NO_OPEN_MONTHS = new Set();
+
+/**
  * The first words of an unsaved edit, to name it in the question that would throw it away
  * (FR-013) -- or **null** when it has none.
  *
@@ -181,9 +192,14 @@ function draftFirstWords(draft) {
  * in (FR-011, FR-016) -- the same answer `calendarModel.buildRows` gives, so the query and the
  * rows cannot disagree about which memories a month has.
  *
+ * A year is its 1 January to its 31 December, and **every** precision -- it is the one period a
+ * memory known only to its year belongs to, and `buildRows` puts those under "2026, month not
+ * known" (FR-006) rather than in the January their stored 1st falls in. The three are named
+ * rather than asked for as "all of them" (`null`), so a fourth precision added one day is not
+ * silently swept into a year nobody taught it to.
+ *
  * `null` for anything this cannot read, and that is the fail-closed answer: an unreadable period
- * must not become a query for some other range. A year is T007's and is answered `null` here
- * until then rather than silently read as something else.
+ * must not become a query for some other range.
  *
  * ⚠ **The year test is `calendarModel`'s own `fourDigitYear`, and sharing it is the point** (fix
  * round 1, finding A). Three gates decide what a readable month is -- this one, and the model's
@@ -199,6 +215,18 @@ function draftFirstWords(draft) {
  * word through `calendarModel.isDescending`, so anything else means ascending anyway.)
  */
 function rangeFor(picked) {
+  if (picked?.kind === 'year') {
+    const { year } = picked;
+    if (!fourDigitYear(year)) return null;
+
+    return {
+      from: `${year}-01-01`,
+      to: `${year}-12-31`,
+      precisions: ['day', 'month', 'year'],
+      order: 'ASC',
+    };
+  }
+
   if (picked?.kind !== 'month') return null;
 
   const { year, month } = picked;
@@ -215,16 +243,28 @@ function rangeFor(picked) {
 }
 
 /**
- * What the date bar calls a picked period (FR-007) -- "March 2026" -- or null in day mode.
+ * What the date bar calls a picked period (FR-007) -- "March 2026", or "2026" -- or null in day
+ * mode.
  *
- * `formatPeriodDate` of a month-precision date, which is those exact words: the same call
+ * `formatPeriodDate` of a date of that precision, which is those exact words: the same call
  * `calendarModel` makes for a month heading, so the bar and a heading cannot word the same month
- * differently, and the date on a card beneath them agrees with both.
+ * differently, and the date on a card beneath them agrees with both. A year goes through the same
+ * function rather than being written out as `String(year)`, so the one module that words this
+ * feature's dates keeps wording all of them.
+ *
+ * `picked.kind` is handed over as the precision because they are deliberately the same three
+ * words: `data-model.md` names a pick `'day' | 'month' | 'year'` and a stored date's precision
+ * the same, which is what lets a period be named at the precision it *is*. A fourth kind of pick
+ * would need a word of its own here rather than a fourth precision in `periodDate`.
+ *
+ * Both read the range `rangeFor` gives, so a period this screen will not read is also a period it
+ * will not name -- and a period with no name falls back to the day, which is why the two gates
+ * must not be allowed to disagree (fix round 1, finding A).
  */
 function periodLabel(picked) {
-  if (picked?.kind !== 'month') return null;
+  if (picked?.kind !== 'month' && picked?.kind !== 'year') return null;
   const range = rangeFor(picked);
-  return range ? formatPeriodDate(range.from, 'month') : null;
+  return range ? formatPeriodDate(range.from, picked.kind) : null;
 }
 
 /**
@@ -256,14 +296,21 @@ const DateSelector = ({ date, label = null, count = null, onPrevious, onNext, on
 
   return (
     <View style={styles.dateSelector}>
-      <TouchableOpacity style={styles.dateArrow} onPress={onPrevious}>
+      {/*
+        ⚠ The two arrows are named (T007). A year list draws a `chevron-forward` of its own on
+        every closed month heading, so "the one button on screen with a forward chevron in it" is
+        no longer the date bar's ► -- and a test that pressed the wrong one would browse somebody's
+        months while believing it had moved the Journal. The names are also what T009's spoken
+        labels will hang on.
+      */}
+      <TouchableOpacity testID="date-bar-previous" style={styles.dateArrow} onPress={onPrevious}>
         <Ionicons name="chevron-back" size={20} color="#666" />
       </TouchableOpacity>
-      <TouchableOpacity onPress={onDatePress}>
+      <TouchableOpacity testID="date-bar-period" onPress={onDatePress}>
         <Text style={styles.dateText}>{label || formattedDate}</Text>
         {counted ? <Text style={styles.dateCount}>{counted}</Text> : null}
       </TouchableOpacity>
-      <TouchableOpacity style={styles.dateArrow} onPress={onNext}>
+      <TouchableOpacity testID="date-bar-next" style={styles.dateArrow} onPress={onNext}>
         <Ionicons name="chevron-forward" size={20} color="#666" />
       </TouchableOpacity>
     </View>
@@ -394,11 +441,27 @@ export default function JournalScreen({ navigation }) {
    * The period the calendar put on screen instead of a single day (`picked` in `data-model.md`).
    *
    * `null` is day mode -- the Journal exactly as it has always been, on `selectedDate`. A month
-   * is `{kind: 'month', year, month}` (FR-005); a year, `{kind: 'year', year}`, is T007's and is
-   * never set here yet. A day pick sets `selectedDate` and puts this back to `null`, which is
-   * what makes a day and a period one choice rather than two that can both be on.
+   * is `{kind: 'month', year, month}` (FR-005); a year is `{kind: 'year', year}` (FR-006). A day
+   * pick sets `selectedDate` and puts this back to `null`, which is what makes a day and a period
+   * one choice rather than two that can both be on.
    */
   const [picked, setPicked] = useState(null);
+
+  /**
+   * Which months of a picked year are open (FR-006), or **null** for "nobody has chosen yet".
+   *
+   * Three-valued in the same spirit as `periodEntries`, and the third value is what FR-006's
+   * *"the first heading MUST be open"* needs: which month is first cannot be known when the year
+   * is picked, because its memories have not been read yet, so it is `displayRows` that opens the
+   * first heading -- and it may only do that while nobody has said otherwise. A person who closes
+   * every month is left with every month closed, and reopening the first under them would be the
+   * screen overruling a tap.
+   *
+   * Month keys (`'2026-03'`, or `'2026:rough'` for the "month not known" heading), which is what
+   * `buildRows` puts on a heading row, so they are the year's own keys and cannot be carried into
+   * another year by accident -- and the set is let go of whenever the period changes anyway.
+   */
+  const [openMonths, setOpenMonths] = useState(null);
 
   /**
    * The picked period's memories, read from the phone's own database (FR-005, FR-010).
@@ -683,9 +746,16 @@ export default function JournalScreen({ navigation }) {
   }, [journalId, picked]);
 
   // Whenever the picked period or the journal changes. The last period's memories are let go of
-  // first, so that nothing is ever drawn under a period it does not belong to.
+  // first, so that nothing is ever drawn under a period it does not belong to -- and so is which
+  // of its months were open: they are that year's keys, and a new year opens at its own first
+  // heading (FR-006) rather than at whichever months the last one was left on.
+  //
+  // Only from here, so a card action's own `reloadPeriod` does not shut a month under somebody:
+  // this effect is keyed on `reloadPeriod`, whose identity changes with the journal and the pick
+  // and with nothing else.
   useEffect(() => {
     setPeriodEntries(null);
+    setOpenMonths(null);
     reloadPeriod();
   }, [reloadPeriod]);
 
@@ -766,8 +836,57 @@ export default function JournalScreen({ navigation }) {
   const displayRows = useMemo(() => {
     // The worklist is a list of memories and not of a period, so it keeps the day feed's shape.
     if (!periodOnScreen) return null;
-    return buildRows(displayEntries, periodOnScreen);
-  }, [periodOnScreen, displayEntries]);
+
+    const chosen = buildRows(displayEntries, periodOnScreen, openMonths);
+
+    /*
+     * FR-006: **the first heading is open** when a year is picked -- and which month that is can
+     * only be answered once the year's memories have been read, which is why it is answered here
+     * and not where the year was picked. `stickyIndices` holds the month heading rows, so
+     * `rows[stickyIndices[0]]` is the first of them; a month list has none and falls straight
+     * through, as does a year with nothing in it.
+     *
+     * Only while `openMonths` is null, i.e. while nobody has opened or closed anything: once
+     * somebody has, their answer stands, including "all of them closed".
+     *
+     * The second `buildRows` is the price of asking the model which heading is first rather than
+     * working it out here (which would be row shaping in the screen, in a second implementation
+     * to keep in step). It is not the expensive half: a closed heading builds none of its rows
+     * (`yearRows` takes its children as a function for exactly this reason), so the first call
+     * costs one row per month with memories and the second builds the one open month.
+     */
+    if (openMonths !== null || chosen.stickyIndices.length === 0) {
+      return { ...chosen, open: openMonths || NO_OPEN_MONTHS };
+    }
+
+    const open = new Set([chosen.rows[chosen.stickyIndices[0]].key]);
+    return { ...buildRows(displayEntries, periodOnScreen, open), open };
+  }, [periodOnScreen, displayEntries, openMonths]);
+
+  /**
+   * The months really open on screen -- which is `openMonths` once somebody has chosen, and
+   * FR-006's first heading before that. The same object `openMonths` holds whenever there is one,
+   * so this does not change identity on a re-read and neither does the toggle below.
+   */
+  const openNow = displayRows?.open || NO_OPEN_MONTHS;
+
+  /**
+   * Open or close one month of a year (FR-006).
+   *
+   * Resolved against what is **open on screen** rather than against the state, because until
+   * somebody taps something the state is `null` and the open first heading is not in any set.
+   * Taking the state would therefore have left the first heading open when it was the very
+   * heading tapped, which is the one tap FR-006 spells out.
+   *
+   * A set rather than one key: more than one month may be open, so opening a second month leaves
+   * the first exactly as it was.
+   */
+  const toggleMonth = useCallback((key) => {
+    const next = new Set(openNow);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setOpenMonths(next);
+  }, [openNow]);
 
   /**
    * Whether what the list is showing has actually been read.
@@ -879,13 +998,22 @@ export default function JournalScreen({ navigation }) {
     // over `calendarModel`'s month neighbours rather than over the day index -- so they skip the
     // months that hold nothing rather than stepping onto an empty one, and stop where there is no
     // further month at all rather than wrapping round. FR-008: +1 is the later one, in a month
-    // exactly as in a day. (A picked year is T007's, and falls through to doing nothing until
-    // then rather than being stepped as a month.)
+    // exactly as in a day.
     if (periodOnScreen?.kind === 'month') {
       const target = neighbourMonth(calendarIndex, periodOnScreen, direction);
       if (target) setPicked(target);
       return;
     }
+    // And the same for a year, over the years with memories (FR-007, FR-008). Both neighbour
+    // functions answer for a period that is no longer in the index, which is what keeps ◄ ►
+    // working from a month or a year that has just lost its last memory (spec Edge Cases).
+    if (periodOnScreen?.kind === 'year') {
+      const target = neighbourYear(calendarIndex, periodOnScreen, direction);
+      if (target) setPicked(target);
+      return;
+    }
+    // A period of some kind this does not step: it stays where it is rather than being stepped as
+    // a day, which would move the bar off the thing the list is showing.
     if (periodOnScreen) return;
 
     setSelectedDate(prev => {
@@ -899,11 +1027,15 @@ export default function JournalScreen({ navigation }) {
 
   /**
    * Whether a period with memories exists in each direction, so the swipe container can refuse
-   * the gesture at either end of the journal. The picked month's neighbours, or the day index's.
+   * the gesture at either end of the journal. The picked month's or year's neighbours, or the day
+   * index's.
    */
   const hasNeighbour = useCallback((direction) => {
     if (periodOnScreen?.kind === 'month') {
       return neighbourMonth(calendarIndex, periodOnScreen, direction) !== null;
+    }
+    if (periodOnScreen?.kind === 'year') {
+      return neighbourYear(calendarIndex, periodOnScreen, direction) !== null;
     }
     if (periodOnScreen) return false;
     return adjacentDateKey(datesWithEntries, selectedDateKey, direction) !== null;
@@ -978,11 +1110,9 @@ export default function JournalScreen({ navigation }) {
    * alone, and `CalendarSheet.test.js` pins that side of it, so closing here is the whole of it
    * and nothing double-closes.
    *
-   * A day and a month are **one** choice, not two: a day sets `selectedDate` and clears `picked`,
-   * a month sets `picked`. Otherwise both could be on, and the screen would be showing a month
-   * under a date bar naming a day inside it. A year is T007's; until then the sheet closes on one
-   * and the Journal stays where it was, which is no worse than the picker this replaces -- that
-   * had no month or year view at all.
+   * A day and a period are **one** choice, not two: a day sets `selectedDate` and clears
+   * `picked`, a month or a year sets `picked`. Otherwise both could be on, and the screen would
+   * be showing a month under a date bar naming a day inside it.
    *
    * A pick this cannot read changes nothing whatever, rather than clearing what is on screen:
    * somebody who tapped March must not be left looking at an arbitrary day because the pick was
@@ -1002,11 +1132,16 @@ export default function JournalScreen({ navigation }) {
       return;
     }
 
-    // Checked here as well as in `rangeFor`, so a month nothing could be read for never becomes
+    // Checked here as well as in `rangeFor`, so a period nothing could be read for never becomes
     // the thing on screen: the date bar would name it and the list would sit empty under it
     // for ever, with no read to answer and nothing said.
     if (period?.kind === 'month' && rangeFor(period)) {
       setPicked({ kind: 'month', year: period.year, month: period.month });
+      return;
+    }
+
+    if (period?.kind === 'year' && rangeFor(period)) {
+      setPicked({ kind: 'year', year: period.year });
     }
   }, []);
 
@@ -1636,6 +1771,27 @@ export default function JournalScreen({ navigation }) {
   const listRef = useRef(null);
 
   /**
+   * How tall the pinned month heading of a year list is, as the heading itself last reported it.
+   *
+   * A ref and not state, because nothing on screen is drawn from it: it is read at the one moment
+   * a pin is pressed, and holding it as state would re-render the whole list the first time a
+   * heading measured itself, for no visible change (SC-005 asks for 300 memories scrolling
+   * without stutter).
+   *
+   * `0` until a heading has reported anything, which leaves the offset exactly as a month's. That
+   * is reachable only before the first heading has laid out, and a map pin cannot be pressed
+   * before then -- a card draws its map only while the list says the card is on screen, and the
+   * heading above it laid out in the same pass.
+   */
+  const pinnedHeadingRef = useRef(0);
+
+  /** A month heading reporting its own height (FR-017). Nothing else can measure it. */
+  const measurePinnedHeading = useCallback((event) => {
+    const height = event?.nativeEvent?.layout?.height;
+    if (typeof height === 'number' && height > 0) pinnedHeadingRef.current = height;
+  }, []);
+
+  /**
    * Bring a piece into view, for a pin pressed on the card in row `index` (FR-025).
    *
    * The two halves of the measurement meet here. The card knows where the piece sits inside
@@ -1657,8 +1813,20 @@ export default function JournalScreen({ navigation }) {
    * anywhere in this app to contain it (round-1 item 5).
    */
   const scrollPieceIntoView = useCallback((index, offset) => {
-    listRef.current?.scrollToIndex({ index, viewOffset: -offset, animated: true });
-  }, []);
+    /*
+     * ⚠ **A year is the one list with something already at the top of it** (research R8's one
+     * adjustment, analyze round 3's finding C1). `viewOffset: -offset` puts the pressed piece at
+     * the very top of the list -- which in a year is exactly where the pinned month heading sits,
+     * so the piece lands *under* the words naming its month. The heading's measured height is
+     * added, and the piece lands just below it (FR-017).
+     *
+     * **A day and a month pass the offset unchanged**, because neither has a pinned heading: it is
+     * asked of `periodOnScreen` rather than of the measurement, so a height left over from a year
+     * cannot push a month's pressed pin a heading too far.
+     */
+    const pinned = periodOnScreen?.kind === 'year' ? pinnedHeadingRef.current : 0;
+    listRef.current?.scrollToIndex({ index, viewOffset: pinned - offset, animated: true });
+  }, [periodOnScreen]);
 
   /**
    * A row the list had not laid out after all: the memory stays where it is.
@@ -1721,18 +1889,24 @@ export default function JournalScreen({ navigation }) {
    */
   const renderRow = useCallback(({ item, index: rowIndex }) => {
     if (item?.kind === 'dayHeading' || item?.kind === 'monthHeading') {
+      const isMonth = item.kind === 'monthHeading';
       return (
         <CalendarListHeading
           kind={item.kind}
           label={item.label}
           count={item.count}
           open={item.open}
+          // A month heading of a year, and only that, opens and closes (FR-006) and is the row
+          // that gets pinned -- so it is the one measured (FR-017). A grey day heading is neither:
+          // it is told nothing, and so draws itself as the plain text it is.
+          onPress={isMonth ? () => toggleMonth(item.key) : undefined}
+          onLayout={isMonth ? measurePinnedHeading : undefined}
         />
       );
     }
 
     return renderEntry({ item: item?.kind === 'entry' ? item.entry : item, index: rowIndex });
-  }, [renderEntry]);
+  }, [renderEntry, toggleMonth, measurePinnedHeading]);
 
   // Show entry detail view
   if (showEntryDetail && selectedEntry) {
@@ -1873,6 +2047,14 @@ export default function JournalScreen({ navigation }) {
             data={displayRows ? displayRows.rows : displayEntries}
             renderItem={renderRow}
             keyExtractor={keyExtractor}
+            /*
+              FR-006: an open month heading **stays pinned while its month scrolls**.
+              `buildRows` fills `stickyIndices` with the month heading rows and nothing else, so a
+              grey day heading never sticks (research R8) -- two labels piling up on each other
+              would cover the memory being read. A month list's is empty and a day's is nothing at
+              all, which is how neither grows a pinned anything.
+            */
+            stickyHeaderIndices={displayRows ? displayRows.stickyIndices : undefined}
             onViewableItemsChanged={onViewableItemsChanged}
             onScrollToIndexFailed={handleScrollToIndexFailed}
             contentContainerStyle={styles.feedContent}
