@@ -32,6 +32,7 @@
  *   `buildIndex`                                the index behind faded tiles and counts (T005)
  *   `buildRows`                                 the month and year lists (T006, T007)
  *   `filterRange`                               the web build's stand-in for T003's SQL
+ *   `isDescending`                              the one reading of `order` (`filterRange`, T003)
  *
  * Days are **not** stepped here: `journalDate.adjacentDateKey` already does that, and it is
  * the one place that answers it (research R7). Months and years are what it cannot take.
@@ -130,6 +131,24 @@ export function dayKeyOf(value) {
  */
 function precisionOf(entry) {
   return (entry && entry.datePrecision) || 'day';
+}
+
+/**
+ * Whether an `order` means newest first.
+ *
+ * The one spelling that matters is `'DESC'`, read without regard to case, and **anything
+ * else -- including nothing at all -- is the ascending calendar order**. A single day asks
+ * for `'DESC'` and keeps the order the feed has today (FR-004); a month or a year asks for
+ * the other and reads oldest first (FR-005, FR-006).
+ *
+ * Exported because it is asked in two places: here, by `filterRange`, and by
+ * `DatabaseService.getEntriesInRange`, which turns it into the direction of its `ORDER BY`.
+ * Those two must give one answer -- a month list that read one way on a phone and the other
+ * way on the web build would be two different screens -- and two copies of "`'DESC'` in any
+ * case" agree only until one of them is corrected. So there is one copy, and it is this one.
+ */
+export function isDescending(order) {
+  return typeof order === 'string' && order.toUpperCase() === 'DESC';
 }
 
 /**
@@ -670,7 +689,7 @@ export function filterRange(entries, fromKey, toKey, precisions, order) {
     kept.push({ entry, key, given });
   });
 
-  const direction = typeof order === 'string' && order.toUpperCase() === 'DESC' ? -1 : 1;
+  const direction = isDescending(order) ? -1 : 1;
   kept.sort((a, b) => {
     if (a.key !== b.key) return (a.key < b.key ? -1 : 1) * direction;
 

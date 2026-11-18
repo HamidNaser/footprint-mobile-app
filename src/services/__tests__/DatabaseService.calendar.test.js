@@ -29,13 +29,6 @@
  * </p>
  */
 
-/**
- * `DatabaseService` asks `Platform.OS` which build it is running in, exactly as the rest of the
- * app does. A plain object rather than the real module so a test can move between the two
- * builds; nothing in this suite's import graph needs anything else from React Native.
- */
-jest.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
-
 // ---------------------------------------------------------------------------
 // The local database, in both of its real forms. Everything above the connection -- the
 // CREATE TABLE statements, DatabaseService's INSERT, the row mapper and the two queries under
@@ -88,11 +81,23 @@ jest.mock('../../database', () => {
   };
 });
 
+import { Platform } from 'react-native';
+
 import { DatabaseService } from '../DatabaseService';
 import { buildIndex } from '../../utils/calendarModel';
 
-const { Platform } = require('react-native');
 const { __useBackend } = require('../../database');
+
+/**
+ * Which build `DatabaseService` believes it is running in.
+ *
+ * The real `Platform` is moved rather than the whole of React Native being mocked: `OS` is a
+ * plain writable property, and replacing the module for the worker made jest's own setup load
+ * React Native's lazy globals a suite later than it otherwise would ("Cannot log after tests
+ * are done" against whichever suite happened to run first). Restored in `afterAll`, so no
+ * other suite can see it moved.
+ */
+const REAL_OS = Platform.OS;
 
 const JOURNAL = 'journal-calendar';
 const OTHER_JOURNAL = 'journal-other';
@@ -120,6 +125,7 @@ beforeAll(() => {
 afterAll(() => {
   console.log.mockRestore();
   Date.now.mockRestore();
+  Platform.OS = REAL_OS;
 });
 
 /**
@@ -129,7 +135,7 @@ afterAll(() => {
  */
 async function useBackend(which) {
   __useBackend(which);
-  Platform.OS = which === 'web' ? 'web' : 'ios';
+  Platform.OS = which === 'web' ? 'web' : REAL_OS;
 
   DatabaseService.initialized = false;
   DatabaseService.db = null;
@@ -181,9 +187,10 @@ const SERVER_MEDIA_BLOCK = [{
 
 /**
  * One journal's worth of memories covering every case the calendar has to place: two on one
- * day (one of them stored as a full ISO instant), one on another day, one known only to its
- * month, one known only to its year, one in the next month, one deleted, and one belonging to
- * somebody else's journal.
+ * day (one of them stored as a full ISO instant), one on another day, two stored at the same
+ * moment on the same day, one known only to its month, one known only to its year, one whose
+ * date is not a date, one in the next month, one deleted, and one belonging to somebody else's
+ * journal.
  */
 async function seedFixture() {
   await store({ localId: 'e-mar-05-early', date: '2026-03-05', createdAt: 1000 });
@@ -195,6 +202,14 @@ async function seedFixture() {
     createdAt: 1500,
     contentBlocks: SERVER_MEDIA_BLOCK,
   });
+  // Two memories nothing can tell apart: the same day and the same created time. The SQL
+  // settles them with `local_id ASC` and the web path by handing `filterRange` the rows sorted
+  // by `local_id`; they are here so that changing either half fails a test.
+  await store({ localId: 'e-tie-a', date: '2026-03-18', createdAt: 9000 });
+  await store({ localId: 'e-tie-b', date: '2026-03-18', createdAt: 9000 });
+  // A date that is not a date. Not reachable through the app -- the holding area cannot write
+  // one -- but it is the one input on which the two index paths could count differently.
+  await store({ localId: 'e-malformed', date: '2026-3-5', createdAt: 9500 });
   await store({ localId: 'e-mar-month', date: '2026-03-01', datePrecision: 'month', createdAt: 3000 });
   await store({ localId: 'e-year', date: '2026-01-01', datePrecision: 'year', createdAt: 4000 });
   await store({ localId: 'e-apr', date: '2026-04-02', createdAt: 5000 });
@@ -276,8 +291,21 @@ describe('getCalendarIndexRows: a day, a precision and a count, over the whole j
       // Two memories on the 5th -- and one of them is stored as a full ISO instant (FR-011).
       { day: '2026-03-05', date_precision: 'day', count: 2 },
       { day: '2026-03-12', date_precision: 'day', count: 1 },
+      { day: '2026-03-18', date_precision: 'day', count: 2 },
       { day: '2026-04-02', date_precision: 'day', count: 1 },
     ]);
+  });
+
+  it('names only days that can be read, so a total is the same on both paths', async () => {
+    const rows = await DatabaseService.getCalendarIndexRows(JOURNAL);
+
+    // `substr` takes the first ten characters of a malformed date and produces a group that is
+    // not a day. `buildIndex` drops it, so no screen ever diverged -- but a caller summing
+    // `count` for a total would have counted it on a phone and not on the web build.
+    expect(rows.map((r) => r.day)).not.toContain('2026-3-5');
+    expect(rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.day))).toBe(true);
+    // Nine of this journal's memories are alive; the one dated unusably is counted nowhere.
+    expect(rows.reduce((sum, row) => sum + row.count, 0)).toBe(8);
   });
 
   it('leaves out a deleted memory and another journal\'s', async () => {
@@ -292,7 +320,8 @@ describe('getCalendarIndexRows: a day, a precision and a count, over the whole j
   it('feeds buildIndex, which marks no day for a month-only or year-only memory (FR-011)', async () => {
     const index = buildIndex(await DatabaseService.getCalendarIndexRows(JOURNAL));
 
-    expect([...index.days.keys()].sort()).toEqual(['2026-03-05', '2026-03-12', '2026-04-02']);
+    expect([...index.days.keys()].sort())
+      .toEqual(['2026-03-05', '2026-03-12', '2026-03-18', '2026-04-02']);
     // The 1st is where a rough date is stored, and it must not read as a day with memories.
     expect(index.days.has('2026-03-01')).toBe(false);
     expect(index.days.has('2026-01-01')).toBe(false);
@@ -328,6 +357,8 @@ describe('getEntriesInRange: the range, the precisions and the order', () => {
       'e-mar-05-early',  // the 5th, earlier created time first
       'e-mar-05-late',
       'e-mar-12',
+      'e-tie-a',         // the 18th, and nothing tells these two apart but their id
+      'e-tie-b',
     ]);
   });
 
@@ -336,8 +367,34 @@ describe('getEntriesInRange: the range, the precisions and the order', () => {
       JOURNAL, '2026-03-01', '2026-03-31', null, 'DESC'
     );
 
-    // Both the day and the created time reverse, so DESC is exactly ASC backwards.
-    expect(ids(month)).toEqual(['e-mar-12', 'e-mar-05-late', 'e-mar-05-early', 'e-mar-month']);
+    // Both the day and the created time reverse -- `calendarModel.filterRange` reverses both,
+    // and reversing only the day would read as newest-day-first, oldest-within-the-day.
+    expect(ids(month)).toEqual([
+      'e-tie-a', 'e-tie-b',   // a full tie keeps its order; only the rest turns round
+      'e-mar-12',
+      'e-mar-05-late', 'e-mar-05-early',
+      'e-mar-month',
+    ]);
+  });
+
+  /**
+   * The tie, asserted on purpose, because the two paths agree here for a reason that is easy to
+   * break and invisible when broken: `filterRange` settles a memory it cannot otherwise tell
+   * apart by the order it was handed the entries -- the same way round whichever direction the
+   * rest is sorted -- and `_entriesInRangeOnWeb` hands them over sorted by `local_id`, which is
+   * what the SQL's own `local_id ASC` does. Change either half and two memories swap places on
+   * the web build and nowhere else.
+   */
+  it('settles two memories nothing can tell apart the same way in both directions', async () => {
+    const asc = await DatabaseService.getEntriesInRange(
+      JOURNAL, '2026-03-18', '2026-03-18', null, 'ASC'
+    );
+    const desc = await DatabaseService.getEntriesInRange(
+      JOURNAL, '2026-03-18', '2026-03-18', null, 'DESC'
+    );
+
+    expect(ids(asc)).toEqual(['e-tie-a', 'e-tie-b']);
+    expect(ids(desc)).toEqual(['e-tie-a', 'e-tie-b']);
   });
 
   it('reads anything that is not `DESC` as the calendar order, as filterRange does', async () => {
@@ -352,16 +409,20 @@ describe('getEntriesInRange: the range, the precisions and the order', () => {
       .toEqual(ids(asked));
     expect(ids(await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', null, 'oldest')))
       .toEqual(ids(asked));
-    // And the one spelling that matters is read without regard to case.
+
+    // And the one spelling that matters is read without regard to case: lower case means what
+    // upper case means, which is the question -- not that it is the reverse of ASC, which a
+    // full tie is not.
     expect(ids(await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', null, 'desc')))
-      .toEqual([...ids(asked)].reverse());
+      .toEqual(ids(await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', null, 'DESC')));
   });
 
   it('includes a rough-dated memory only where `precisions` asks for it', async () => {
     const dayOnly = await DatabaseService.getEntriesInRange(
       JOURNAL, '2026-03-01', '2026-03-31', ['day'], 'ASC'
     );
-    expect(ids(dayOnly)).toEqual(['e-mar-05-early', 'e-mar-05-late', 'e-mar-12']);
+    expect(ids(dayOnly))
+      .toEqual(['e-mar-05-early', 'e-mar-05-late', 'e-mar-12', 'e-tie-a', 'e-tie-b']);
 
     const withMonth = await DatabaseService.getEntriesInRange(
       JOURNAL, '2026-03-01', '2026-03-31', ['day', 'month'], 'ASC'
@@ -399,6 +460,7 @@ describe('getEntriesInRange: the range, the precisions and the order', () => {
     expect(ids(month)).not.toContain('e-other');     // 5 March, another journal
     expect(ids(month)).not.toContain('e-apr');       // 2 April
     expect(ids(month)).not.toContain('e-year');      // 1 January
+    expect(ids(month)).not.toContain('e-malformed'); // '2026-3-5', which names no day
   });
 
   it('answers with nothing when it is given no range to read', async () => {
@@ -432,6 +494,9 @@ describe('the web build answers exactly as the SQL does (research R2, F4)', () =
       monthAsc: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', null, 'ASC'),
       monthDesc: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', null, 'DESC'),
       dayDesc: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-05', '2026-03-05', null, 'DESC'),
+      // The day holding two memories nothing can tell apart, asked both ways round.
+      tieAsc: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-18', '2026-03-18', null, 'ASC'),
+      tieDesc: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-18', '2026-03-18', null, 'DESC'),
       dayPrecision: await DatabaseService.getEntriesInRange(JOURNAL, '2026-03-01', '2026-03-31', ['day'], 'ASC'),
       year: await DatabaseService.getEntriesInRange(JOURNAL, '2026-01-01', '2026-12-31', ['year'], 'ASC'),
     };
@@ -457,9 +522,22 @@ describe('the web build answers exactly as the SQL does (research R2, F4)', () =
     });
 
     // Not vacuously equal: there is real data, really ordered, in both answers.
-    expect(ids(sql.monthAsc)).toHaveLength(4);
-    expect(ids(web.monthAsc)).toEqual(['e-mar-month', 'e-mar-05-early', 'e-mar-05-late', 'e-mar-12']);
-    expect(ids(web.monthDesc)).toEqual([...ids(web.monthAsc)].reverse());
+    expect(ids(sql.monthAsc)).toHaveLength(6);
+    expect(ids(web.monthAsc)).toEqual([
+      'e-mar-month', 'e-mar-05-early', 'e-mar-05-late', 'e-mar-12', 'e-tie-a', 'e-tie-b',
+    ]);
+    expect(ids(web.monthDesc)).toEqual([
+      'e-tie-a', 'e-tie-b', 'e-mar-12', 'e-mar-05-late', 'e-mar-05-early', 'e-mar-month',
+    ]);
+
+    // And the tie itself, named rather than left to the deep comparison above: the web build
+    // settles it by `local_id`, the same way round in both directions, because that is what
+    // the SQL's `local_id ASC` does. This is the pair of assertions that fails if either half
+    // of that agreement is ever changed.
+    expect(ids(web.tieAsc)).toEqual(['e-tie-a', 'e-tie-b']);
+    expect(ids(web.tieDesc)).toEqual(['e-tie-a', 'e-tie-b']);
+    expect(ids(sql.tieAsc)).toEqual(['e-tie-a', 'e-tie-b']);
+    expect(ids(sql.tieDesc)).toEqual(['e-tie-a', 'e-tie-b']);
   });
 
   it('reads the whole journal on web too, not a page of it (FR-010)', async () => {

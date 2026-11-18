@@ -37,6 +37,7 @@ import {
   buildIndex,
   buildRows,
   filterRange,
+  isDescending,
 } from '../calendarModel';
 // Imported to state a contract, not because `calendarModel` uses it: the fallback below must
 // place a dateless memory on the same day the Journal's own helper would.
@@ -794,6 +795,32 @@ describe('SC-004: a date that carries a time never moves day', () => {
 
     expect([...index.days.keys()].sort()).toEqual(['2026-03-01', '2026-03-05']);
     expect(index.months.get('2026-03')).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isDescending (the one reading of `order`, shared with T003's SQL)
+// ---------------------------------------------------------------------------
+
+/**
+ * The rule `filterRange` sorts by and `DatabaseService.getEntriesInRange` turns into the
+ * direction of its `ORDER BY`. Exported so that there is one copy of it rather than two: a
+ * month list that read oldest-first on a phone and newest-first on the web build would be two
+ * different screens, and two copies of "`'DESC'` in any case" agree only until one is changed.
+ */
+describe('isDescending', () => {
+  it('reads only DESC as newest first, and without regard to case', () => {
+    expect(isDescending('DESC')).toBe(true);
+    expect(isDescending('desc')).toBe(true);
+    expect(isDescending('Desc')).toBe(true);
+  });
+
+  it('reads anything else, and nothing at all, as the calendar order', () => {
+    expect(isDescending('ASC')).toBe(false);
+    expect(isDescending('descending')).toBe(false);
+    expect(isDescending(undefined)).toBe(false);
+    expect(isDescending(null)).toBe(false);
+    expect(isDescending(-1)).toBe(false);
   });
 });
 

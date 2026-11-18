@@ -9,7 +9,7 @@
 import { Platform } from 'react-native';
 import { getDatabase, initializeDatabase, getDatabaseStats, clearDatabase } from '../database';
 import { SyncStatus, UploadStatus, EntityType, SyncOperation } from '../database/schema';
-import { dayKeyOf, filterRange } from '../utils/calendarModel';
+import { dayKeyOf, filterRange, isDescending } from '../utils/calendarModel';
 
 class DatabaseServiceClass {
   constructor() {
@@ -437,6 +437,15 @@ class DatabaseServiceClass {
    *
    * `deleted_at IS NULL` as everywhere else in this file: a deleted memory counted in the
    * index is a calendar day that offers a memory and then shows none.
+   *
+   * **Every row returned names a usable day.** A row whose stored date is empty or malformed
+   * (`'2026-3-5'`) is left out, on both paths. `buildIndex` would drop such a group anyway, so
+   * no screen depended on this -- but `substr` would still have produced a group, and the two
+   * paths then disagreed about the one thing nothing else checks: a caller that sums `count`
+   * for a total ("how many memories this year") would have got one number on a phone and
+   * another on the web build. Dropping it is the fail-closed answer `buildIndex` already
+   * documents -- a memory whose date cannot be read is reachable from nowhere in the calendar,
+   * rather than placed on a day of this file's choosing.
    */
   async getCalendarIndexRows(journalId) {
     if (Platform.OS === 'web') {
@@ -447,7 +456,7 @@ class DatabaseServiceClass {
 
     // Ordered by day and then precision so the rows come back the same way every time, and the
     // same way the web path below returns them -- the one thing that makes the two comparable.
-    return db.getAllAsync(
+    const rows = await db.getAllAsync(
       `SELECT substr(date, 1, 10) AS day, date_precision, COUNT(*) AS count
        FROM journal_entries
        WHERE journal_id = ? AND deleted_at IS NULL
@@ -455,6 +464,10 @@ class DatabaseServiceClass {
        ORDER BY day ASC, date_precision ASC`,
       [journalId]
     );
+
+    // `substr` takes the first ten characters of whatever is stored, which for a malformed date
+    // is not a day. `dayKeyOf` is the one judge of that, and the web path drops the same rows.
+    return rows.filter(row => dayKeyOf(row.day));
   }
 
   /**
@@ -528,14 +541,17 @@ class DatabaseServiceClass {
   }
 
   /**
-   * Which way round a range is ordered, read exactly as `calendarModel.filterRange` reads it:
-   * the one spelling that matters is `'DESC'`, in any case, and anything else is the ascending
-   * calendar order. Interpolated into the SQL rather than bound, as `getEntriesByJournalId`
-   * does with its own order -- which is why it is narrowed to the two words here and never
-   * taken from a caller's string.
+   * Which way round a range is ordered, as one of the two words SQL understands.
+   *
+   * The reading of `order` itself is `calendarModel.isDescending` and is asked rather than
+   * repeated: the web path answers the same question through `filterRange`, which asks the
+   * same function, so the rule cannot be changed on one path alone. All this adds is the
+   * spelling -- and the narrowing, which matters, because the direction is interpolated into
+   * the SQL rather than bound (as `getEntriesByJournalId` does with its own order) and so may
+   * never be a caller's string.
    */
   _rangeDirection(order) {
-    return typeof order === 'string' && order.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    return isDescending(order) ? 'DESC' : 'ASC';
   }
 
   /**
