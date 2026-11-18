@@ -23,10 +23,16 @@
  *   month/year
  *   list headers     named and given a role too, per the task's own list -- not covered by
  *                   FR-014's examples, but asked for in `tasks.md`.
+ *   the sheet's own
+ *   ◄ ►              T009 fix round 1 (item 2): ruled in by the owner, against the first
+ *                   round's own disclosure, over FR-014's opening clause rather than its
+ *                   enumerated list -- named by what `step` would actually move ("Previous
+ *                   month", "Previous year", "Earlier years"), never by a guess at a
+ *                   destination this component cannot compute.
  *
- * Nothing here duplicates `CalendarSheet.test.js`'s own ground: no colours, no stepping, no
- * picking. `accessibilityState.disabled` already existed before this task (T004); this file
- * only adds the label and the role sitting beside it.
+ * Nothing here duplicates `CalendarSheet.test.js`'s own ground beyond what the sheet's own
+ * ◄ ► need: no colours, no picking. `accessibilityState.disabled` on a tile already existed
+ * before this task (T004); this file only adds the label and the role sitting beside it.
  */
 
 import React from 'react';
@@ -256,6 +262,66 @@ describe("the sheet's ✕, its Date/Month/Year switch and its list headers are n
     });
 
     expect(control(tree, 'calendar-year-header').props.accessibilityState.expanded).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T009 fix round 1 (item 2): the sheet's own ◄ ► are named too.
+//
+// Ruled in over FR-014's opening clause ("usable with screen readers") rather than its
+// enumerated list: these two are the only way to move the sheet's own month, year or
+// twelve-year window, so leaving them silent would leave a screen-reader user unable to
+// navigate the sheet at all. The wording is the owner's own, named by what `step` would
+// actually move -- `stepTarget` decides both, so the label and the action cannot disagree.
+// Five cases, one per branch `stepTarget` can take.
+// ---------------------------------------------------------------------------
+
+describe("the sheet's own ◄ ► are named by what they would move (T009 fix round 1)", () => {
+  it('says "month" in Date view, where ◄ ► step by month', async () => {
+    const tree = await mount();
+
+    expect(control(tree, 'calendar-prev').props.accessibilityRole).toBe('button');
+    expect(control(tree, 'calendar-prev').props.accessibilityLabel).toBe('Previous month');
+    expect(control(tree, 'calendar-prev').props.accessibilityState).toEqual({ disabled: false });
+    expect(control(tree, 'calendar-next').props.accessibilityLabel).toBe('Next month');
+    expect(control(tree, 'calendar-next').props.accessibilityState).toEqual({ disabled: false });
+  });
+
+  it('says "year" in Month view, where ◄ ► step by year', async () => {
+    const tree = await mount({ picked: { kind: 'month', year: 2026, month: 11 } });
+
+    expect(control(tree, 'calendar-prev').props.accessibilityLabel).toBe('Previous year');
+    expect(control(tree, 'calendar-next').props.accessibilityLabel).toBe('Next year');
+  });
+
+  it('says "years" in Year view, where ◄ ► step the twelve-year window', async () => {
+    const tree = await mount({ picked: { kind: 'year', year: 2026 } });
+
+    expect(control(tree, 'calendar-prev').props.accessibilityLabel).toBe('Earlier years');
+    expect(control(tree, 'calendar-next').props.accessibilityLabel).toBe('Later years');
+  });
+
+  it('says "year" with the month drop-down list open, where ◄ ► browse a different year', async () => {
+    // Opening the month list from Date view moves to browsing the *year* behind it (T004's own
+    // `step`: `list === 'month'` steps `year`), so the arrows say what this list-browsing state
+    // actually does, not what Date view underneath it would otherwise do.
+    const tree = await mount();
+    await act(async () => {
+      control(tree, 'calendar-month-header').props.onPress();
+    });
+
+    expect(control(tree, 'calendar-prev').props.accessibilityLabel).toBe('Previous year');
+    expect(control(tree, 'calendar-next').props.accessibilityLabel).toBe('Next year');
+  });
+
+  it('says "years" with the year drop-down list open, where ◄ ► browse a different window', async () => {
+    const tree = await mount();
+    await act(async () => {
+      control(tree, 'calendar-year-header').props.onPress();
+    });
+
+    expect(control(tree, 'calendar-prev').props.accessibilityLabel).toBe('Earlier years');
+    expect(control(tree, 'calendar-next').props.accessibilityLabel).toBe('Later years');
   });
 });
 

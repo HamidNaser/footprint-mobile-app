@@ -123,21 +123,27 @@ export const CalendarListHeading = ({
   );
 
   // T009, FR-014: "March 2026, 4 memories, open" -- the month, its count when it has one, and
-  // whether it is open or closed, said in words *and* carried in `accessibilityState.expanded`
-  // (the doubled signal FR-014's own example gives). A heading given no count says nothing about
-  // one, the same silence `memoriesLabel` already keeps for a period nobody has read yet.
-  const accessibilityProps = {
-    accessibilityRole: 'button',
-    accessibilityLabel: [label, words, open ? 'open' : 'closed'].filter(worded).join(', '),
-    accessibilityState: { expanded: open },
-  };
+  // whether it is open or closed, said in words. FR-014 ties `button` to "a tile or a heading
+  // that opens" and `header` to a heading -- so the role itself answers whether this one does:
+  // `button` plus `accessibilityState.expanded` (the doubled signal FR-014's own example gives)
+  // when something is listening for a tap, `header` and no `expanded` state when nothing is,
+  // because a heading that cannot be opened is not the control FR-014 means by `button`. A
+  // heading given no count says nothing about one, the same silence `memoriesLabel` already
+  // keeps for a period nobody has read yet.
+  const spokenLabel = [label, words, open ? 'open' : 'closed'].filter(worded).join(', ');
 
   // Nothing listening means nothing to open: a heading that dimmed under a tap and then left the
   // month exactly as it was would be offering something it cannot do. It still says what it is,
-  // though -- FR-014 asks that of every month heading, tappable or not.
+  // though -- FR-014 asks that of every month heading, tappable or not -- just as a `header`
+  // rather than as a `button` it is not.
   if (typeof onPress !== 'function') {
     return (
-      <View style={styles.monthRow} onLayout={onLayout} {...accessibilityProps}>
+      <View
+        style={styles.monthRow}
+        onLayout={onLayout}
+        accessibilityRole="header"
+        accessibilityLabel={spokenLabel}
+      >
         {body}
       </View>
     );
@@ -148,7 +154,9 @@ export const CalendarListHeading = ({
       style={styles.monthRow}
       onPress={onPress}
       onLayout={onLayout}
-      {...accessibilityProps}
+      accessibilityRole="button"
+      accessibilityLabel={spokenLabel}
+      accessibilityState={{ expanded: open }}
     >
       {body}
     </TouchableOpacity>

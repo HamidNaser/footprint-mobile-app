@@ -107,6 +107,7 @@ import { Ionicons } from '@expo/vector-icons';
 
 import {
   WEEKDAY_NAMES,
+  dayTileWords,
   monthGrid,
   monthKey,
   stepMonth,
@@ -162,6 +163,32 @@ const VIEWS = [
   ['year', 'Year'],
 ];
 
+/**
+ * What ◄ ► would move, given the current list and view -- the open list first, then the view,
+ * exactly as `step` below reads them. `step` is built on this rather than beside it, so the
+ * sheet's own ◄ ► can never be labelled one thing and do another: the same branching decides
+ * both the action and, through `STEP_LABELS`, the word spoken for it.
+ *
+ * T009 fix round 1 (item 2): the owner ruled these two buttons in, over FR-014's opening clause
+ * ("usable with screen readers") rather than its enumerated list -- they are the only way to
+ * move the sheet's own month, year or twelve-year window at all, and leaving them silent would
+ * leave a screen-reader user unable to navigate the sheet.
+ */
+function stepTarget(state) {
+  if (state.list === 'month') return 'year';
+  if (state.list === 'year') return 'window';
+  if (state.view === 'date') return 'month';
+  if (state.view === 'month') return 'year';
+  return 'window'; // view === 'year'
+}
+
+/** The owner's own wording for each of `stepTarget`'s three answers, ◄ then ►. */
+const STEP_LABELS = {
+  month: ['Previous month', 'Next month'],
+  year: ['Previous year', 'Next year'],
+  window: ['Earlier years', 'Later years'],
+};
+
 const DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})/;
 
 /**
@@ -190,29 +217,6 @@ function civilDay(value) {
   };
 }
 
-// ---------------------------------------------------------------------------------------------
-// T009, FR-014: every tile's spoken label.
-//
-// Full weekday names, parallel to `calendarModel.WEEKDAY_NAMES`'s three-letter column heads --
-// a screen reader has no column to lean on, so a day tile is named in full. Kept here rather
-// than taught to `calendarModel.js` because nothing else reads a weekday's full word; a list
-// only this file uses is not one two files have to keep in step.
-// ---------------------------------------------------------------------------------------------
-
-const WEEKDAY_NAMES_FULL = [
-  'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
-];
-
-/**
- * FR-014's spoken name for a day tile -- "Thursday 5 November 2026" -- the full weekday and the
- * full month, numeric parts throughout, exactly as `monthGrid`'s own weekday lookup is built and
- * never a date string.
- */
-function dayTileWords(year, month, day) {
-  const weekday = WEEKDAY_NAMES_FULL[new Date(year, month - 1, day).getDay()];
-  return `${weekday} ${day} ${monthName(month)} ${year}`;
-}
-
 /**
  * FR-014's spoken label for a tile: its own words, then its count -- or "unavailable" for a
  * faded one, which is what a faded tile says instead of a count it does not have. `showCount`
@@ -220,6 +224,11 @@ function dayTileWords(year, month, day) {
  * file's tile renderers already rules that a list is for moving the calendar, not for answering
  * how many memories a month passed through holds, and the spoken label follows the same rule
  * rather than saying more than the tile shows.
+ *
+ * T009 fix round 1: the day tile's own words (the weekday, day, month and year) come from
+ * `calendarModel.dayTileWords`, not from a copy kept here -- `calendarModel.js` is already the
+ * one place a civil date in this feature becomes words, for exactly the reason `WEEKDAY_NAMES`
+ * lives there and not in this component.
  */
 function tileAccessibilityLabel(words, empty, count, showCount) {
   if (empty) return `${words}, unavailable`;
@@ -321,17 +330,20 @@ export const CalendarSheetBody = ({
   // Browsing. Not one of these tells the Journal anything.
   // ---------------------------------------------------------------------------------------------
 
-  /** ◄ ► move by whatever set is on screen -- the open list first, then the view. */
+  /**
+   * ◄ ► move by whatever set is on screen -- the open list first, then the view, read through
+   * `stepTarget` so this and the buttons' own spoken labels read the same branching rather than
+   * two copies of it (T009 fix round 1, item 2).
+   */
   const step = useCallback((delta) => {
     setState((s) => {
-      if (s.list === 'month') return { ...s, year: stepYear(s.year, delta) };
-      if (s.list === 'year') return { ...s, windowStart: stepWindow(s.windowStart, delta) };
-      if (s.view === 'date') {
+      const target = stepTarget(s);
+      if (target === 'month') {
         const next = stepMonth(s.year, s.month, delta);
         return { ...s, year: next.year, month: next.month };
       }
-      if (s.view === 'month') return { ...s, year: stepYear(s.year, delta) };
-      return { ...s, windowStart: stepWindow(s.windowStart, delta) }; // view === 'year'
+      if (target === 'year') return { ...s, year: stepYear(s.year, delta) };
+      return { ...s, windowStart: stepWindow(s.windowStart, delta) }; // target === 'window'
     });
   }, []);
 
@@ -613,6 +625,14 @@ export const CalendarSheetBody = ({
     );
   };
 
+  // T009 fix round 1 (item 2): the two words ◄ and ► carry, named by what `step` would actually
+  // move them by -- "Previous month" / "Next month" in Date view, "Previous year" / "Next year"
+  // in Month view and inside the month drop-down list, "Earlier years" / "Later years" in Year
+  // view and inside the year drop-down list. Neither arrow has an end this component itself
+  // ever refuses: unlike a tile, which the index can find empty, stepping the sheet's own month,
+  // year or twelve-year window always succeeds, so `disabled` is honestly `false` on both.
+  const [navPreviousLabel, navNextLabel] = STEP_LABELS[stepTarget(state)];
+
   if (!visible) return null;
 
   return (
@@ -689,11 +709,25 @@ export const CalendarSheetBody = ({
           </View>
 
           <View style={styles.nav}>
-            <TouchableOpacity testID="calendar-prev" style={styles.navButton} onPress={() => step(-1)}>
+            <TouchableOpacity
+              testID="calendar-prev"
+              style={styles.navButton}
+              onPress={() => step(-1)}
+              accessibilityRole="button"
+              accessibilityLabel={navPreviousLabel}
+              accessibilityState={{ disabled: false }}
+            >
               <Ionicons name="chevron-back" size={20} color={C.picked} />
             </TouchableOpacity>
             <View style={styles.navMiddle}>{renderHeader()}</View>
-            <TouchableOpacity testID="calendar-next" style={styles.navButton} onPress={() => step(1)}>
+            <TouchableOpacity
+              testID="calendar-next"
+              style={styles.navButton}
+              onPress={() => step(1)}
+              accessibilityRole="button"
+              accessibilityLabel={navNextLabel}
+              accessibilityState={{ disabled: false }}
+            >
               <Ionicons name="chevron-forward" size={20} color={C.picked} />
             </TouchableOpacity>
           </View>

@@ -36,6 +36,9 @@
  *   `isDescending`                              the one reading of `order` (`filterRange`, T003)
  *   `fourDigitYear`                             the one reading of "is this a year at all" --
  *                                               asked here and by `JournalScreen.rangeFor` (T006)
+ *   `WEEKDAY_NAMES_FULL`, `dayTileWords`        a day tile's spoken label (T009, FR-014) --
+ *                                               `CalendarSheetBody.js`'s day tiles read it rather
+ *                                               than keeping a second weekday list of their own
  *
  * Days are **not** stepped here: `journalDate.adjacentDateKey` already does that, and it is
  * the one place that answers it (research R7). Months and years are what it cannot take.
@@ -67,6 +70,20 @@ import { daysInMonth, monthName, formatPeriodDate } from './periodDate';
  * which is where this file's header already says it belongs, and the sheet reads it.
  */
 export const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/**
+ * The same seven days, in full -- "Sunday" rather than "Sun" -- for T009's spoken day-tile
+ * labels (FR-014: "Thursday 5 March 2026"), which name a day in full because a screen reader has
+ * no three-letter column head to lean on the way a sighted reader does.
+ *
+ * Exported and kept here rather than in `CalendarSheetBody.js`, for the exact reason
+ * `WEEKDAY_NAMES` above already is: a second weekday list in a component is a second thing to
+ * keep in step with this one, and the day it drifted -- a reorder, a localisation -- would be
+ * the day a screen reader spoke the wrong weekday for a date it was showing.
+ */
+export const WEEKDAY_NAMES_FULL = [
+  'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+];
 
 /** The leading civil date of a day key or of a full instant -- the day part, and no more. */
 const DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})/;
@@ -439,15 +456,39 @@ export function neighbourYear(index, period, delta) {
 // buildRows (FR-005, FR-006; research R8)
 // ---------------------------------------------------------------------------
 
+/**
+ * The weekday (0 = Sunday) of a civil day -- numeric parts handed to `Date`, exactly as
+ * `monthGrid`'s own weekday lookup is built, never a date string read as an instant. The one
+ * place this feature asks "which weekday is this", so `dayHeadingLabel` and `dayTileWords`
+ * cannot read a different weekday for the same day.
+ */
+function weekdayIndexOf(year, month, day) {
+  return new Date(year, month - 1, day).getDay();
+}
+
 /** FR-005's day heading: "Thu 5 March" -- weekday, day, month, and no year. */
 function dayHeadingLabel(key) {
   const year = Number(key.slice(0, 4));
   const month = Number(key.slice(5, 7));
   const day = Number(key.slice(8, 10));
 
-  // Numeric parts again: the weekday of a local calendar day, never of an instant.
-  const weekday = WEEKDAY_NAMES[new Date(year, month - 1, day).getDay()];
+  const weekday = WEEKDAY_NAMES[weekdayIndexOf(year, month, day)];
   return `${weekday} ${day} ${monthName(month)}`;
+}
+
+/**
+ * FR-014's spoken name for a day tile -- "Thursday 5 November 2026" -- the full weekday and the
+ * full month, read in full because a screen reader has no three-letter column head to lean on.
+ *
+ * Exported so that `CalendarSheetBody.js`'s day tiles ask here rather than keeping a second
+ * weekday list and a second `new Date(year, month - 1, day)` of their own: this file is already
+ * the one place a civil date in this feature becomes words (`dayHeadingLabel`,
+ * `monthHeadingLabel`), and a day tile's spoken label is a third wording of the same day that
+ * must not drift from the grey heading's.
+ */
+export function dayTileWords(year, month, day) {
+  const weekday = WEEKDAY_NAMES_FULL[weekdayIndexOf(year, month, day)];
+  return `${weekday} ${day} ${monthName(month)} ${year}`;
 }
 
 /**

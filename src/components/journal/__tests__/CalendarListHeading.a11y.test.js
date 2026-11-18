@@ -70,17 +70,21 @@ describe('the month heading is a button, named by its words, its count and its s
     expect(control.props.accessibilityLabel).toBe('March 2026, closed');
   });
 
-  it('is still a button, named and stated, even with nothing listening for a tap', () => {
-    // The plain `View` branch: production always hands this component an `onPress` for a month
-    // heading (`JournalScreen.renderRow`), but a month heading drawn without one — which this
-    // component's own design allows, so that it never dims under a tap it cannot answer — is
-    // still the thing FR-014 is talking about, and still has to say so.
+  /**
+   * T009 fix round 1: the plain `View` branch — production always hands this component an
+   * `onPress` for a month heading (`JournalScreen.renderRow`), but a month heading drawn
+   * without one, which this component's own design allows so it never dims under a tap it
+   * cannot answer, still has to say what it is. FR-014 ties `button` to "a tile or a heading
+   * that opens" and `header` to a heading, so a heading that cannot be opened reads as
+   * `header` — not `button` plus an `expanded` state it cannot really carry.
+   */
+  it('is a header, not a button, with nothing listening for a tap — still named and stated', () => {
     const tree = render({ kind: 'monthHeading', label: 'March 2026', count: 4, open: true });
     const host = tree.root.findByType(View);
 
-    expect(host.props.accessibilityRole).toBe('button');
+    expect(host.props.accessibilityRole).toBe('header');
     expect(host.props.accessibilityLabel).toBe('March 2026, 4 memories, open');
-    expect(host.props.accessibilityState).toEqual({ expanded: true });
+    expect(host.props.accessibilityState).toBeUndefined();
     expect(tree.root.findAllByType(TouchableOpacity)).toHaveLength(0);
   });
 });
