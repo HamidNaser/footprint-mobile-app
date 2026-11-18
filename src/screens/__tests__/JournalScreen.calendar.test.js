@@ -298,7 +298,12 @@ import JournalScreen from '../JournalScreen';
 import { CalendarSheet } from '../../components/journal/CalendarSheet';
 import { CalendarPickerModal, DateSwipeContainer } from '../../components/journal';
 import { JournalEntryCard as CardProbe } from '../../components/journal/JournalEntryCard';
+// Nothing on this screen opens the old composer any more, and its mount is kept deliberately
+// (see `handleSaveEntry`'s comment). It is the one way a test can reach this screen's own save
+// path, which is what the fix-round-1 case at the foot of this file needs.
+import { JournalComposeModal as ComposeModal } from '../../components/journal/JournalComposeModal';
 import { DatabaseService } from '../../services/DatabaseService';
+import { SettingsService } from '../../services/SettingsService';
 import { ReactionsApi } from '../../api';
 import { parseDateKey, toDateKey } from '../../utils/journalDate';
 import { buildIndex } from '../../utils/calendarModel';
@@ -518,6 +523,7 @@ const sheet = (tree) => tree.root.findByType(CalendarSheet);
 const silenceWarnings = () => jest.spyOn(console, 'warn').mockImplementation(() => {});
 
 let rangeReads;
+let indexReads;
 
 beforeAll(async () => {
   // `useJournal`, `JournalService` and this screen all narrate what they are doing. Kept out of
@@ -531,9 +537,10 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  // Called through, not replaced: the day really is read from the database, and the spy is only
-  // how "the open list is read again" becomes an assertion.
+  // Called through, not replaced: the day and the index really are read from the database, and
+  // the spies are only how "it is read again" becomes an assertion.
   rangeReads = jest.spyOn(DatabaseService, 'getEntriesInRange');
+  indexReads = jest.spyOn(DatabaseService, 'getCalendarIndexRows');
 });
 
 afterEach(() => {
@@ -825,6 +832,7 @@ describe('a card action reaches the API on a day beyond the loaded feed (G1)', (
 
     const card = cardProps(tree, 'rough-month');
     const before = rangeReads.mock.calls.length;
+    const indexBefore = indexReads.mock.calls.length;
 
     await act(async () => {
       await card.onReact('rough-month', 'heart');
@@ -837,6 +845,9 @@ describe('a card action reaches the API on a day beyond the loaded feed (G1)', (
     // And the open day is read again, so the card is not left showing what it showed before.
     expect(rangeReads.mock.calls.length).toBeGreaterThan(before);
     expect(rangeReads).toHaveBeenLastCalledWith(JOURNAL, ROUGH_DAY, ROUGH_DAY, null, 'DESC');
+    // The index with it. A like changes no day's count, so this half is insurance — but the
+    // two are one function precisely so they cannot drift apart (fix round 1, A).
+    expect(indexReads.mock.calls.length).toBeGreaterThan(indexBefore);
   });
 
   it('a reply on such a card is sent too', async () => {
@@ -894,5 +905,167 @@ describe('a day read is the same entry the feed would hand over (F3)', () => {
     expect(index.months.get('2026-09')).toBe(31);
     expect(index.roughMonths.get('2026-09')).toBe(1);
     expect(index.years.get('2026')).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1. Four things the first draft of this task got wrong, and two
+// gaps in what it covered.
+// ---------------------------------------------------------------------------
+
+describe('what the screen does when a read does not answer (fix round 1)', () => {
+  /**
+   * **B.** The day's memories and the feed's are two different queries — this one has its own
+   * `substr`, its own precision clause — so this one can fail on its own while the rest of the
+   * screen looks perfectly healthy. When it does, the screen must not answer the question it
+   * failed to ask.
+   *
+   * It used to set the day to `[]` in the `catch`, and `[]` is "read, and there are none": the
+   * empty state drew *"No entries yet"* and *"Start journaling your thoughts, photos, and
+   * memories"* over a day holding memories. Telling somebody their day is empty is a claim about
+   * their own data, and a failed read is no basis for it.
+   */
+  it('says nothing about a day it could not read, rather than that it is empty', async () => {
+    silenceWarnings();
+    jest
+      .spyOn(DatabaseService, 'getEntriesInRange')
+      .mockRejectedValue(new Error('the day is unreadable'));
+
+    const tree = await render();
+
+    expect(cardIds(tree)).toEqual([]);
+    const said = textsIn(tree.root);
+    expect(said).not.toContain('No entries yet');
+    expect(said).not.toContain('Start journaling your thoughts, photos, and memories');
+  });
+
+  /**
+   * **C.** `initializeJournal` is asynchronous, so there is a moment on arrival when there is no
+   * journal to read a calendar of. That is not a failure and must not be reported as one: a tap
+   * then used to raise "Could not open the calendar", where the picker this replaces simply
+   * opened. The body of the screen is showing "Loading journal…" at that point, so the honest
+   * answer is to do nothing at all.
+   */
+  it('does not call a journal that has not loaded yet a failure', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    // The journal never arrives, which is the first frame held still.
+    jest.spyOn(SettingsService, 'getOrCreateDefaultJournal').mockResolvedValueOnce(null);
+
+    const tree = await render();
+    const label = tree.root
+      .findAllByType(TouchableOpacity)
+      .filter((node) => textsIn(node).some((s) => s === dateLabel(toDateKey(new Date()))))
+      .pop();
+    expect(label).toBeDefined();
+
+    await act(async () => {
+      label.props.onPress();
+    });
+    await settle();
+
+    expect(alert).not.toHaveBeenCalled();
+    expect(sheet(tree).props.visible).toBe(false);
+  });
+});
+
+describe('an empty journal (fix round 1, D)', () => {
+  /**
+   * The spec's own edge case: *"the calendar opens with everything faded"*. It still **opens** —
+   * `buildIndex([])` is an index, so `openCalendar` has one and the constraint it guards is met —
+   * and every day in it is faded and inert, because there is nothing to pick.
+   *
+   * And this is the other half of the case above: a day that really has been read and really has
+   * nothing does get "No entries yet". Without this, that case could pass on an empty state that
+   * never renders at all.
+   */
+  it('opens the calendar anyway, with every day faded, and says the day is empty', async () => {
+    jest.spyOn(SettingsService, 'getOrCreateDefaultJournal').mockResolvedValueOnce('journal-none');
+
+    const tree = await render();
+    const today = toDateKey(new Date());
+
+    expect(cardIds(tree)).toEqual([]);
+    expect(textsIn(tree.root)).toContain('No entries yet');
+    expect(swipe(tree).props.hasNext).toBe(false);
+    expect(swipe(tree).props.hasPrevious).toBe(false);
+
+    await tapDateBar(tree, today);
+
+    expect(sheet(tree).props.visible).toBe(true);
+    expect(sheet(tree).props.index).not.toBeNull();
+    expect(sheet(tree).props.index.days.size).toBe(0);
+
+    const tiles = tree.root
+      .findAllByType(TouchableOpacity)
+      .filter((node) => String(node.props.testID).startsWith('calendar-day-'));
+    expect(tiles.length).toBeGreaterThan(27);
+    expect(tiles.every((tile) => tile.props.disabled)).toBe(true);
+  });
+});
+
+describe('the far end of the journal (fix round 1, D)', () => {
+  /** The oldest day stops ◄; this is the other end, which nothing covered. */
+  it('stops ► on the newest day', async () => {
+    const tree = await render();
+
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    expect(swipe(tree).props.hasNext).toBe(false);
+    expect(swipe(tree).props.hasPrevious).toBe(true);
+
+    // And ► really does nothing, rather than the container alone refusing it.
+    await tapDateArrow(tree, 1);
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual([dayEntryId(NEWEST_DAY)]);
+  });
+});
+
+describe('a memory saved onto a day that had none (fix round 1, A)', () => {
+  /**
+   * **A.** The day's memories and "which days hold memories" are two answers to one question,
+   * and only the first was re-read after a save. So the memory appeared, and then its day was
+   * not a stop for ◄ ► and its tile in the calendar was faded and untappable until the sheet
+   * next happened to be opened. Before this feature the arrows read the live feed, so a brand
+   * new day became a stop at once — that was a loss, and this is it covered.
+   *
+   * The save goes through the screen's own handler and the real service, so the memory really is
+   * written to the database this screen reads. The row is removed again afterwards: every other
+   * case in this file counts on the journal holding exactly 100 memories.
+   */
+  it('makes that day a stop for the arrows, without the calendar being reopened', async () => {
+    const NEW_DAY = shiftDay(NEWEST_DAY, 3);
+    const tree = await render();
+
+    try {
+      // Before: the newest day is the end of the journal, and the new day is not in the index.
+      expect(swipe(tree).props.hasNext).toBe(false);
+      await tapDateBar(tree, NEWEST_DAY);
+      expect(sheet(tree).props.index.days.has(NEW_DAY)).toBe(false);
+      await tap(tree, 'calendar-sheet-close');
+
+      await act(async () => {
+        await tree.root.findByType(ComposeModal).props.onSave({
+          contentBlocks: [{ type: 'text', content: 'a memory of a brand new day', order: 0 }],
+          visibility: 'private',
+          locationSharing: 'private',
+          date: NEW_DAY,
+        });
+      });
+      await settle();
+
+      // The save is confirmed on screen, which is `revealEntry`'s whole job.
+      expect(barShows(tree, NEW_DAY)).toBe(true);
+      expect(cardIds(tree)).toHaveLength(1);
+
+      // And the new day is a real day of the journal: ◄ steps off it, and ► comes back to it.
+      expect(swipe(tree).props.hasPrevious).toBe(true);
+      await tapDateArrow(tree, -1);
+      expect(barShows(tree, NEWEST_DAY)).toBe(true);
+      expect(swipe(tree).props.hasNext).toBe(true);
+      await tapDateArrow(tree, 1);
+      expect(barShows(tree, NEW_DAY)).toBe(true);
+    } finally {
+      const db = await DatabaseService.getDb();
+      await db.runAsync('DELETE FROM journal_entries WHERE date = ?', [NEW_DAY]);
+    }
   });
 });

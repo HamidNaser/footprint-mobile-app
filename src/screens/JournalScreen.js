@@ -433,8 +433,11 @@ export default function JournalScreen({ navigation }) {
   /**
    * Read the whole journal's index and keep it, answering with it.
    *
-   * Answers `null` when there is nothing to read from yet or the read failed, which is what
-   * `openCalendar` below tests: a `CalendarSheet` given no index draws **every** day, month and
+   * Answers `null` when there is nothing to read from yet **or** the read failed -- two
+   * different things, which `openCalendar` tells apart for itself by asking about `journalId`
+   * before it gets here, because only one of them is worth saying out loud.
+   *
+   * That null is what `openCalendar` below tests: a `CalendarSheet` given no index draws **every** day, month and
    * year faded and inert -- a calendar indistinguishable from an empty journal, with no way
    * forward but closing it again. Recorded rather than said here, because this runs on arrival
    * at the Journal without anybody having asked for anything; `openCalendar` is the explicit
@@ -453,9 +456,11 @@ export default function JournalScreen({ navigation }) {
     }
   }, [journalId]);
 
-  // The index loads when the journal loads. It is read again when the sheet opens
-  // (`openCalendar`); the remaining freshness triggers -- sync, focus, an edit, a delete,
-  // pull-to-refresh -- are T008's.
+  // The index loads when the journal loads. It is read again on the way into the sheet
+  // (`openCalendar`) and alongside the day (`reloadDayAndIndex`); the remaining freshness
+  // triggers -- sync, focus, an edit, a delete, pull-to-refresh, and a memory saved on the
+  // capture screen -- are T008's, and until they land neither the day nor the index follows
+  // those events on its own.
   useEffect(() => {
     loadCalendarIndex();
   }, [loadCalendarIndex]);
@@ -478,10 +483,9 @@ export default function JournalScreen({ navigation }) {
     const token = dayReadRef.current + 1;
     dayReadRef.current = token;
 
-    if (!journalId || !selectedDateKey) {
-      setDayEntries(NO_ENTRIES);
-      return;
-    }
+    // Nothing to read from yet. Deliberately **not** `setDayEntries(NO_ENTRIES)`: see the
+    // `catch` below for why an absent answer must not be recorded as an empty one.
+    if (!journalId || !selectedDateKey) return;
 
     try {
       const found = await DatabaseService.getEntriesInRange(
@@ -493,11 +497,24 @@ export default function JournalScreen({ navigation }) {
       );
       if (dayReadRef.current === token) setDayEntries(found);
     } catch (error) {
-      // Recorded, not said: this is a read the person did not ask for, and an alert over
-      // somebody's memories every time a day failed to load would be worse than the empty
-      // page -- which is itself self-evident on screen. The next day change reads again.
+      // ⚠ **`dayEntries` is left exactly as it was -- `null` after a day change, which the
+      // list draws as nothing at all.**
+      //
+      // It used to be set to `[]` here, and `[]` means "read, and there are none": the empty
+      // state under it then draws *"No entries yet -- Start journaling your thoughts, photos,
+      // and memories"* over a day that may hold twenty. That is not an empty page a person can
+      // read as a failure; it is this screen making a positive claim about somebody's own data
+      // that it has no basis for. And it is reachable on its own: this query is different SQL
+      // from the feed's -- its own `substr`, its own precision clause -- so it can fail while
+      // the feed is perfectly healthy and the rest of the screen looks fine.
+      //
+      // A display that cannot determine its contents must not render as though it had. One
+      // state fewer, too: `null` already means "no answer", which is the honest answer here.
+      //
+      // Recorded rather than said: this is a read the person did not ask for, and an alert over
+      // somebody's memories on every failed day would be worse than a quiet page. The next day
+      // change, card action or save reads again.
       console.warn('[JournalScreen] the day could not be read', error?.message);
-      if (dayReadRef.current === token) setDayEntries(NO_ENTRIES);
     }
   }, [journalId, selectedDateKey]);
 
@@ -507,6 +524,26 @@ export default function JournalScreen({ navigation }) {
     setDayEntries(null);
     reloadDay();
   }, [reloadDay]);
+
+  /**
+   * Both local reads again: the open day, and the calendar's index.
+   *
+   * **One function, because the two must not drift apart.** They were two calls and the second
+   * was missed where it mattered most: a memory saved onto a day that had none appeared on the
+   * day it was saved to, and then that day was *not* a stop for ◄ ►, and its tile in the
+   * calendar was faded and untappable, until the sheet happened to be opened again. Before this
+   * feature the arrows read the live feed and a new day became a stop at once, so that was a
+   * loss. The day's memories and "which days hold memories" are two answers to one question and
+   * are re-read together from here on.
+   *
+   * A card action does not change which days hold memories, so for a like or a reply the index
+   * half is insurance rather than a fix -- and cheap, being one grouped read of the phone's own
+   * database. Having one function spend it is worth more than having two that can diverge.
+   */
+  const reloadDayAndIndex = useCallback(async () => {
+    await reloadDay();
+    await loadCalendarIndex();
+  }, [reloadDay, loadCalendarIndex]);
 
   const displayEntries = useMemo(() => {
     // The worklist ignores the selected day on purpose. Somebody asking what they have
@@ -663,6 +700,16 @@ export default function JournalScreen({ navigation }) {
    * tapped.
    */
   const openCalendar = useCallback(async () => {
+    // ⚠ **"The journal has not been found yet" is not a failure, and must not be reported as
+    // one.** `loadCalendarIndex` answers null for both, and this could not tell them apart: a
+    // tap in the moment before `initializeJournal` resolves got *"Could not open the calendar"*
+    // where the picker this replaces simply opened. Asked here, where the difference is known.
+    //
+    // Nothing is said, and this is the one place on this screen where that is right: the body
+    // of the screen is still showing the spinner and "Loading journal…", so the tap landed on a
+    // screen that has not arrived rather than on a control that refused.
+    if (!journalId) return;
+
     const fresh = await loadCalendarIndex();
     if (fresh || calendarIndex) {
       setShowCalendarSheet(true);
@@ -674,7 +721,7 @@ export default function JournalScreen({ navigation }) {
       'The phone could not read which days hold your memories, so the calendar has not been ' +
         'opened. Nothing has changed, and your memories are all still here. Please try again.',
     );
-  }, [loadCalendarIndex, calendarIndex]);
+  }, [journalId, loadCalendarIndex, calendarIndex]);
 
   /**
    * A day, a month or a year really chosen in the calendar.
@@ -794,13 +841,16 @@ export default function JournalScreen({ navigation }) {
   const revealEntry = useCallback((created) => {
     const key = toDateKey(created?.date || created?.createdAt);
     if (key) setSelectedDate(parseDateKey(key));
-    // The day is its own read now, and choosing the day that is **already** on screen changes
-    // no state, so nothing would re-read it: a memory saved onto today would not appear, and
-    // "a save is always visibly confirmed" is the whole point of this function. A read for the
-    // day being left is harmless -- `dayReadRef` lets only the newest answer through, and the
-    // effect above starts a newer one for the day being arrived at.
-    reloadDay();
-  }, [reloadDay]);
+    // The day and the index are their own reads now, and choosing the day that is **already**
+    // on screen changes no state, so nothing would re-read either: a memory saved onto today
+    // would not appear, and "a save is always visibly confirmed" is the whole point of this
+    // function. The index matters just as much -- a memory saved onto a day that had none has
+    // to make that day a stop for the arrows and a tappable tile in the calendar, which is
+    // what the live feed used to do by itself. A read for the day being left is harmless:
+    // `dayReadRef` lets only the newest answer through, and the effect above starts a newer one
+    // for the day being arrived at.
+    reloadDayAndIndex();
+  }, [reloadDayAndIndex]);
 
   /**
    * One tap from the quick bar into the capture screen, carrying the audience the bar's own
@@ -1194,14 +1244,14 @@ export default function JournalScreen({ navigation }) {
         console.log('[JournalScreen] Liked entry');
       }
 
-      // Both: the feed behind the worklist, and the open day, which is a separate read and
-      // would otherwise go on showing the counts it was drawn with.
+      // The feed behind the worklist, and then the open day and the index, which are separate
+      // reads and would otherwise go on showing the counts they were drawn with.
       await refresh();
-      await reloadDay();
+      await reloadDayAndIndex();
     } catch (error) {
       console.error('[JournalScreen] Failed to react:', error);
     }
-  }, [displayEntries, authUser?.id, refresh, reloadDay]);
+  }, [displayEntries, authUser?.id, refresh, reloadDayAndIndex]);
 
   /**
    * Handle adding a comment/response to an entry
@@ -1228,13 +1278,13 @@ export default function JournalScreen({ navigation }) {
       await CommentsApi.addComment(serverId, text.trim());
       console.log('[JournalScreen] Comment added');
 
-      // The feed and the open day, as above.
+      // The feed, and then the open day and the index, as above.
       await refresh();
-      await reloadDay();
+      await reloadDayAndIndex();
     } catch (error) {
       console.error('[JournalScreen] Failed to add comment:', error);
     }
-  }, [displayEntries, refresh, reloadDay]);
+  }, [displayEntries, refresh, reloadDayAndIndex]);
 
   /**
    * The audience chosen again for a memory whose share the server would not apply (FR-011).
@@ -1270,11 +1320,11 @@ export default function JournalScreen({ navigation }) {
 
     try {
       await JournalService.reshareEntry(localId, visibility);
-      // The feed, and the open day: a re-share is a card action like the two above, and the
-      // card it was tapped on is in the day's own list, which is a separate read. Without this
-      // the card goes on saying "Not shared" about a memory that has just been shared.
+      // The feed, and then the open day and the index: a re-share is a card action like the two
+      // above, and the card it was tapped on is in the day's own list, which is a separate read.
+      // Without this the card goes on saying "Not shared" about a memory just shared.
       await refresh();
-      await reloadDay();
+      await reloadDayAndIndex();
     } catch (error) {
       console.warn('[JournalScreen] the memory could not be shared again', error);
       Alert.alert(
@@ -1286,7 +1336,7 @@ export default function JournalScreen({ navigation }) {
           : 'It is still on this phone and still not shared with anyone. Please try again.',
       );
     }
-  }, [refresh, reloadDay]);
+  }, [refresh, reloadDayAndIndex]);
 
   /**
    * Key extractor
