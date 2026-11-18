@@ -51,16 +51,46 @@ export function formatPeriodDate(date, datePrecision) {
   if (!match) return '';
 
   const [, year, month, day] = match;
-  const monthName = MONTH_NAMES[Number(month) - 1];
-  if (!monthName) return '';
+  // Through the accessor below, rather than reaching into the array a second time: the local
+  // `const monthName` this replaced would now shadow that function, which reads like a bug
+  // even where it is not one.
+  const name = monthName(month);
+  if (!name) return '';
 
   if (datePrecision === 'year') return year;
-  if (datePrecision === 'month') return `${monthName} ${year}`;
+  if (datePrecision === 'month') return `${name} ${year}`;
 
-  return `${Number(day)} ${monthName} ${year}`;
+  return `${Number(day)} ${name} ${year}`;
 }
 
-function daysInMonth(year, month) {
+/**
+ * The name of a month, 1 for January.
+ *
+ * Exported so that nothing else has to keep its own copy of these twelve words: 016's
+ * `calendarModel.js` needs a month name for a day heading ("Thu 5 March"), where
+ * `formatPeriodDate`'s wording carries a year it must not show, and a second copy of the
+ * array is a second thing to keep in step.
+ *
+ * @param {number|string} month 1-12, as a number or as the `'03'` a date key carries
+ * @returns {string} empty for a month that is not one — never a guess, as above.
+ */
+export function monthName(month) {
+  return MONTH_NAMES[Number(month) - 1] || '';
+}
+
+/**
+ * How many days a civil month has, leap years included.
+ *
+ * Exported for the same reason as `monthName`: this is the whole leap rule, including the
+ * century arms that the cheap `year % 4 === 0` version gets wrong for 1900, and the journal
+ * reaches back to scanned photographs, so a century year is a year somebody can pick. 016's
+ * calendar grid asks the same question and must get the same answer.
+ *
+ * @param {number} year
+ * @param {number} month 1-12
+ * @returns {number|undefined} undefined for a month that is not one (unchanged behaviour)
+ */
+export function daysInMonth(year, month) {
   if (month !== 2) return [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
   return leap ? 29 : 28;

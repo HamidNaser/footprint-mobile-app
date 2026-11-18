@@ -27,6 +27,11 @@
  *   node scripts/test-tz.mjs --all       the whole suite in three zones (slower, T010)
  *   node scripts/test-tz.mjs --strict    a listed file that does not exist is a failure
  *
+ * Each run is given a timeout (ten minutes, or `TEST_TZ_TIMEOUT_MS`), because the failure this
+ * script must not have is the quiet one: a jest that hangs would hold the sweep open for ever
+ * and report neither a pass nor a fail. A run that reaches it is killed and counted as a
+ * failure like any other.
+ *
  * `--strict` also sets `CALENDAR_FILES_STRICT=1`, which turns the civil-date grep in
  * `calendarModel.test.js` strict for the same reason: the feature's final run should prove
  * that every file it was meant to read really was read.
@@ -54,6 +59,13 @@ const TEST_TARGETS = [
   'src/components/journal/__tests__/CalendarSheet.a11y.test.js',      // T009
   'src/components/journal/__tests__/CalendarListHeading.a11y.test.js', // T009
 ];
+
+/**
+ * How long one zone's run may take before it is killed and counted as failed. Ten minutes is
+ * far longer than the whole suite needs (about half a minute a zone) and short enough that a
+ * hung run is noticed the same day.
+ */
+const RUN_TIMEOUT_MS = Number(process.env.TEST_TZ_TIMEOUT_MS) || 10 * 60 * 1000;
 
 const flags = process.argv.slice(2);
 const strict = flags.includes('--strict');
@@ -94,6 +106,9 @@ function countsFrom(output) {
     passed: number('passed', tests),
     failed: number('failed', tests),
     skipped: number('skipped', tests),
+    // A file a later task has not written yet is a todo in the guard, not a warning, so the
+    // line only adds up if todos are counted (see `calendarModel.test.js`).
+    todo: number('todo', tests),
     total: number('total', tests),
     suitesPassed: suites ? number('passed', suites) : null,
     suitesFailed: suites ? number('failed', suites) : null,
@@ -129,11 +144,35 @@ function runZone(zone, files) {
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
 
+    // `shell: true` means the child *is* the shell, and killing it does not necessarily take
+    // jest with it -- so on Windows the whole tree goes, by pid.
+    const killTree = () => {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(child.pid), '/f', '/t'], { stdio: 'ignore' });
+      } else {
+        child.kill('SIGKILL');
+      }
+    };
+
+    // The failure this script must not have is the quiet one: a jest that never finishes
+    // would hold the sweep open for ever and report neither a pass nor a fail.
+    const timer = setTimeout(() => {
+      output += `\ntest-tz: killed after ${RUN_TIMEOUT_MS} ms without finishing\n`;
+      killTree();
+      // Resolved here rather than waiting for `close`, so that a child which cannot be killed
+      // cannot hold the sweep open either.
+      resolve({ zone, code: 1, output });
+    }, RUN_TIMEOUT_MS);
+
     child.on('error', (error) => {
+      clearTimeout(timer);
       output += `\n${error.message}\n`;
       resolve({ zone, code: 1, output });
     });
-    child.on('close', (code) => resolve({ zone, code: code ?? 1, output }));
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ zone, code: code ?? 1, output });
+    });
   });
 }
 
@@ -143,8 +182,9 @@ function describeCounts(counts) {
   const suites = counts.suitesPassed === null
     ? ''
     : `; suites ${counts.suitesPassed} passed, ${counts.suitesFailed} failed`;
+  const todo = counts.todo > 0 ? `, ${counts.todo} todo` : '';
   return `${counts.passed} passed, ${counts.failed} failed, `
-    + `${counts.skipped} skipped of ${counts.total}${suites}`;
+    + `${counts.skipped} skipped${todo} of ${counts.total}${suites}`;
 }
 
 async function main() {
@@ -158,7 +198,10 @@ async function main() {
       + `in ${ZONES.join(', ')}`);
   }
 
-  if (missing.length > 0) {
+  // Said only when it bears on what ran: under `--all` the whole suite runs whatever the
+  // target list holds, so listing the files it does not name would be noise. Under `--strict`
+  // it is a failure either way, so it is still said.
+  if (missing.length > 0 && (!whole || strict)) {
     console.log('');
     console.log(`${strict ? 'MISSING' : 'Not written yet'} (${missing.length}):`);
     missing.forEach((target) => console.log(`  - ${target}`));

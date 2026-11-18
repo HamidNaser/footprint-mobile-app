@@ -24,6 +24,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  dayKeyOf,
   daysInMonth,
   monthKey,
   monthGrid,
@@ -37,7 +38,9 @@ import {
   buildRows,
   filterRange,
 } from '../calendarModel';
-import { formatPeriodDate } from '../periodDate';
+// Imported to state a contract, not because `calendarModel` uses it: the fallback below must
+// place a dateless memory on the same day the Journal's own helper would.
+import { toDateKey } from '../journalDate';
 
 /**
  * An entry as `DatabaseService._mapEntryRow` returns one, cut down to the fields the model
@@ -81,6 +84,61 @@ describe('monthKey', () => {
     expect(monthKey(2026, 3)).toBe('2026-03');
     expect(monthKey(2026, 11)).toBe('2026-11');
     expect(['2026-11', '2026-03'].sort()).toEqual(['2026-03', '2026-11']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dayKeyOf: the one answer to "which civil day is this memory on"
+// ---------------------------------------------------------------------------
+
+describe('dayKeyOf', () => {
+  it('passes a civil date straight through, from a string or from an entry', () => {
+    expect(dayKeyOf('2026-03-05')).toBe('2026-03-05');
+    expect(dayKeyOf(entry('e', '2026-03-05', '1'))).toBe('2026-03-05');
+  });
+
+  /**
+   * SC-004, at the root: a stored date that carries a time lands on the day its own key
+   * names, in every zone. `2026-03-05T23:30:00Z` read as an instant is the 6th in Auckland
+   * and `2026-03-01T00:30:00Z` is 28 February in Los Angeles -- which is why this reads the
+   * leading `YYYY-MM-DD` and stops, exactly as T003's SQL does with `substr(date, 1, 10)`.
+   */
+  it('SC-004: takes the day part of a date carrying a time, never parsing it', () => {
+    expect(dayKeyOf('2026-03-05T23:30:00.000Z')).toBe('2026-03-05');
+    expect(dayKeyOf(entry('e', '2026-03-01T00:30:00.000Z', '1'))).toBe('2026-03-01');
+    expect(dayKeyOf('2026-03-05 23:30:00')).toBe('2026-03-05');
+  });
+
+  /**
+   * The defensive path: `date` is `NOT NULL` in the local schema, so this cannot happen to a
+   * row out of the database -- but a memory listed nowhere would break FR-005's "every memory
+   * of that month" and FR-010's "every memory the phone holds" absolutely, and the created
+   * time is the one other thing that says when. `createdAt` really is an instant, so it is
+   * resolved as one -- and to the same day the Journal's own `toDateKey` resolves it to, so a
+   * month list and the day feed agree about where it goes.
+   */
+  it('falls back to the created day when there is no stored date, as toDateKey would', () => {
+    const created = '2026-03-15T12:00:00.000Z';
+
+    expect(dayKeyOf(entry('e', null, created))).toBe(toDateKey(created));
+    expect(dayKeyOf(entry('e', '', created))).toBe(toDateKey(created));
+    expect(dayKeyOf(entry('e', '   ', created))).toBe(toDateKey(created));
+    // Epoch milliseconds, which a local row may hold instead.
+    expect(dayKeyOf(entry('e', null, 1773576000000))).toBe(toDateKey(1773576000000));
+  });
+
+  it('prefers the stored date, and only falls back when there is none', () => {
+    // A created time four days later must not move the memory off the day it is dated.
+    expect(dayKeyOf(entry('e', '2026-03-05', '2026-03-09T09:00:00.000Z'))).toBe('2026-03-05');
+  });
+
+  it('answers null when nothing at all says which day it is', () => {
+    expect(dayKeyOf(null)).toBeNull();
+    expect(dayKeyOf(undefined)).toBeNull();
+    expect(dayKeyOf(17)).toBeNull();
+    expect(dayKeyOf('sometime in March')).toBeNull();
+    expect(dayKeyOf(entry('e', null, null))).toBeNull();
+    expect(dayKeyOf(entry('e', 'sometime', 'whenever'))).toBeNull();
   });
 });
 
@@ -460,14 +518,6 @@ describe('buildRows: a month', () => {
     expect(entryIds(rows)).toEqual(['e-day', 'e-rough']);
   });
 
-  // The same words `periodDate.js` already uses for a month-precision date, so a heading and
-  // the date line on the card beneath it can never read differently.
-  it('words the month-only heading exactly as formatPeriodDate does', () => {
-    const { rows } = buildRows([entry('e', '2026-03-01', '1', 'month')], march);
-
-    expect(rows[0].label).toBe(formatPeriodDate('2026-03-01', 'month'));
-  });
-
   it('keys an entry row by its localId and a heading row by its own period (R8)', () => {
     const { rows } = buildRows(entries, march);
 
@@ -486,10 +536,9 @@ describe('buildRows: a month', () => {
 
   // R8: only month headings stick, and a month list has none of those.
   it('R8: a month list has no sticky rows -- a day heading never sticks', () => {
-    const { stickyIndices, headingKeys } = buildRows(entries, march);
+    const { stickyIndices } = buildRows(entries, march);
 
     expect(stickyIndices).toEqual([]);
-    expect(headingKeys).toEqual([]);
   });
 
   it('leaves out anything that is not this month', () => {
@@ -519,17 +568,45 @@ describe('buildRows: a month', () => {
   });
 
   it('is an empty list for a month with nothing in it, never a bare heading', () => {
-    expect(buildRows([], march)).toEqual({ rows: [], stickyIndices: [], headingKeys: [] });
+    expect(buildRows([], march)).toEqual({ rows: [], stickyIndices: [] });
   });
 
-  it('skips an entry with no usable date rather than inventing a day for it', () => {
+  it('leaves out an entry only when nothing at all says which day it is on', () => {
     const { rows } = buildRows([
-      entry('e-nodate', null, '1'),
-      entry('e-junk', 'sometime in March', '2'),
+      entry('e-nothing', null, null),
+      entry('e-junk', 'sometime in March', 'whenever'),
       entry('e-good', '2026-03-05', '3'),
     ], march);
 
     expect(entryIds(rows)).toEqual(['e-good']);
+  });
+
+  // The defensive path, in a list: a memory with no stored date is listed on the day it was
+  // created rather than listed nowhere (FR-005, FR-010; see `dayKeyOf`). Mid-month and
+  // mid-day, so it is in March in all three of test-tz's zones; the day it lands on is
+  // asserted as `toDateKey`'s answer rather than written out, which would move with the zone.
+  it('FR-005/FR-010: lists an entry with no stored date on its created day', () => {
+    const created = '2026-03-15T12:00:00.000Z';
+    const { rows } = buildRows([entry('e-fallback', null, created)], march);
+
+    expect(entryIds(rows)).toEqual(['e-fallback']);
+    expect(rows[0].kind).toBe('dayHeading');
+    expect(rows[0].key).toBe(toDateKey(created));
+  });
+
+  /**
+   * The same refusal `neighbourMonth` and `neighbourYear` make. An index key is four digits
+   * wide and compared as a string, so a year that cannot be compared against one is refused
+   * rather than answered -- and refused the same way whichever function is asked, because an
+   * empty list reads on screen as "this month holds nothing", which is a different claim.
+   */
+  it('refuses a year too narrow to compare, as the neighbour functions do', () => {
+    const ancient = [entry('e', '0999-03-05', '1')];
+
+    expect(buildRows(ancient, { kind: 'month', year: 999, month: 3 }))
+      .toEqual({ rows: [], stickyIndices: [] });
+    expect(buildRows(ancient, { kind: 'year', year: 999 }))
+      .toEqual({ rows: [], stickyIndices: [] });
   });
 
   // Day mode is the Journal's own feed, drawn exactly as today (FR-004): no headings, so no
@@ -566,12 +643,14 @@ describe('buildRows: a year', () => {
    * order, plus a final "YYYY, month not known" heading when needed."*
    */
   it('FR-006: one heading per month with memories, in calendar order, the rough one last', () => {
-    const { rows, headingKeys } = buildRows(entries, year2026);
+    const { rows, stickyIndices } = buildRows(entries, year2026);
 
     expect(rows.filter((row) => row.kind === 'monthHeading').map((row) => row.label))
       .toEqual(['March 2026', 'July 2026', '2026, month not known']);
-    // The order T007 reads to open the first heading (FR-006).
-    expect(headingKeys).toEqual(['2026-03', '2026-07', '2026:rough']);
+    // The heading rows in list order, which is also how T007 finds the one to open when a
+    // year is picked: `rows[stickyIndices[0]].key` (FR-006).
+    expect(stickyIndices.map((i) => rows[i].key)).toEqual(['2026-03', '2026-07', '2026:rough']);
+    expect(rows[stickyIndices[0]].key).toBe('2026-03');
   });
 
   it('FR-007: a month heading carries its own count', () => {
@@ -634,10 +713,10 @@ describe('buildRows: a year', () => {
   });
 
   it('FR-006: leaves the final heading out when every memory has a month', () => {
-    const { rows, headingKeys } = buildRows([entries[0], entries[1]], year2026);
+    const { rows, stickyIndices } = buildRows([entries[0], entries[1]], year2026);
 
     expect(labels(rows)).toEqual(['March 2026', 'July 2026']);
-    expect(headingKeys).toEqual(['2026-03', '2026-07']);
+    expect(stickyIndices.map((i) => rows[i].key)).toEqual(['2026-03', '2026-07']);
   });
 
   /**
@@ -665,7 +744,7 @@ describe('buildRows: a year', () => {
   });
 
   it('is an empty list for a year with nothing in it', () => {
-    expect(buildRows([], year2026)).toEqual({ rows: [], stickyIndices: [], headingKeys: [] });
+    expect(buildRows([], year2026)).toEqual({ rows: [], stickyIndices: [] });
   });
 });
 
@@ -914,20 +993,33 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
     expect(offendingLines('const d = new Date(year, month - 1, day);', 'sample.js')).toEqual([]);
   });
 
-  GUARDED_FILES.forEach((relative) => {
+  const scanned = GUARDED_FILES.filter((file) => fs.existsSync(path.join(ROOT, file)));
+  const notYetWritten = GUARDED_FILES.filter((file) => !fs.existsSync(path.join(ROOT, file)));
+
+  scanned.forEach((relative) => {
     it(`${relative} parses no date string as an instant`, () => {
-      const full = path.join(ROOT, relative);
+      const text = fs.readFileSync(path.join(ROOT, relative), 'utf8');
 
-      if (!fs.existsSync(full)) {
-        if (strict) {
-          throw new Error(`${relative} does not exist (CALENDAR_FILES_STRICT=1)`);
-        }
-        // Written by a later task of 016. Reported, not silently passed over.
-        console.warn(`civil-date guard: ${relative} not written yet, not scanned`);
-        return;
-      }
-
-      expect(offendingLines(fs.readFileSync(full, 'utf8'), relative)).toEqual([]);
+      expect(offendingLines(text, relative)).toEqual([]);
     });
+  });
+
+  /**
+   * A file a later task of 016 has not written yet.
+   *
+   * `it.todo` rather than a passing test with a `console.warn`: jest reports it as a todo in
+   * its own summary, which says "not scanned yet" exactly as plainly, while leaving a normal
+   * run's output clean -- three warnings in `npx jest` became nine in `node
+   * scripts/test-tz.mjs`, and noise in a test run is how real warnings come to be ignored.
+   * Under `--strict` (T010's run) the same file is a failing test instead.
+   */
+  notYetWritten.forEach((relative) => {
+    if (strict) {
+      it(`${relative} parses no date string as an instant`, () => {
+        throw new Error(`${relative} does not exist (CALENDAR_FILES_STRICT=1)`);
+      });
+      return;
+    }
+    it.todo(`${relative} parses no date string as an instant (not written yet)`);
   });
 });

@@ -10,13 +10,21 @@
  * uses, and the trap its header describes. `src/utils/__tests__/calendarModel.test.js`
  * greps this file to keep it that way.
  *
- * No React, no database, no imports: one responsibility, which is to turn calendar arithmetic
- * and the calendar index into plain data that a screen, the sheet or a list can read. The
- * phone's own module, deliberately: the web's feature-014 equivalent is a reference, never a
- * dependency, and nothing is shared between the two.
+ * No React, no database: one responsibility, which is to turn calendar arithmetic and the
+ * calendar index into plain data that a screen, the sheet or a list can read. The phone's own
+ * module, deliberately: the web's feature-014 equivalent is a reference, never a dependency,
+ * and nothing is shared between the two.
+ *
+ * Its one import is `periodDate.js`, which is pure, dependency-free and sits in this same
+ * directory. It is the canonical home of the twelve month names and of the leap rule, and a
+ * second copy of either here would be a second thing to keep in step -- so `daysInMonth` is
+ * re-exported from there rather than rewritten, and the month wording comes from there too.
+ * The dependency runs in one direction only, `calendarModel` → `periodDate`, so there is no
+ * cycle.
  *
  * Who reads what:
  *
+ *   `dayKeyOf`                                  which civil day an entry is on (T005-T007)
  *   `daysInMonth`, `monthGrid`, `monthKey`      the sheet's Date view (T004)
  *   `stepMonth`, `stepYear`, `stepWindow`,
  *   `windowStartFor`                            the sheet's ◄ ► (T004)
@@ -27,21 +35,28 @@
  *
  * Days are **not** stepped here: `journalDate.adjacentDateKey` already does that, and it is
  * the one place that answers it (research R7). Months and years are what it cannot take.
+ *
+ * ⚠ **`dayKeyOf` is deliberately not `journalDate.toDateKey`.** The two agree on a plain
+ * `YYYY-MM-DD` and disagree on a date that carries a time: `toDateKey` falls through to
+ * `new Date(value)` and then reads the device's *local* calendar parts, so
+ * `2026-03-05T23:30:00Z` is the 5th in London and the 6th in Auckland -- the stored day moves
+ * with the reader. This module takes the leading `YYYY-MM-DD` and stops, which is the
+ * zone-stable answer FR-011 and SC-004 require, and the same answer T003's SQL gives with
+ * `substr(date, 1, 10)` ("a test row holding a full ISO instant still lands on the day its
+ * key names"). So the calendar, the lists and the queries all place a memory on one day, and
+ * `dayKeyOf` is exported so that Tasks 5-7 ask this module rather than reaching for
+ * `toDateKey` and getting the other answer.
  */
 
-const MONTH_NAMES = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
+import { daysInMonth, monthName, formatPeriodDate } from './periodDate';
 
 /**
  * Fixed names rather than a formatted date, for the same reason `periodDate.js` keeps its
- * own: a heading read out of the device's locale would change wording from phone to phone,
- * and FR-005 words these headings exactly ("Thu 5 March").
+ * month names: a heading read out of the device's locale would change wording from phone to
+ * phone, and FR-005 words these headings exactly ("Thu 5 March"). `periodDate` has no
+ * weekdays of its own -- it never needs one -- so this is the only list here.
  */
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-const DAY_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 /** The leading civil date of a day key or of a full instant -- the day part, and no more. */
 const DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})/;
@@ -52,19 +67,67 @@ const ROUGH_SUFFIX = ':rough';
 const pad2 = (n) => String(n).padStart(2, '0');
 
 /**
- * The civil day a stored date names, as `YYYY-MM-DD`, or null when it names none.
+ * The civil day a stored date names: its leading `YYYY-MM-DD` and nothing else.
  *
  * A stored date may carry a time (an older row, or a server value), and the day part is the
  * only part that says which day it was. Taking it with a regex rather than by parsing is the
  * whole point: `2026-03-05T23:30:00Z` parsed as an instant is the 6th in Auckland.
  */
-function dayKeyOf(value) {
+function keyFromDate(value) {
   if (typeof value !== 'string') return null;
   const match = value.trim().match(DAY_KEY);
   return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
 }
 
-/** How much of an entry's date is real. A missing precision is a day, as everywhere else. */
+/**
+ * The civil day an **instant** falls on, from the device's local calendar parts -- exactly
+ * what `journalDate.toDateKey` does with an instant, and for the same reason: when all that
+ * is known is a moment in time, the reader's own day is the best answer available.
+ *
+ * This is only ever asked of `createdAt`, which really is an instant. A stored `date` is a
+ * civil day and is never read this way: that is the drift the module exists to prevent.
+ */
+function keyFromInstant(value) {
+  if (value == null || value === '') return null;
+
+  const at = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+
+  return `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}`;
+}
+
+/**
+ * Which civil day something is on, as `YYYY-MM-DD`, or null when nothing says.
+ *
+ * Takes either a stored date string (`'2026-03-05'`, or one carrying a time) or a whole
+ * entry. For an entry the stored `date` is the answer; only if it is missing or empty does
+ * it fall back to the civil day of `createdAt`. The fallback is defensive -- `date` is
+ * `NOT NULL` in the local schema (`src/database/schema.js`), so an entry without one cannot
+ * come out of the database -- but it is the difference between a memory that is listed
+ * somewhere and one that is listed nowhere, and FR-005 ("every memory of that month") and
+ * FR-010 ("every memory the phone holds") are both absolute.
+ *
+ * **This is the one answer** to "which day is this memory on": exported so Tasks 5-7 ask
+ * here rather than reaching for `journalDate.toDateKey`, which answers differently for a date
+ * carrying a time -- see the ⚠ paragraph in this file's header.
+ */
+export function dayKeyOf(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return keyFromDate(value);
+  if (typeof value !== 'object') return null;
+
+  return keyFromDate(value.date) ?? keyFromInstant(value.createdAt);
+}
+
+/**
+ * How much of an entry's date is real. A missing precision is a day, as everywhere else.
+ *
+ * Read only under the camelCase name an entry mapped by `DatabaseService._mapEntryRow`
+ * carries. The raw SQL spelling (`date_precision`) is deliberately *not* accepted here, so
+ * that a caller handing raw rows where mapped entries belong fails visibly rather than
+ * having every rough-dated memory read as day-dated. `buildIndex` is the one function that
+ * takes raw index rows, and it is the one that accepts both spellings.
+ */
 function precisionOf(entry) {
   return (entry && entry.datePrecision) || 'day';
 }
@@ -88,21 +151,15 @@ function compareCreated(a, b) {
 // ---------------------------------------------------------------------------
 
 /**
- * How many days a civil month has, leap years included.
+ * How many days a civil month has, leap years included -- `periodDate.daysInMonth`, re-exported
+ * rather than rewritten.
  *
- * The whole leap rule, not the cheap version of it: `year % 4 === 0` is right for 2024 and
- * wrong for 1900, and the journal reaches back to scanned photographs, so a century year is
- * a year somebody can pick.
+ * It is the same question `periodDate` already answers when it validates a typed-in date, and
+ * the whole leap rule (the century arms included) is the kind of thing that must have one home:
+ * two copies agree until the day one of them is corrected. Re-exported under this name because
+ * it is the name T002's brief gives the calendar's own interface, so Tasks 3-9 read it here.
  */
-export function daysInMonth(year, month) {
-  if (!Number.isInteger(month) || month < 1 || month > 12) return 0;
-
-  if (month === 2) {
-    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-    return leap ? 29 : 28;
-  }
-  return DAY_LENGTHS[month - 1];
-}
+export { daysInMonth };
 
 /** A month as `YYYY-MM`. Padded, so keys sort chronologically as plain strings. */
 export function monthKey(year, month) {
@@ -118,7 +175,9 @@ export function monthKey(year, month) {
  * steps through the months.
  */
 export function monthGrid(year, month) {
-  const total = daysInMonth(year, month);
+  // `|| 0` because `periodDate.daysInMonth` answers `undefined` for a month that is not one,
+  // and a grid is still six rows of blanks rather than a crash.
+  const total = daysInMonth(year, month) || 0;
 
   // Numeric parts: a local calendar day, which is what `getDay()` may be asked about. A
   // date *string* here is the defect this module exists to prevent.
@@ -202,10 +261,18 @@ const emptyIndex = () => ({
  * month. `roughMonths` and `roughYears` are kept apart rather than folded in because the
  * sheet needs a period's whole count *and* how much of it is only roughly dated.
  *
- * A row with no usable day, an unrecognised precision, or no count above zero is **ignored**
- * rather than guessed at: a day entered with a count of zero would mark a tile as holding
- * memories it does not hold (FR-010). Anything that is not an array of rows reads as no rows
- * at all, so the index is always ready, even before anything has loaded.
+ * A row with no usable day, or no count above zero, is **ignored** rather than guessed at: a
+ * day entered with a count of zero would mark a tile as holding memories it does not hold
+ * (FR-010). Anything that is not an array of rows reads as no rows at all, so the index is
+ * always ready, even before anything has loaded.
+ *
+ * **An unrecognised precision is dropped too**, which means a memory stored with one is
+ * counted nowhere and so is reachable from nowhere in the calendar. That is deliberate and
+ * it is the fail-closed choice: there are only three precisions -- the spec defines no fourth,
+ * and `periodDate.parsePeriodDate` can emit no fourth -- so a row carrying one is a row this
+ * module does not understand, and placing it on a day, a month or a year of this module's
+ * choosing would be inventing what somebody knows about their own memory. If a fourth
+ * precision is ever added, this is where it is taught.
  *
  * Both spellings of the two fields are read -- `day`/`date` and `precision`/`date_precision`
  * -- because the SQL column is `date_precision`, and a precision this failed to read would
@@ -344,17 +411,20 @@ function dayHeadingLabel(key) {
 
   // Numeric parts again: the weekday of a local calendar day, never of an instant.
   const weekday = WEEKDAY_NAMES[new Date(year, month - 1, day).getDay()];
-  return `${weekday} ${day} ${MONTH_NAMES[month - 1]}`;
+  return `${weekday} ${day} ${monthName(month)}`;
 }
 
 /**
  * "March 2026" -- FR-005's heading for a month's month-only memories, and FR-006's heading
- * for a month of a year. The same words `periodDate.formatPeriodDate` gives a
- * month-precision date, so a heading and the date line on the card beneath it cannot read
- * differently; FR-014's spoken label ("March 2026, 4 memories, open") names the year too.
+ * for a month of a year.
+ *
+ * `periodDate.formatPeriodDate` of a month-precision date, which is those exact words, so a
+ * heading and the date line on the card beneath it cannot read differently and there is no
+ * second wording to keep in step (the web's 014 model calls it the same way). FR-014's spoken
+ * label ("March 2026, 4 memories, open") names the year too.
  */
 function monthHeadingLabel(key) {
-  return `${MONTH_NAMES[Number(key.slice(5, 7)) - 1]} ${key.slice(0, 4)}`;
+  return formatPeriodDate(`${key}-01`, 'month');
 }
 
 /** FR-006's final heading, for the memories of a year whose month nobody knows. */
@@ -362,11 +432,11 @@ function roughYearHeadingLabel(year) {
   return `${year}, month not known`;
 }
 
-const emptyRows = () => ({ rows: [], stickyIndices: [], headingKeys: [] });
+const emptyRows = () => ({ rows: [], stickyIndices: [] });
 
 /** An entry with the civil day and the precision it is to be placed by, or null. */
 function place(entry) {
-  const key = dayKeyOf(entry && entry.date);
+  const key = dayKeyOf(entry);
   return key ? { entry, key, precision: precisionOf(entry) } : null;
 }
 
@@ -416,7 +486,11 @@ function rowsForMonth(placed, key) {
 /** A month list: day headings and cards, and nothing sticky (R8). */
 function monthRows(placed, period) {
   const { year, month } = period;
-  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+  // The same refusal `neighbourMonth` makes, for the same reason: a year this module cannot
+  // compare against its own four-digit keys is refused, not answered. Answering an empty
+  // list where the neighbour functions refuse outright would be the worse of the two, because
+  // an empty month reads on screen as a month with nothing in it.
+  if (!fourDigitYear(year) || !Number.isInteger(month) || month < 1 || month > 12) {
     return emptyRows();
   }
 
@@ -428,7 +502,7 @@ function monthRows(placed, period) {
   const mine = placed.filter((p) => p.key.slice(0, 7) === key
     && (p.precision === 'day' || p.precision === 'month'));
 
-  return { rows: rowsForMonth(mine, key), stickyIndices: [], headingKeys: [] };
+  return { rows: rowsForMonth(mine, key), stickyIndices: [] };
 }
 
 /**
@@ -436,13 +510,13 @@ function monthRows(placed, period) {
  * "YYYY, month not known" heading when there is anything to put under it (FR-006). An open
  * heading is followed by its month's own rows; a closed one by nothing.
  *
- * `stickyIndices` holds the month heading rows **only**, so a day heading never sticks (R8),
- * and `headingKeys` is the headings in the order they appear -- which is how T007 knows which
- * one to open when a year is picked (FR-006: the first heading is open).
+ * `stickyIndices` holds the month heading rows **only**, so a day heading never sticks (R8).
+ * It also answers "which heading is first": `rows[stickyIndices[0]].key` is the one a year
+ * opens with (FR-006).
  */
 function yearRows(placed, period, open) {
   const { year } = period;
-  if (!Number.isInteger(year)) return emptyRows();
+  if (!fourDigitYear(year)) return emptyRows();
 
   const mine = placed.filter((p) => p.key.slice(0, 4) === String(year));
 
@@ -462,13 +536,17 @@ function yearRows(placed, period, open) {
 
   const rows = [];
   const stickyIndices = [];
-  const headingKeys = [];
 
+  /**
+   * `children` is a function, not an array: a closed heading's rows are never built. A year
+   * of twelve months rebuilds its rows on every toggle of `openMonths`, and building the day
+   * headings of eleven closed months each time -- a `Date` apiece -- is work whose result is
+   * thrown away. SC-005 asks for 300 memories without visible stutter.
+   */
   const pushHeading = (heading, children) => {
     stickyIndices.push(rows.length);
-    headingKeys.push(heading.key);
     rows.push(heading);
-    if (heading.open) rows.push(...children);
+    if (heading.open) rows.push(...children());
   };
 
   [...byMonth.keys()].sort().forEach((key) => {
@@ -479,16 +557,11 @@ function yearRows(placed, period, open) {
       label: monthHeadingLabel(key),
       count: group.length,
       open: open.has(key),
-    }, rowsForMonth(group, key));
+    }, () => rowsForMonth(group, key));
   });
 
   if (rough.length > 0) {
     const key = `${year}${ROUGH_SUFFIX}`;
-    // No day headings under this one: the day is exactly what nobody knows. Oldest first by
-    // created time, the only order these memories have.
-    const cards = rough
-      .sort((a, b) => compareCreated(a.entry.createdAt, b.entry.createdAt))
-      .map(entryRow);
 
     pushHeading({
       kind: 'monthHeading',
@@ -496,10 +569,14 @@ function yearRows(placed, period, open) {
       label: roughYearHeadingLabel(year),
       count: rough.length,
       open: open.has(key),
-    }, cards);
+    // No day headings under this one: the day is exactly what nobody knows. Oldest first by
+    // created time, the only order these memories have.
+    }, () => rough
+      .sort((a, b) => compareCreated(a.entry.createdAt, b.entry.createdAt))
+      .map(entryRow));
   }
 
-  return { rows, stickyIndices, headingKeys };
+  return { rows, stickyIndices };
 }
 
 /** The open month keys, however the caller holds them. Nothing given is nothing open. */
@@ -509,8 +586,7 @@ function openSet(openMonths) {
 }
 
 /**
- * The flat rows of a month or year list (research R8), as
- * `{ rows, stickyIndices, headingKeys }`.
+ * The flat rows of a month or year list (research R8), as `{ rows, stickyIndices }`.
  *
  * One flat list rather than a section list, because a card's map pin scrolls by row index
  * (`scrollPieceIntoView`) and a `SectionList` has no `scrollToIndex` at all. So every row
@@ -523,10 +599,17 @@ function openSet(openMonths) {
  *
  * Nothing is returned for a day pick, or for no pick at all: a day is the Journal's own feed,
  * drawn exactly as it is today, and FR-005 puts the headings in month and year lists only.
- * An entry with no usable date is left out rather than placed on a day it never named.
+ * Each entry is placed on `dayKeyOf`'s answer -- its stored date, or failing that the day it
+ * was created -- and is left out only when nothing at all says which day it is on.
  *
  * `openMonths` is a `Set` (or an array) of heading keys, and belongs to the screen, not here
- * -- including which one is open when a year is first picked (FR-006).
+ * -- including which one is open when a year is first picked (FR-006), which is
+ * `rows[stickyIndices[0]].key`.
+ *
+ * **`entries`** are entries as `DatabaseService._mapEntryRow` returns them: `localId`, `date`,
+ * `datePrecision`, `createdAt`. Raw database rows do not belong here -- their `date_precision`
+ * would read as a missing precision, which is a day, and every rough-dated memory would be
+ * listed as one of a day's. `buildIndex` is the one function that takes raw rows.
  */
 export function buildRows(entries, picked, openMonths) {
   if (!picked || typeof picked !== 'object') return emptyRows();
@@ -565,6 +648,9 @@ export function buildRows(entries, picked, openMonths) {
  *   (FR-016's placement); an empty list means none, exactly as SQL's `IN ()` matches nothing.
  * - Two memories that cannot be told apart keep the order they were given, in either
  *   direction, and the array handed in is never sorted in place.
+ * - **`entries`** are entries as `DatabaseService._mapEntryRow` returns them (`localId`,
+ *   `date`, `datePrecision`, `createdAt`), as `buildRows` takes them -- not raw database rows,
+ *   whose `date_precision` this would read as no precision at all, which is a day.
  */
 export function filterRange(entries, fromKey, toKey, precisions, order) {
   const from = dayKeyOf(fromKey);
@@ -577,7 +663,7 @@ export function filterRange(entries, fromKey, toKey, precisions, order) {
   entries.forEach((entry, given) => {
     if (!entry) return;
 
-    const key = dayKeyOf(entry.date);
+    const key = dayKeyOf(entry);
     if (!key || key < from || key > to) return;
     if (allowed && !allowed.has(precisionOf(entry))) return;
 
