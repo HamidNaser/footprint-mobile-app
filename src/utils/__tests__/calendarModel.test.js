@@ -964,6 +964,13 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
     'src/utils/__tests__/calendarModel.test.js',
     'src/components/journal/CalendarSheet.js',
     'src/components/journal/CalendarSheet.web.js',
+    // T004's fix round 1 moved the calendar itself out of the two platform entry points, which
+    // are now ~15-line wrappers, and into one shared body. **That is the file the civil-date
+    // rule has to cover**: `civilDay`, the day keys and every comparison between them live
+    // there now, so a list naming only the two wrappers would be scanning the files that hold
+    // no dates and leaving the one that does unguarded. The two wrappers stay listed: they cost
+    // nothing to scan, and a date appearing in one of them would be as wrong as anywhere else.
+    'src/components/journal/CalendarSheetBody.js',
     'src/components/journal/CalendarListHeading.js',
     'src/screens/JournalScreen.js',
     'src/services/DatabaseService.js',

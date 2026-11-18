@@ -10,13 +10,14 @@
  *
  * Six things this file is deliberately careful about.
  *
- * 1. **Every behavioural test runs against both variants.** `CalendarSheet.js` and
- *    `CalendarSheet.web.js` are two files by the repository's platform convention (metro
- *    resolves `.web.js` itself -- see `CalendarPickerModal.js`'s header), and two files are two
- *    things to keep in step. So the suite is parameterised over both and asserts the same
- *    behaviour of each, which is what makes a change to one and not the other fail here rather
- *    than on somebody's phone. `npm test` runs one platform, so the web file is imported by its
- *    own path; nothing else in the suite knows which it has.
+ * 1. **The calendar is swept once, and the two platform entry points are tested for what they
+ *    actually decide.** It was swept twice, against `CalendarSheet.js` and `CalendarSheet.web.js`
+ *    in turn, while those were a copy of the component each. Fix round 1 measured them: 42 lines
+ *    differed and five were code. So the calendar now lives in `CalendarSheetBody.js`, which this
+ *    file sweeps once, and the two entry points are ~15-line wrappers passing two platform facts
+ *    -- which get two tests of their own at the foot of this file. That is the asymmetry the old
+ *    arrangement had backwards: seventy assertions ran twice to prove sameness, and **nothing at
+ *    all** covered the two lines that genuinely differed.
  *
  * 2. **The component reports upward exactly twice, and never both at once.** `onPick` when a
  *    day, a month or a year is really chosen; `onClose` when the sheet is dismissed with nothing
@@ -35,10 +36,12 @@
  *    looks faded (its own colour, not the ink colour) and a tap on it does nothing at all. A
  *    test that only read `disabled` would pass on a tile that was disabled and still fired.
  *
- * 5. **SC-001 is counted, not asserted to be "reachable".** Each of the twelve years in the
- *    window is reached, with the months at both ends of a year and in the middle of it, and the
- *    test counts the taps it took and requires four or fewer. A test that merely arrived would
- *    pass on a calendar that took nine taps to get there.
+ * 5. **SC-001's route is read off the calendar rather than written down here.** The tap count
+ *    was a tautology in the first draft: four unconditional taps, then an assertion that four is
+ *    at most four, under a comment claiming it would catch nine. It now asks the sheet what it is
+ *    showing before each step and taps only what is still needed, so the count genuinely varies
+ *    -- the month already on screen costs **none** -- and "at most four" is a bound the UI's own
+ *    state has to satisfy rather than a sum this file controls.
  *
  * 6. **Nothing here builds a `Date` from a date string.** The sheet is held to it by the grep
  *    guard in `src/utils/__tests__/calendarModel.test.js`, which this file's two subjects switch
@@ -46,12 +49,15 @@
  *    strings and numeric parts throughout.
  */
 
-jest.setTimeout(60000);
+// Comfortably above the slowest test here (the six-mount SC-001 sweep, well under a second) and
+// well below jest's own patience, so a loaded machine does not turn a pass into a flake.
+jest.setTimeout(15000);
 
 import React from 'react';
-import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { Animated, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 
+import CalendarSheetBody, { CALENDAR_SHEET_COLOURS } from '../CalendarSheetBody';
 import CalendarSheetNative, { CALENDAR_SHEET_COLOURS as NATIVE_COLOURS } from '../CalendarSheet';
 import CalendarSheetWeb, { CALENDAR_SHEET_COLOURS as WEB_COLOURS } from '../CalendarSheet.web';
 import { buildIndex, monthKey, windowStartFor } from '../../../utils/calendarModel';
@@ -106,6 +112,9 @@ afterEach(() => {
     }
   }
   jest.clearAllMocks();
+  // The two platform tests spy on `Animated.timing`; without this the next test in the file
+  // would inherit the spy.
+  jest.restoreAllMocks();
 });
 
 /**
@@ -177,6 +186,12 @@ const textOf = (tree, testID) => textsIn(anyNode(tree, testID)).join(' ');
 const styleOf = (tree, testID) => StyleSheet.flatten(control(tree, testID).props.style);
 
 /**
+ * The same, for anything that is not a control: the sheet itself is an `Animated.View`, and its
+ * style is where the slide's `translateY` and the web's width cap both land.
+ */
+const styleOfAny = (tree, testID) => StyleSheet.flatten(anyNode(tree, testID).props.style);
+
+/**
  * The style of the text *inside* a tile, which is where a faded day's colour lives: the tile
  * keeps its shape and its number goes pale, rather than the whole circle washing out.
  */
@@ -193,15 +208,13 @@ const dayTileIds = (tree) =>
     .filter((id) => typeof id === 'string' && id.startsWith('calendar-day-'));
 
 // ---------------------------------------------------------------------------
-// The two variants, held to the same behaviour
+// The calendar itself
 // ---------------------------------------------------------------------------
 
-const VARIANTS = [
-  ['native', CalendarSheetNative, NATIVE_COLOURS],
-  ['web', CalendarSheetWeb, WEB_COLOURS],
-];
+const Sheet = CalendarSheetBody;
+const COLOURS = CALENDAR_SHEET_COLOURS;
 
-describe.each(VARIANTS)('CalendarSheet (%s)', (_name, Sheet, COLOURS) => {
+describe('CalendarSheet', () => {
   // -------------------------------------------------------------------------
   // Opening -- spec scenario 1, FR-001
   // -------------------------------------------------------------------------
@@ -274,6 +287,38 @@ describe.each(VARIANTS)('CalendarSheet (%s)', (_name, Sheet, COLOURS) => {
       expect(textOf(tree, 'calendar-month-header')).toContain('November');
       expect(control(tree, dayId('2026-11-05')).props.accessibilityState.selected).toBe(true);
       expect(styleOf(tree, dayId('2026-11-18')).borderColor).toBe(COLOURS.today);
+    });
+
+    it('arrives as a sheet from the bottom of the screen (FR-001)', async () => {
+      // The headline requirement of the whole task, and the one nothing asserted in the first
+      // round. `Animated.timing` is stubbed rather than left to run, so that the sheet is caught
+      // at the start of its travel and the assertion is the same on every machine.
+      const start = jest.fn();
+      const timing = jest.spyOn(Animated, 'timing').mockReturnValue({ start });
+
+      const tree = await mount(Sheet);
+
+      // The modal is see-through and does none of its own animating, so what is behind it still
+      // shows through the dim and the sheet is free to travel on its own.
+      const modal = tree.root.findByType(Modal);
+      expect(modal.props.transparent).toBe(true);
+      expect(modal.props.animationType).toBe('none');
+
+      // Its contents are held against the bottom edge of the screen.
+      const bottomed = tree.root.findAllByType(View).filter((node) => {
+        const flat = StyleSheet.flatten(node.props.style) || {};
+        return flat.justifyContent === 'flex-end' && flat.flex === 1;
+      });
+      expect(bottomed.length).toBeGreaterThan(0);
+
+      // And it travels up to that edge rather than appearing there: at the start of the
+      // animation it sits a whole sheet-height below where it comes to rest.
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(timing.mock.calls[0][1]).toMatchObject({ toValue: 1 });
+
+      const sheet = styleOfAny(tree, 'calendar-sheet');
+      expect(sheet.maxHeight).toBeGreaterThan(0);
+      expect(sheet.transform[0].translateY.__getValue()).toBe(sheet.maxHeight);
     });
 
     it('puts the body in a ScrollView, so it still scrolls at the largest text size', async () => {
@@ -420,6 +465,29 @@ describe.each(VARIANTS)('CalendarSheet (%s)', (_name, Sheet, COLOURS) => {
       expect(textOf(tree, yearTileId(2026))).toContain('7'); // six in November, one in July
       expect(textOf(tree, yearTileId(2024))).toContain('5');
       expect(textOf(tree, yearTileId(2021))).toBe('2021');
+    });
+
+    it('shows no count on a tile inside a drop-down list, as the web calendar does not', async () => {
+      // FR-002 binds this sheet to behave as the web journal calendar does, and the web's rule
+      // is deliberate and documented: `JournalCalendar.jsx` L452-464, *"A tile in a drop-down
+      // list never shows a count"*. A list is for moving the calendar, and a number on a month
+      // somebody is only passing through answers a question they have not asked. Both halves are
+      // pinned here, because nothing pinned either of them before.
+      const tree = await mount(Sheet);
+
+      tap(tree, 'calendar-month-header');
+      expect(textOf(tree, monthTileId(2026, 11))).toBe('Nov'); // six memories, and no "6"
+      expect(textOf(tree, monthTileId(2026, 7))).toBe('Jul');
+
+      tap(tree, 'calendar-month-header'); // close it again
+      tap(tree, 'calendar-year-header');
+      expect(textOf(tree, yearTileId(2026))).toBe('2026');
+      expect(textOf(tree, yearTileId(2024))).toBe('2024');
+
+      // ...and the counts are still on the tiles of the views that own them.
+      tap(tree, 'calendar-year-header');
+      tap(tree, 'calendar-view-month');
+      expect(textOf(tree, monthTileId(2026, 11))).toContain('6');
     });
   });
 
@@ -713,63 +781,153 @@ describe.each(VARIANTS)('CalendarSheet (%s)', (_name, Sheet, COLOURS) => {
   describe('SC-001: at most four taps to any month in the window', () => {
     /**
      * "Any month in the twelve-year window is reachable in at most four taps after opening the
-     * sheet." Counted here, by a helper that tallies every tap it makes, over a route that is
-     * the one a person finds: the year header, the year, the month header, the month.
+     * sheet."
      *
-     * **Every one of the twelve years, and the months at both ends of a year and in the middle
-     * of it.** The full cross product of 144 would be 144 near-identical paths: the year list and
-     * the month list are two independent loops, and no month is treated differently from any
-     * other month, so pairing every year with January, April, August and December exercises each
-     * loop over its whole range and the year boundary -- which is the only place the arithmetic
-     * could differ -- without putting half a minute on every future `npm test`.
+     * The route is **read off the calendar** rather than written down here: before each step the
+     * helper asks what the headers are showing, and taps only what is still needed. So the count
+     * genuinely varies -- a month already on screen costs none, a different month of the same
+     * year costs two, a month of another year costs four -- and the assertion is a bound the
+     * sheet's own state has to satisfy rather than a sum this file controls. (The first draft of
+     * this test made four unconditional taps and then asserted that four is at most four, under
+     * a comment claiming it would catch nine; it would not have.)
+     *
+     * Six pairs rather than all 144: both ends of the window, its centre, and both ends of a
+     * year. The route is structurally the same for every pair, and what varies between them is
+     * `windowStartFor`, `monthKey` and `stepMonth` arithmetic that `calendarModel.test.js`
+     * already covers directly. The centre year is the one that exercises the "already there"
+     * branches, which is the only way the count can come out below four.
      *
      * The index gives every one of those months a memory, which is the only reading of SC-001
      * consistent with FR-002: an empty tile is deliberately faded and untappable, so a month
      * with nothing in it is unreachable **by design**, and counting taps to it would be counting
      * taps to a control the feature says must not answer.
      */
-    it('reaches every month of 2020-2031 in four taps or fewer', async () => {
+    const routeTo = (tree, year, month) => {
+      let taps = 0;
+      const countedTap = (testID) => {
+        // `tap` refuses a disabled control, as a finger cannot press one -- so a route that
+        // needs a tile the calendar has faded fails here rather than quietly costing nothing.
+        tap(tree, testID);
+        taps += 1;
+      };
+
+      if (!textOf(tree, 'calendar-year-header').includes(String(year))) {
+        countedTap('calendar-year-header');
+        countedTap(yearTileId(year));
+      }
+      if (!textOf(tree, 'calendar-month-header').includes(monthName(month))) {
+        countedTap('calendar-month-header');
+        countedTap(monthTileId(year, month));
+      }
+      return taps;
+    };
+
+    it('reaches both ends of the window, its centre, and both ends of a year, in four taps or fewer', async () => {
       const onPick = jest.fn();
       const onClose = jest.fn();
       const index = fullWindowIndex();
 
-      for (let year = 2020; year <= 2031; year += 1) {
-        for (const month of [1, 4, 8, 12]) {
+      for (const year of [2020, 2026, 2031]) {
+        for (const month of [1, 12]) {
           /* eslint-disable no-await-in-loop */
           const tree = await mount(Sheet, { onPick, onClose, index });
 
-          let taps = 0;
-          const countedTap = (testID) => {
-            tap(tree, testID);
-            taps += 1;
-          };
-
-          countedTap('calendar-year-header');
-          countedTap(yearTileId(year));
-          countedTap('calendar-month-header');
-          countedTap(monthTileId(year, month));
+          const taps = routeTo(tree, year, month);
 
           expect(taps).toBeLessThanOrEqual(4);
+          // Arrived, and showing that month's own days rather than merely saying so.
           expect(textOf(tree, 'calendar-month-header')).toContain(monthName(month));
           expect(textOf(tree, 'calendar-year-header')).toContain(String(year));
           expect(exists(tree, dayId(`${monthKey(year, month)}-10`))).toBe(true);
 
-          // Four taps of browsing, and the Journal still untouched until a day is chosen.
+          // Browsing throughout, and the Journal still untouched until a day is chosen.
           expect(onPick).not.toHaveBeenCalled();
           expect(onClose).not.toHaveBeenCalled();
           /* eslint-enable no-await-in-loop */
         }
       }
     });
+
+    it('costs no taps at all for the month the sheet opens on, and two for its neighbour', async () => {
+      // The other half of "at most four": the count has to be able to come out lower, or the
+      // bound above is being satisfied by arithmetic rather than by the calendar.
+      const index = fullWindowIndex();
+
+      const already = await mount(Sheet, { index });
+      expect(routeTo(already, 2026, 11)).toBe(0);
+
+      const sameYear = await mount(Sheet, { index });
+      expect(routeTo(sameYear, 2026, 3)).toBe(2);
+
+      const otherYear = await mount(Sheet, { index });
+      expect(routeTo(otherYear, 2029, 3)).toBe(4);
+    });
   });
 });
 
 // ---------------------------------------------------------------------------
-// The two variants are two files, and this is what keeps them one design
+// The two platform entry points, and the two facts they exist to decide
 // ---------------------------------------------------------------------------
 
-describe('the native and web variants', () => {
-  it('draw from the same palette', () => {
-    expect(WEB_COLOURS).toEqual(NATIVE_COLOURS);
+/**
+ * `CalendarSheet.js` and `CalendarSheet.web.js` are ~15-line wrappers over the body swept above.
+ * Each passes two platform facts and re-exports the palette, and **those are the only lines in
+ * the whole feature that differ between the platforms** -- so they are what is worth asserting
+ * here, rather than sweeping the whole calendar a second and a third time through them.
+ *
+ * `npm test` runs one platform, so both files are imported by their own path; metro's own
+ * `.web.js` resolution is untouched and is not this file's business.
+ */
+describe('the two platform entry points', () => {
+  /**
+   * Which driver a wrapper's slide actually runs on, read off the real `Animated.timing` call.
+   *
+   * It restores the spy before returning, so that two wrappers can be asked in one test: a
+   * second `jest.spyOn` of the same method hands back the *existing* spy rather than a fresh
+   * one, so without the restore the second answer would be read out of the first wrapper's call
+   * -- which is how this helper first reported the web wrapper using the native driver.
+   */
+  const driverOf = async (Wrapper) => {
+    const start = jest.fn();
+    const timing = jest.spyOn(Animated, 'timing').mockReturnValue({ start });
+    try {
+      await mount(Wrapper);
+      expect(start).toHaveBeenCalledTimes(1);
+      return timing.mock.calls[0][1].useNativeDriver;
+    } finally {
+      timing.mockRestore();
+    }
+  };
+
+  it('runs the slide on the native driver on a phone, and on the JavaScript one on the web', async () => {
+    // There is no native animated module in a browser; asking for it there warns and falls back
+    // to the JavaScript driver anyway, so the web entry point asks for the one it can have.
+    expect(await driverOf(CalendarSheetNative)).toBe(true);
+    expect(await driverOf(CalendarSheetWeb)).toBe(false);
+  });
+
+  it('caps the width and centres the sheet on the web, and lets a phone have its screen', async () => {
+    // A browser window is far wider than a phone, and a calendar stretched across a monitor
+    // would put a day tile the size of a playing card in each corner of it.
+    const web = styleOfAny(await mount(CalendarSheetWeb), 'calendar-sheet');
+    expect(web.maxWidth).toBe(420);
+    expect(web.alignSelf).toBe('center');
+
+    const native = styleOfAny(await mount(CalendarSheetNative), 'calendar-sheet');
+    expect(native.maxWidth).toBeUndefined();
+    expect(native.alignSelf).toBeUndefined();
+  });
+
+  it('each hands the calendar through, and each offers the one palette', async () => {
+    // A wrapper that dropped `{...props}` would render a calendar on today's month with nothing
+    // marked and no memories on it, which would look almost right.
+    const web = await mount(CalendarSheetWeb);
+    expect(control(web, dayId('2026-11-05')).props.accessibilityState.selected).toBe(true);
+
+    const native = await mount(CalendarSheetNative);
+    expect(control(native, dayId('2026-11-05')).props.accessibilityState.selected).toBe(true);
+
+    expect(NATIVE_COLOURS).toBe(CALENDAR_SHEET_COLOURS);
+    expect(WEB_COLOURS).toBe(CALENDAR_SHEET_COLOURS);
   });
 });
