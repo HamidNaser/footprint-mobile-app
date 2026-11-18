@@ -668,11 +668,47 @@ export default function JournalScreen({ navigation }) {
   }, [loadCalendarIndex]);
 
   /**
+   * **What the list is showing right now: the day, and the picked period.** The two reads below
+   * ask these rather than the values they were made with.
+   *
+   * ⚠ **This is what stops one day's memories being drawn under another day's date** (fix round 1,
+   * finding A), and it is not a tidiness question.
+   *
+   * `reloadDay` is a `useCallback`, so every copy of it closes over the day it was made with --
+   * and the freshness triggers hold copies across an `await` of their own. `handleRefresh` awaits
+   * the paged feed, the sync listener awaits `getDefaultJournalId`, and `handleReact` awaits a
+   * **network** round trip; if the person steps a day during that await, the copy that resumes is
+   * the one made for the day they have left. It then takes a *newer* token than the day change's
+   * own read and writes the old day's memories, because the token counts reads and knows nothing
+   * about days. The result is the previous day's cards under the new date, until some later
+   * trigger happens to read again. Reproducible with one gesture: pull to refresh, then swipe.
+   *
+   * So the reads take the day and the pick from here, at the moment they run, and check them
+   * **again** before writing. Taking it at the start alone would still leave the gap between a
+   * commit and its effects, where a read can start before these refs have caught up; the check at
+   * the write end closes that, by refusing to write an answer about a day that is no longer on
+   * screen. The day change's own read provides the right one.
+   *
+   * Refs rather than dependencies, deliberately: that is what makes a stale copy of the function
+   * safe instead of making the copies unique, and it leaves `reloadDay` and `reloadPeriod` -- and
+   * so `reloadListsAndIndex` and every subscription keyed on it -- stable across a day change.
+   */
+  const dayOnScreenRef = useRef(selectedDateKey);
+  const pickOnScreenRef = useRef(picked);
+  useEffect(() => {
+    dayOnScreenRef.current = selectedDateKey;
+    pickOnScreenRef.current = picked;
+  }, [selectedDateKey, picked]);
+
+  /**
    * Which day read is the current one.
    *
    * Two reads can be outstanding at once -- ◄ ► pressed twice in quick succession -- and
    * without this the slower one would win and put the wrong day's memories under the date on
    * the bar. Only the newest token may write.
+   *
+   * It counts reads and says nothing about *which* day a read is about, which is why the day
+   * itself is checked beside it -- see `dayOnScreenRef` above.
    */
   const dayReadRef = useRef(0);
 
@@ -685,19 +721,25 @@ export default function JournalScreen({ navigation }) {
     const token = dayReadRef.current + 1;
     dayReadRef.current = token;
 
+    // **The day on screen now**, not the day this copy of the function was made for. See
+    // `dayOnScreenRef`: a trigger that awaited something of its own may be resuming a day late.
+    const day = dayOnScreenRef.current;
+
     // Nothing to read from yet. Deliberately **not** `setDayEntries(NO_ENTRIES)`: see the
     // `catch` below for why an absent answer must not be recorded as an empty one.
-    if (!journalId || !selectedDateKey) return;
+    if (!journalId || !day) return;
 
     try {
       const found = await DatabaseService.getEntriesInRange(
         journalId,
-        selectedDateKey,
-        selectedDateKey,
+        day,
+        day,
         null,
         'DESC',
       );
-      if (dayReadRef.current === token) setDayEntries(found);
+      // Newest read, **and** still about the day on screen. The second half is what refuses an
+      // answer that arrived about a day the person has already left.
+      if (dayReadRef.current === token && dayOnScreenRef.current === day) setDayEntries(found);
     } catch (error) {
       // ⚠ **`dayEntries` is left exactly as it was -- `null` after a day change, which the
       // list draws as nothing at all.**
@@ -718,14 +760,19 @@ export default function JournalScreen({ navigation }) {
       // change, card action or save reads again.
       console.warn('[JournalScreen] the day could not be read', error?.message);
     }
-  }, [journalId, selectedDateKey]);
+  }, [journalId]);
 
   // Whenever the day or the journal changes. The last day's memories are let go of first, so
   // that nothing is ever drawn under a date it does not belong to.
+  //
+  // `selectedDateKey` is named here rather than carried in `reloadDay`'s identity, which is what
+  // the refs above cost: the function no longer changes when the day does, so the day has to be
+  // the effect's own dependency. The journal comes in through `reloadDay`, which still closes
+  // over it. The ref-sync effect above is declared first, so it has already run.
   useEffect(() => {
     setDayEntries(null);
     reloadDay();
-  }, [reloadDay]);
+  }, [reloadDay, selectedDateKey]);
 
   /**
    * Which period read is the current one -- `dayReadRef`'s counterpart for a month.
@@ -751,7 +798,9 @@ export default function JournalScreen({ navigation }) {
     const token = periodReadRef.current + 1;
     periodReadRef.current = token;
 
-    const range = rangeFor(picked);
+    // The period on screen now, for the reason the day is read that way -- `dayOnScreenRef`.
+    const period = pickOnScreenRef.current;
+    const range = rangeFor(period);
     // Nothing to read, or nothing readable. Deliberately **not** `setPeriodEntries(NO_ENTRIES)`:
     // see the `catch` below, and `reloadDay`'s, for why an absent answer is not an empty one.
     if (!journalId || !range) return;
@@ -764,7 +813,12 @@ export default function JournalScreen({ navigation }) {
         range.precisions,
         range.order,
       );
-      if (periodReadRef.current === token) setPeriodEntries(found);
+      // Newest read, **and** still about the period on screen -- compared by identity, which is
+      // exactly right: `picked` is replaced whole on every pick, so the same month picked again
+      // is a different object and a new question.
+      if (periodReadRef.current === token && pickOnScreenRef.current === period) {
+        setPeriodEntries(found);
+      }
     } catch (error) {
       // ⚠ Left exactly as it was -- `null` after a period change, which the list draws as nothing
       // at all and the date bar as a period with no count. This query is its own SQL, with its own
@@ -778,21 +832,21 @@ export default function JournalScreen({ navigation }) {
       // console looking at the wrong half of the screen.
       console.warn('[JournalScreen] the period could not be read', error?.message);
     }
-  }, [journalId, picked]);
+  }, [journalId]);
 
   // Whenever the picked period or the journal changes. The last period's memories are let go of
   // first, so that nothing is ever drawn under a period it does not belong to -- and so is which
   // of its months were open: they are that year's keys, and a new year opens at its own first
   // heading (FR-006) rather than at whichever months the last one was left on.
   //
-  // Only from here, so a card action's own `reloadPeriod` does not shut a month under somebody:
-  // this effect is keyed on `reloadPeriod`, whose identity changes with the journal and the pick
-  // and with nothing else.
+  // Only from here, so a card action's own `reloadPeriod` does not shut a month under somebody.
+  // `picked` is named rather than carried in `reloadPeriod`'s identity (fix round 1, A), and the
+  // trigger set is unchanged by that: the pick and the journal, and nothing else.
   useEffect(() => {
     setPeriodEntries(null);
     setOpenMonths(null);
     reloadPeriod();
-  }, [reloadPeriod]);
+  }, [reloadPeriod, picked]);
 
   /**
    * **Everything this screen reads from the phone, read again: the open day, the picked period,
@@ -964,6 +1018,21 @@ export default function JournalScreen({ navigation }) {
   const whatTheJournalHeld = useRef(null);
 
   /**
+   * Whether this screen is still mounted, for the blur below to ask.
+   *
+   * A focus effect's cleanup runs on a blur **and** on an unmount, and the two are
+   * indistinguishable from inside it -- so leaving the app was taking a note of what the journal
+   * held for a visit that will never come back, which is a real database query on every teardown
+   * (fix round 1, finding D). Declared **before** the focus effect on purpose: React runs an
+   * unmount's cleanups in the order their effects were declared, so this one has already said so
+   * by the time the blur's runs.
+   */
+  const stillMountedRef = useRef(true);
+  useEffect(() => () => {
+    stillMountedRef.current = false;
+  }, []);
+
+  /**
    * The newest-written memories of this journal, or **null** if they cannot be read.
    *
    * Null is load-bearing: the one caller counts a save only against an answer it really has, so
@@ -1085,6 +1154,10 @@ export default function JournalScreen({ navigation }) {
         // more, and `showNewestDay` would move the Journal under somebody on their way back to
         // it. (The reads themselves are token-guarded for the same reason.)
         left = true;
+
+        // Nothing to come back to: this is the screen going away, not the person. Asked before
+        // the read rather than after it, because the read is the cost (finding D).
+        if (!stillMountedRef.current) return;
 
         // What the journal holds, as it is left. The read is started and not waited for -- a
         // cleanup cannot wait -- and is awaited on the way back in. Recorded on **every** blur,

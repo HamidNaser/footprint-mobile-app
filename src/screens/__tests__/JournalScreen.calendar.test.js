@@ -885,7 +885,13 @@ const storyChip = (tree) => tree.root
   .find((node) => textsIn(node).some((said) => said.startsWith('No story yet')));
 
 /** Whether the chip is lit — what a person sees, through the state the chip announces. */
-const chipIsOn = (tree) => storyChip(tree).props.accessibilityState.selected;
+const chipIsOn = (tree) => {
+  const chip = storyChip(tree);
+  // The chip is only drawn while there is something in the worklist, so a case that has emptied
+  // it (or picked a journal with nothing in it) should read that rather than a `TypeError`.
+  if (!chip) throw new Error('the "No story yet" chip is not on screen');
+  return chip.props.accessibilityState.selected;
+};
 
 const tapChip = async (tree) => {
   const chip = storyChip(tree);
@@ -959,6 +965,24 @@ afterEach(() => {
   jest.restoreAllMocks();
   jest.clearAllMocks();
   jest.spyOn(console, 'log').mockImplementation(() => {});
+
+  /*
+   * ⚠ **Which journal a mount reads, put back by hand — because nothing else puts it back.**
+   *
+   * `jest.spyOn` over a property that is **already** a `jest.fn` (as every method of the
+   * `SettingsService` factory above is) hands back that same mock and registers nothing to
+   * restore. So `restoreAllMocks` has nothing to undo, `clearAllMocks` clears the calls but
+   * keeps the implementation, and a `mockResolvedValue` set inside one `describe` outlives its
+   * own block — the months and years blocks each set one. Nothing ran after those blocks until
+   * T008's cases did, which is why this had never shown; a test that ran next would have read
+   * the wrong journal and failed in a way that pointed nowhere near the cause.
+   *
+   * Set here rather than guarded in each block, so the trap is disarmed for whatever is appended
+   * to this file next (fix round 1, finding C). A block that wants another journal still says so
+   * in its own `beforeEach`, which runs after this.
+   */
+  SettingsService.getOrCreateDefaultJournal.mockResolvedValue(JOURNAL);
+  SettingsService.getDefaultJournalId.mockResolvedValue(JOURNAL);
 });
 
 // ---------------------------------------------------------------------------
@@ -2602,13 +2626,11 @@ describe('the Journal keeps up with what changes while nobody is looking (T008)'
   /**
    * Back to the journal this file opens with — the 100 memories across 98 days.
    *
-   * ⚠ **Said out loud rather than left to the default**, which this is the first block in the
-   * file to need. `jest.spyOn` over a property that is **already** a `jest.fn` (as this one is,
-   * from the module factory above) returns that very mock and registers nothing to restore, so
-   * neither `restoreAllMocks` nor `clearAllMocks` in `afterEach` puts back the default: the
-   * months and years blocks' `mockResolvedValue` outlives them. Nothing ran after those blocks
-   * until now, which is why it has never shown. Naming the journal here is both the fix and the
-   * pattern those two blocks already follow.
+   * Said out loud rather than left to the default, as the months and years blocks above do. The
+   * file's own teardown now puts the default back (see `afterEach`, and the `jest.spyOn`
+   * trap it explains), so this is belt and braces rather than the fix — but a block that reads
+   * the wrong journal fails in a way that points nowhere near the cause, and one line here is
+   * cheaper than that.
    */
   beforeEach(() => {
     jest.spyOn(SettingsService, 'getOrCreateDefaultJournal').mockResolvedValue(JOURNAL);
@@ -2712,6 +2734,100 @@ describe('the Journal keeps up with what changes while nobody is looking (T008)'
     expect(indexReads.mock.calls.length).toBeGreaterThan(indexes);
   });
 
+  /**
+   * ⚠ **One day's memories must never be drawn under another day's date** (fix round 1, finding
+   * A), and a refresh in flight is how that happened.
+   *
+   * Every freshness trigger awaits something before it re-reads — `handleRefresh` the paged feed,
+   * the sync listener the stored journal id, `handleReact` a whole network round trip — and each
+   * of them holds the copy of `reloadDay` it was made with. Step a day during that await and the
+   * copy that resumes is the one made for the day just left; it then takes a *newer* read token
+   * than the day change's own read, because the token counts reads and knows nothing about days,
+   * and writes the old day's memories under the new date. No unusual timing is needed: pull down,
+   * then swipe.
+   *
+   * Driven exactly that way. The feed's own query is parked — not the day's, which is left real —
+   * so the pull is held mid-flight while ◄ moves the Journal, and then let go.
+   */
+  it('does not draw the day it was reading under the day it has moved to', async () => {
+    const tree = await render();
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+
+    // The feed's read, parked on one shared promise so that every call made while the pull is in
+    // flight is released together.
+    const feedRead = DatabaseService.getEntriesByJournalId.bind(DatabaseService);
+    let release;
+    const parked = new Promise((resolve) => { release = resolve; });
+    jest.spyOn(DatabaseService, 'getEntriesByJournalId').mockImplementation(async (...args) => {
+      await parked;
+      return feedRead(...args);
+    });
+
+    // Pull to refresh, and **do not wait for it**: it is now stuck inside `refresh()`.
+    let pulling;
+    await act(async () => {
+      pulling = list(tree).props.refreshControl.props.onRefresh();
+    });
+
+    // Step back a day while it is stuck. The date bar moves at once; the list itself is behind
+    // "Loading journal…" until the pull lands, which is pre-existing (`refresh()` sets the hook's
+    // `loading`) and is exactly why nobody sees the wrong day *until* it lands — so the
+    // assertion that matters is the one after the release.
+    await tapDateArrow(tree, -1);
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+
+    // Now let the pull finish, which is where it re-reads.
+    await act(async () => {
+      release();
+      await pulling;
+    });
+    await settle();
+
+    // The date and the memories under it still agree. Before the fix the resumed pull wrote the
+    // 31st's card under "Fri, Oct 30".
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual([dayEntryId(SECOND_NEWEST_DAY)]);
+  });
+
+  /**
+   * The same race from the widest window there is, and the oldest instance of it: a **like**,
+   * which T005 shipped with a network round trip between the tap and the re-read. Tap the heart,
+   * swipe to the next day while it is in the air, and the day being left used to arrive under the
+   * day arrived at.
+   *
+   * Kept as a case of its own because it is a different caller, not a different fix: both are
+   * answered by the reads asking what is on screen when they run rather than when they were made.
+   */
+  it('does not draw the day a like was sent from under the day stepped to', async () => {
+    const tree = await render();
+    const heart = cardProps(tree, dayEntryId(NEWEST_DAY)).onReact;
+
+    let release;
+    const parked = new Promise((resolve) => { release = resolve; });
+    ReactionsApi.likeEntry.mockImplementation(async () => {
+      await parked;
+      return {};
+    });
+
+    let liking;
+    await act(async () => {
+      liking = heart(dayEntryId(NEWEST_DAY), 'heart');
+    });
+
+    await tapDateArrow(tree, -1);
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+
+    await act(async () => {
+      release();
+      await liking;
+    });
+    await settle();
+
+    expect(ReactionsApi.likeEntry).toHaveBeenCalledWith(`server-${dayEntryId(NEWEST_DAY)}`);
+    expect(barShows(tree, SECOND_NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual([dayEntryId(SECOND_NEWEST_DAY)]);
+  });
+
   // -------------------------------------------------------------------------
   // A memory created on the capture screen (FR-012, research R5)
   // -------------------------------------------------------------------------
@@ -2777,6 +2893,41 @@ describe('the Journal keeps up with what changes while nobody is looking (T008)'
     expect(barShows(tree, NEWEST_DAY)).toBe(true);
     await tapDateArrow(tree, 1);
     expect(barShows(tree, SAVED_DAY)).toBe(true);
+  });
+
+  /**
+   * **The newest day, and not the saved memory's day** — the distinction FR-012 exists to make
+   * ("this replaces today's 'land on the saved memory's day'"), and the one thing the case above
+   * cannot show, because there the memory *is* dated onto the newest day.
+   *
+   * So this one saves a memory dated into the middle of the journal. The Journal shows the newest
+   * day, which does **not** hold that memory; it is on its own day, and reachable there. Recorded
+   * because it is deliberate and surprising, not because it is in doubt (fix round 1, finding B).
+   */
+  it('shows the newest day after a save, not the day the memory is dated to (FR-012)', async () => {
+    const MIDDLE_DAY = '2026-09-15';
+    const tree = await onSeptember();
+
+    await leaveJournal();
+    await addMemory({
+      localId: 'saved-into-the-middle',
+      date: MIDDLE_DAY,
+      createdAt: momentsLater(),
+      contentBlocks: note('a memory of a day in the middle of the journal'),
+    });
+    await returnToJournal();
+
+    // The newest day of the journal, which is three days after the memory's own.
+    expect(barShows(tree, NEWEST_DAY)).toBe(true);
+    expect(barShows(tree, MIDDLE_DAY)).toBe(false);
+    expect(cardIds(tree)).toEqual([dayEntryId(NEWEST_DAY)]);
+    expect(textsIn(tree.root)).not.toContain('September 2026');
+
+    // And it really is on its own day, which the calendar can still reach.
+    await tapDateBar(tree, NEWEST_DAY);
+    await tap(tree, 'calendar-prev');
+    await tap(tree, dayTileId(MIDDLE_DAY));
+    expect(cardIds(tree)).toEqual(['saved-into-the-middle', dayEntryId(MIDDLE_DAY)]);
   });
 
   /**
@@ -3011,11 +3162,6 @@ describe('the Journal keeps up with what changes while nobody is looking (T008)'
 
   it('lands on the newest day from the index, not from the page the feed loaded', async () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
-    // `getEntriesByJournalId` is the feed's read **and** the one the screen takes a note of the
-    // journal with as it is left, so breaking it makes the screen record that second failure on
-    // the way out of the case. Deliberate, and a line in a production console rather than in
-    // this suite's output.
-    silenceWarnings();
     jest
       .spyOn(DatabaseService, 'getEntriesByJournalId')
       .mockRejectedValue(new Error('the feed is unreadable'));
