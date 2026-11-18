@@ -96,9 +96,12 @@ export const CalendarListHeading = ({
 
   if (kind === 'dayHeading') {
     // Text and nothing else: it opens nothing, so it is not a control. A row that lights up
-    // under a finger and then does nothing is worse than a row that plainly does not.
+    // under a finger and then does nothing is worse than a row that plainly does not. FR-014
+    // reads it as a `header`, named by the very words it already draws -- there is no second
+    // wording to invent, because `calendarModel` is the one place that turns a civil date into
+    // words, and this component parses none.
     return (
-      <View style={styles.dayRow}>
+      <View style={styles.dayRow} accessibilityRole="header" accessibilityLabel={label}>
         <Text style={styles.dayLabel}>{label}</Text>
       </View>
     );
@@ -119,14 +122,34 @@ export const CalendarListHeading = ({
     </>
   );
 
+  // T009, FR-014: "March 2026, 4 memories, open" -- the month, its count when it has one, and
+  // whether it is open or closed, said in words *and* carried in `accessibilityState.expanded`
+  // (the doubled signal FR-014's own example gives). A heading given no count says nothing about
+  // one, the same silence `memoriesLabel` already keeps for a period nobody has read yet.
+  const accessibilityProps = {
+    accessibilityRole: 'button',
+    accessibilityLabel: [label, words, open ? 'open' : 'closed'].filter(worded).join(', '),
+    accessibilityState: { expanded: open },
+  };
+
   // Nothing listening means nothing to open: a heading that dimmed under a tap and then left the
-  // month exactly as it was would be offering something it cannot do.
+  // month exactly as it was would be offering something it cannot do. It still says what it is,
+  // though -- FR-014 asks that of every month heading, tappable or not.
   if (typeof onPress !== 'function') {
-    return <View style={styles.monthRow} onLayout={onLayout}>{body}</View>;
+    return (
+      <View style={styles.monthRow} onLayout={onLayout} {...accessibilityProps}>
+        {body}
+      </View>
+    );
   }
 
   return (
-    <TouchableOpacity style={styles.monthRow} onPress={onPress} onLayout={onLayout}>
+    <TouchableOpacity
+      style={styles.monthRow}
+      onPress={onPress}
+      onLayout={onLayout}
+      {...accessibilityProps}
+    >
       {body}
     </TouchableOpacity>
   );

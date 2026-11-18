@@ -334,8 +334,25 @@ const SAVE_WINDOW = 50;
  * read the period yet*, and nothing is said then. A `0` under a month whose memories are still a
  * microsecond away would be telling somebody a month of their life is empty when it is not --
  * which is the same mistake, in the same place, that the list's own empty state guards against.
+ *
+ * T009, FR-014: `periodKind` ('day', 'month' or 'year') names what ◄ ► would step to -- the one
+ * fact this component cannot work out for itself, because it is told the *current* period's
+ * words and never the neighbour `navigateDate` would land on. `hasPrevious` / `hasNext` are
+ * `JournalScreen`'s own `hasPreviousDate` / `hasNextDate` -- the same two booleans the swipe
+ * container already refuses a gesture with -- read here as `accessibilityState.disabled`, so a
+ * screen reader and a swipe cannot disagree about which end of the journal has been reached.
  */
-const DateSelector = ({ date, label = null, count = null, onPrevious, onNext, onDatePress }) => {
+const DateSelector = ({
+  date,
+  label = null,
+  count = null,
+  periodKind = 'day',
+  hasPrevious = true,
+  hasNext = true,
+  onPrevious,
+  onNext,
+  onDatePress,
+}) => {
   const formattedDate = useMemo(() => {
     const d = new Date(date);
     return d.toLocaleDateString(undefined, {
@@ -348,6 +365,11 @@ const DateSelector = ({ date, label = null, count = null, onPrevious, onNext, on
   // `memoriesLabel` answers '' for a count there is not one of, which is how "say nothing" and
   // "say 0 memories" stay two different outcomes.
   const counted = label ? memoriesLabel(count) : '';
+  const periodWords = label || formattedDate;
+  // One label for the two `Text`s below, so a screen reader reads the period and its count as
+  // one thing rather than two unrelated fragments -- `memoriesLabel` stays the one home of the
+  // count's own words.
+  const periodAccessibilityLabel = counted ? `${periodWords}, ${counted}` : periodWords;
 
   return (
     <View style={styles.dateSelector}>
@@ -356,16 +378,35 @@ const DateSelector = ({ date, label = null, count = null, onPrevious, onNext, on
         every closed month heading, so "the one button on screen with a forward chevron in it" is
         no longer the date bar's ► -- and a test that pressed the wrong one would browse somebody's
         months while believing it had moved the Journal. The names are also what T009's spoken
-        labels will hang on.
+        labels hang on.
       */}
-      <TouchableOpacity testID="date-bar-previous" style={styles.dateArrow} onPress={onPrevious}>
+      <TouchableOpacity
+        testID="date-bar-previous"
+        style={styles.dateArrow}
+        onPress={onPrevious}
+        accessibilityRole="button"
+        accessibilityLabel={`Previous ${periodKind}`}
+        accessibilityState={{ disabled: !hasPrevious }}
+      >
         <Ionicons name="chevron-back" size={20} color="#666" />
       </TouchableOpacity>
-      <TouchableOpacity testID="date-bar-period" onPress={onDatePress}>
+      <TouchableOpacity
+        testID="date-bar-period"
+        onPress={onDatePress}
+        accessibilityRole="button"
+        accessibilityLabel={periodAccessibilityLabel}
+      >
         <Text style={styles.dateText}>{label || formattedDate}</Text>
         {counted ? <Text style={styles.dateCount}>{counted}</Text> : null}
       </TouchableOpacity>
-      <TouchableOpacity testID="date-bar-next" style={styles.dateArrow} onPress={onNext}>
+      <TouchableOpacity
+        testID="date-bar-next"
+        style={styles.dateArrow}
+        onPress={onNext}
+        accessibilityRole="button"
+        accessibilityLabel={`Next ${periodKind}`}
+        accessibilityState={{ disabled: !hasNext }}
+      >
         <Ionicons name="chevron-forward" size={20} color="#666" />
       </TouchableOpacity>
     </View>
@@ -2438,7 +2479,11 @@ export default function JournalScreen({ navigation }) {
               onPress={toggleNoStory}
               accessibilityRole="button"
               accessibilityState={{ selected: noStoryOnly }}
-              accessibilityLabel={`No story yet, ${noStoryEntries.length} memories`}
+              // T009: `memoriesLabel` rather than a raw count, so one memory reads "1 memory"
+              // rather than "1 memories" -- and `on`/`off` said in words too, doubling the
+              // signal `accessibilityState.selected` already carries (the test file's own
+              // `chipIsOn` still reads that, never this label, so the two cannot disagree).
+              accessibilityLabel={`No story yet, ${memoriesLabel(noStoryEntries.length)}, ${noStoryOnly ? 'on' : 'off'}`}
               style={[styles.noStoryChip, noStoryOnly && styles.noStoryChipActive]}
             >
               <Ionicons
@@ -2505,6 +2550,9 @@ export default function JournalScreen({ navigation }) {
         date={selectedDate}
         label={periodName}
         count={picked && listAnswered ? displayEntries.length : null}
+        periodKind={picked?.kind || 'day'}
+        hasPrevious={hasPreviousDate}
+        hasNext={hasNextDate}
         onPrevious={() => navigateDate(-1)}
         onNext={() => navigateDate(1)}
         onDatePress={openCalendar}

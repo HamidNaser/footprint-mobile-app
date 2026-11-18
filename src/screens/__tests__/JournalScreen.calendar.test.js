@@ -1447,6 +1447,52 @@ describe('the far end of the journal (fix round 1, D)', () => {
   });
 });
 
+describe("the date bar's arrows and period are named for a screen reader (T009, FR-014)", () => {
+  /**
+   * `DateSelector`'s ◄ ► carry a label naming where they go, and `accessibilityState.disabled`
+   * reading the same `hasPreviousDate` / `hasNextDate` the swipe container already refuses the
+   * gesture with (T007's own comment on those two) -- so the two cannot disagree about which end
+   * of the journal is reached. `render()` lands on `NEWEST_DAY`, where ► has nowhere to go.
+   */
+  it('names the day each arrow would go to, and says ► has nowhere further to go', async () => {
+    const tree = await render();
+
+    expect(control(tree, 'date-bar-previous').props.accessibilityRole).toBe('button');
+    expect(control(tree, 'date-bar-previous').props.accessibilityLabel).toBe('Previous day');
+    expect(control(tree, 'date-bar-previous').props.accessibilityState).toEqual({ disabled: false });
+
+    expect(control(tree, 'date-bar-next').props.accessibilityRole).toBe('button');
+    expect(control(tree, 'date-bar-next').props.accessibilityLabel).toBe('Next day');
+    expect(control(tree, 'date-bar-next').props.accessibilityState).toEqual({ disabled: true });
+  });
+
+  /** The other end of the journal, where it is ◄ that has nowhere further to go. */
+  it('says the opposite at the other end of the journal', async () => {
+    const tree = await render();
+    await tapDateBar(tree, NEWEST_DAY);
+    for (let i = 0; i < monthsBetween(NEWEST_DAY, OLDEST_DAY); i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await tap(tree, 'calendar-prev');
+    }
+    await tap(tree, dayTileId(OLDEST_DAY));
+
+    expect(control(tree, 'date-bar-previous').props.accessibilityState).toEqual({ disabled: true });
+    expect(control(tree, 'date-bar-next').props.accessibilityState).toEqual({ disabled: false });
+  });
+
+  /**
+   * The bar's own period: one label for the two `Text`s it draws (FR-007's name and its count),
+   * so a screen reader reads them as one thing. In day mode there is no count, and the label is
+   * exactly the day the bar already shows.
+   */
+  it('names the period and its count as one label, in day mode too', async () => {
+    const tree = await render();
+
+    expect(control(tree, 'date-bar-period').props.accessibilityRole).toBe('button');
+    expect(control(tree, 'date-bar-period').props.accessibilityLabel).toBe(dateLabel(NEWEST_DAY));
+  });
+});
+
 describe('a memory saved onto a day that had none (fix round 1, A)', () => {
   /**
    * **A.** The day's memories and "which days hold memories" are two answers to one question,
@@ -1969,6 +2015,22 @@ describe('a whole month (User Story 2)', () => {
     expect(said).toContain('No entries yet');
     expect(said).toContain('0 memories');
   });
+
+  /**
+   * T009, FR-014: the same bar, named for a screen reader. March sits between January and June,
+   * the months either side of it with memories (see `MONTHS_MEMORIES`'s own comment), so neither
+   * arrow is faded here — the boundary itself is covered in day mode above and in year mode
+   * below, and a month's ◄ ► are the same component reading the same two booleans.
+   */
+  it('names the month each arrow would step to, and the period as one label (T009)', async () => {
+    const tree = await onMarch();
+
+    expect(control(tree, 'date-bar-period').props.accessibilityLabel).toBe('March 2026, 4 memories');
+    expect(control(tree, 'date-bar-previous').props.accessibilityLabel).toBe('Previous month');
+    expect(control(tree, 'date-bar-next').props.accessibilityLabel).toBe('Next month');
+    expect(control(tree, 'date-bar-previous').props.accessibilityState).toEqual({ disabled: false });
+    expect(control(tree, 'date-bar-next').props.accessibilityState).toEqual({ disabled: false });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2186,6 +2248,18 @@ describe('a whole year (User Story 3)', () => {
     // The oldest year in this journal, so ◄ has nowhere to go — the other end of the stop
     // `stops where there is no further year with memories` pins for ►.
     expect(swipe(tree).props.hasPrevious).toBe(false);
+    // T009, FR-014: the same boolean the bar's own ◄ reads, as `accessibilityState.disabled`.
+    expect(control(tree, 'date-bar-previous').props.accessibilityState).toEqual({ disabled: true });
+    expect(control(tree, 'date-bar-next').props.accessibilityState).toEqual({ disabled: false });
+  });
+
+  /** T009, FR-014: the bar's own words for a year, as one label, and its arrows named by kind. */
+  it('names the year each arrow would step to, and the period as one label (T009)', async () => {
+    const tree = await on2026();
+
+    expect(control(tree, 'date-bar-period').props.accessibilityLabel).toBe('2026, 10 memories');
+    expect(control(tree, 'date-bar-previous').props.accessibilityLabel).toBe('Previous year');
+    expect(control(tree, 'date-bar-next').props.accessibilityLabel).toBe('Next year');
   });
 
   /**

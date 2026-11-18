@@ -116,6 +116,10 @@ import {
 } from '../../utils/calendarModel';
 import { monthName } from '../../utils/periodDate';
 import { toDateKey } from '../../utils/journalDate';
+// T009, FR-014: `memoriesLabel` is the one home of the words a count is said in -- the month
+// heading says them, the date bar says them, and a tile's spoken label is the third thing that
+// must not drift from the other two.
+import { memoriesLabel } from './CalendarListHeading';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -184,6 +188,42 @@ function civilDay(value) {
     day: Number(match[3]),
     key: `${match[1]}-${match[2]}-${match[3]}`,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// T009, FR-014: every tile's spoken label.
+//
+// Full weekday names, parallel to `calendarModel.WEEKDAY_NAMES`'s three-letter column heads --
+// a screen reader has no column to lean on, so a day tile is named in full. Kept here rather
+// than taught to `calendarModel.js` because nothing else reads a weekday's full word; a list
+// only this file uses is not one two files have to keep in step.
+// ---------------------------------------------------------------------------------------------
+
+const WEEKDAY_NAMES_FULL = [
+  'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
+];
+
+/**
+ * FR-014's spoken name for a day tile -- "Thursday 5 November 2026" -- the full weekday and the
+ * full month, numeric parts throughout, exactly as `monthGrid`'s own weekday lookup is built and
+ * never a date string.
+ */
+function dayTileWords(year, month, day) {
+  const weekday = WEEKDAY_NAMES_FULL[new Date(year, month - 1, day).getDay()];
+  return `${weekday} ${day} ${monthName(month)} ${year}`;
+}
+
+/**
+ * FR-014's spoken label for a tile: its own words, then its count -- or "unavailable" for a
+ * faded one, which is what a faded tile says instead of a count it does not have. `showCount`
+ * is false inside a drop-down list, matching what the tile shows there: the comment above this
+ * file's tile renderers already rules that a list is for moving the calendar, not for answering
+ * how many memories a month passed through holds, and the spoken label follows the same rule
+ * rather than saying more than the tile shows.
+ */
+function tileAccessibilityLabel(words, empty, count, showCount) {
+  if (empty) return `${words}, unavailable`;
+  return showCount ? `${words}, ${memoriesLabel(count)}` : words;
 }
 
 /**
@@ -365,6 +405,11 @@ export const CalendarSheetBody = ({
     const count = dayCount(cell.key);
     const isPicked = pickedIn.key === cell.key;
     const empty = count === 0;
+    // Always with its count, never dropped the way a drop-down list's tile drops it: a day is
+    // never offered inside a list, so there is no "just browsing" reading to match.
+    const label = tileAccessibilityLabel(
+      dayTileWords(state.year, state.month, cell.day), empty, count, true,
+    );
 
     return (
       <TouchableOpacity
@@ -375,6 +420,8 @@ export const CalendarSheetBody = ({
           cell.key === todayCivil.key && styles.dayTileToday,
           isPicked && styles.dayTilePicked,
         ]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
         accessibilityState={{ selected: isPicked, disabled: empty }}
         disabled={empty}
         onPress={empty ? undefined : () => onPick({ kind: 'day', date: cell.key })}
@@ -423,6 +470,11 @@ export const CalendarSheetBody = ({
         const isPicked = pickedIn.year === state.year && pickedIn.month === month;
         const onScreenNow = inList && month === state.month;
         const empty = count === 0 && !onScreenNow;
+        // No count inside a drop-down list, matching the visible tile beside it (the comment
+        // above these two renderers' own rule).
+        const label = tileAccessibilityLabel(
+          `${monthName(month)} ${state.year}`, empty, count, !inList,
+        );
 
         return (
           <TouchableOpacity
@@ -434,6 +486,8 @@ export const CalendarSheetBody = ({
               todayCivil.year === state.year && todayCivil.month === month && styles.tileToday,
               isPicked && styles.tilePicked,
             ]}
+            accessibilityRole="button"
+            accessibilityLabel={label}
             accessibilityState={{ selected: isPicked, disabled: empty }}
             disabled={empty}
             onPress={empty ? undefined : () => {
@@ -466,6 +520,7 @@ export const CalendarSheetBody = ({
         const isPicked = pickedIn.year === year;
         const onScreenNow = inList && year === state.year;
         const empty = count === 0 && !onScreenNow;
+        const label = tileAccessibilityLabel(String(year), empty, count, !inList);
 
         return (
           <TouchableOpacity
@@ -477,6 +532,8 @@ export const CalendarSheetBody = ({
               todayCivil.year === year && styles.tileToday,
               isPicked && styles.tilePicked,
             ]}
+            accessibilityRole="button"
+            accessibilityLabel={label}
             accessibilityState={{ selected: isPicked, disabled: empty }}
             disabled={empty}
             onPress={empty ? undefined : () => {
@@ -525,6 +582,9 @@ export const CalendarSheetBody = ({
             testID="calendar-month-header"
             style={[styles.headerToggle, state.list === 'month' && styles.headerToggleOpen]}
             onPress={toggleMonthList}
+            accessibilityRole="button"
+            accessibilityLabel={`${monthName(state.month)} list, ${state.list === 'month' ? 'open' : 'closed'}`}
+            accessibilityState={{ expanded: state.list === 'month' }}
           >
             <Text style={styles.headerToggleText}>{monthName(state.month)}</Text>
             <Ionicons
@@ -538,6 +598,9 @@ export const CalendarSheetBody = ({
           testID="calendar-year-header"
           style={[styles.headerToggle, state.list === 'year' && styles.headerToggleOpen]}
           onPress={toggleYearList}
+          accessibilityRole="button"
+          accessibilityLabel={`${state.year} list, ${state.list === 'year' ? 'open' : 'closed'}`}
+          accessibilityState={{ expanded: state.list === 'year' }}
         >
           <Text style={styles.headerToggleText}>{state.year}</Text>
           <Ionicons
@@ -598,6 +661,9 @@ export const CalendarSheetBody = ({
                   testID={`calendar-view-${view}`}
                   style={[styles.viewTab, state.view === view && styles.viewTabCurrent]}
                   onPress={() => switchView(view)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${label} view`}
+                  accessibilityState={{ selected: state.view === view }}
                 >
                   <Text
                     style={[
@@ -615,6 +681,8 @@ export const CalendarSheetBody = ({
               testID="calendar-sheet-close"
               style={styles.close}
               onPress={onClose}
+              accessibilityRole="button"
+              accessibilityLabel="Close the calendar"
             >
               <Ionicons name="close" size={20} color={C.ink} />
             </TouchableOpacity>
