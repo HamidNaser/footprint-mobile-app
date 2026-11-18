@@ -291,11 +291,12 @@ jest.mock('../../components/journal/JournalEntryCard', () => {
 
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { Alert, Text, TouchableOpacity } from 'react-native';
+import { Alert, FlatList, SectionList, Text, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import JournalScreen from '../JournalScreen';
 import { CalendarSheet } from '../../components/journal/CalendarSheet';
+import { CalendarListHeading } from '../../components/journal/CalendarListHeading';
 import { CalendarPickerModal, DateSwipeContainer } from '../../components/journal';
 import { JournalEntryCard as CardProbe } from '../../components/journal/JournalEntryCard';
 // Nothing on this screen opens the old composer any more, and its mount is kept deliberately
@@ -407,6 +408,70 @@ async function seed() {
 }
 
 // ---------------------------------------------------------------------------
+// A second journal, for User Story 2: a few months, scattered.
+//
+// Its own journal rather than more rows in the one above, because every case up to here counts
+// on that journal holding exactly 100 memories across 98 consecutive days — adding a March to
+// it would quietly rewrite the index counts three of those cases assert. One database still,
+// seeded once; `getOrCreateDefaultJournal` is what decides which journal a mount reads.
+// ---------------------------------------------------------------------------
+
+const MONTHS = 'journal-months';
+
+/** The newest day in it, so a mount lands here and the sheet opens on June 2026. */
+const MONTHS_NEWEST_DAY = '2026-06-10';
+
+/** March 2026 as the sheet reports it, and as the date bar names it. */
+const MARCH_PICKED = { kind: 'month', year: 2026, month: 3 };
+const MARCH_LABEL = 'March 2026';
+
+/** The read a picked March makes: the whole month, day and month precision, calendar order. */
+const MARCH_READ = [MONTHS, '2026-03-01', '2026-03-31', ['day', 'month'], 'ASC'];
+
+/**
+ * Eight memories, chosen so that each of User Story 2's three scenarios is a real question.
+ *
+ * - **March 2026** holds the scenario's own four: the 3rd, the 14th and two on the 22nd.
+ * - **January and June 2026** are the months either side of it *with* memories, and April and
+ *   May hold nothing — so ► stopping at June rather than stepping onto April is an assertion
+ *   rather than a coincidence.
+ * - **July 2024** holds one day-dated memory and one dated only "July 2024". The rough one was
+ *   created **first** and is stored on the 1st, so plain date-then-created order would put it at
+ *   the top of the month; FR-005 puts it last, under its own label, and that is scenario 3.
+ * - **One memory known only to its year**, which the holding area stores on 1 January. It belongs
+ *   to 2026 and not to January (FR-011, FR-016), so a picked January must leave it out — which is
+ *   what makes the month read's precision list a behaviour and not just an argument.
+ */
+const MONTHS_MEMORIES = [
+  { localId: 'jul24-month', date: '2024-07-01', datePrecision: 'month', createdAt: 1000000 },
+  { localId: 'jul24-19', date: '2024-07-19', createdAt: 1000100 },
+  { localId: 'y2026', date: '2026-01-01', datePrecision: 'year', createdAt: 1800000 },
+  { localId: 'jan-05', date: '2026-01-05', createdAt: 1900000 },
+  { localId: 'mar-03', date: '2026-03-03', createdAt: 2000000 },
+  { localId: 'mar-14', date: '2026-03-14', createdAt: 2000100 },
+  { localId: 'mar-22-a', date: '2026-03-22', createdAt: 2000200 },
+  { localId: 'mar-22-b', date: '2026-03-22', createdAt: 2000300 },
+  // A photograph with nothing said about it, which is what puts something in the "No story yet"
+  // worklist — and the only reason that chip is on screen at all in this journal.
+  { localId: 'jun-10', date: '2026-06-10', createdAt: 2100000, contentBlocks: serverPhoto() },
+];
+
+async function seedMonths() {
+  for (const memory of MONTHS_MEMORIES) {
+    // eslint-disable-next-line no-await-in-loop
+    await DatabaseService.insertEntry({
+      serverId: `server-${memory.localId}`,
+      journalId: MONTHS,
+      userId: 'user-1',
+      datePrecision: 'day',
+      contentBlocks: note(`a memory of ${memory.date}`),
+      visibility: 'private',
+      ...memory,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -461,18 +526,26 @@ const dateLabel = (key) =>
 const barShows = (tree, key) =>
   tree.root.findAllByType(TouchableOpacity).some((node) => textsIn(node).includes(dateLabel(key)));
 
-/** Tap the date itself — the one control FR-001 is about. */
-const tapDateBar = async (tree, key) => {
+/**
+ * Tap the date bar itself — the one control FR-001 is about — found by what it says.
+ *
+ * By its words rather than by a `testID`, because in month mode (T006) the bar does not name a
+ * day at all: it names the period, "March 2026" (FR-007). One helper for both, so a test about a
+ * month taps the same control a test about a day taps.
+ */
+const tapBarSaying = async (tree, words) => {
   const node = tree.root
     .findAllByType(TouchableOpacity)
-    .filter((candidate) => textsIn(candidate).includes(dateLabel(key)))
+    .filter((candidate) => textsIn(candidate).includes(words))
     .pop();
-  if (!node) throw new Error(`the date bar does not show ${key}`);
+  if (!node) throw new Error(`the date bar does not say "${words}"`);
   await act(async () => {
     node.props.onPress();
   });
   await settle();
 };
+
+const tapDateBar = (tree, key) => tapBarSaying(tree, dateLabel(key));
 
 /**
  * The date bar's ◄ or ►. Found by the icon inside it, and asserted to be the only one on
@@ -514,6 +587,43 @@ const cardIds = (tree) => cards(tree).map((card) => card.props.entry.localId);
 const cardProps = (tree, localId) =>
   cards(tree).find((card) => card.props.entry.localId === localId).props;
 
+/**
+ * One memory's card as a thing two renders can be compared by (SC-002).
+ *
+ * Every prop, with the handlers reduced to the fact that they are handlers: `onReact` and the
+ * rest are new closures on every render, so comparing them by identity would fail between two
+ * renders of the *same* day and prove nothing. Everything that decides what a card **draws** —
+ * the entry, its author, whose memory it is, whether it is on screen, the unsaved-edit flag, the
+ * colour — is compared by value, which is what "zero differences" means here (SC-002).
+ */
+const cardShape = (props) =>
+  Object.fromEntries(
+    Object.entries(props)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([name, value]) => [name, typeof value === 'function' ? '[a handler]' : value]),
+  );
+
+/** The one list the Journal draws — in a day, a month or a year (research R8: never two). */
+const list = (tree) => tree.root.findByType(FlatList);
+
+/** The headings on screen, in order. Empty in a day, which is FR-005's rule. */
+const headingLabels = (tree) =>
+  tree.root.findAllByType(CalendarListHeading).map((heading) => heading.props.label);
+
+/**
+ * What a person reads down the list, a row at a time: `heading:<label>` or `card:<localId>`.
+ *
+ * Taken off the rendered tree in document order rather than off the list's `data`, so it says
+ * what was really drawn and in what order — which is the whole of User Story 2's first scenario
+ * ("four cards show under three day labels, in date order").
+ */
+const rowsOnScreen = (tree) =>
+  tree.root
+    .findAll((node) => node.type === CalendarListHeading || node.type === CardProbe)
+    .map((node) => (node.type === CardProbe
+      ? `card:${node.props.entry.localId}`
+      : `heading:${node.props.label}`));
+
 const sheet = (tree) => tree.root.findByType(CalendarSheet);
 
 /**
@@ -530,6 +640,7 @@ beforeAll(async () => {
   // this suite's output, where a real warning is what a reader should notice.
   jest.spyOn(console, 'log').mockImplementation(() => {});
   await seed();
+  await seedMonths();
 });
 
 afterAll(() => {
@@ -1067,5 +1178,360 @@ describe('a memory saved onto a day that had none (fix round 1, A)', () => {
       const db = await DatabaseService.getDb();
       await db.runAsync('DELETE FROM journal_entries WHERE date = ?', [NEW_DAY]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 016 T006 — User Story 2: a whole month.
+//
+// Picking a month used to close the sheet and do nothing at all. It now lists every memory of
+// that month, under FR-005's small grey heading per day, drawn by the Journal's own card exactly
+// as a day draws it — one flat `ViewportFlatList`, never a `SectionList` (research R8), because
+// a card's map pin scrolls by row index and a section list has no `scrollToIndex`.
+//
+// Read against the second journal above, where the three acceptance scenarios are real
+// questions rather than arrangements of the 98-day run the file opens with.
+// ---------------------------------------------------------------------------
+
+describe('a whole month (User Story 2)', () => {
+  beforeEach(() => {
+    // Every mount in this block reads the months journal. The one above is untouched.
+    jest.spyOn(SettingsService, 'getOrCreateDefaultJournal').mockResolvedValue(MONTHS);
+  });
+
+  /** The Journal with March 2026 picked, by the route a person takes: date bar → Month → March. */
+  const onMarch = async () => {
+    const tree = await render();
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+    return tree;
+  };
+
+  it('lands on the newest day of this journal, so the cases below start where they say', async () => {
+    const tree = await render();
+
+    expect(barShows(tree, MONTHS_NEWEST_DAY)).toBe(true);
+    expect(cardIds(tree)).toEqual(['jun-10']);
+    // A day has no headings at all: FR-005 puts them in month and year lists only.
+    expect(headingLabels(tree)).toEqual([]);
+  });
+
+  it('shows four cards under three day labels, in date order (scenario 1, FR-005, SC-003)', async () => {
+    const tree = await onMarch();
+
+    expect(rowsOnScreen(tree)).toEqual([
+      'heading:Tue 3 March',
+      'card:mar-03',
+      'heading:Sat 14 March',
+      'card:mar-14',
+      'heading:Sun 22 March',
+      'card:mar-22-a',
+      'card:mar-22-b',
+    ]);
+    // The whole month from the phone's own database, both precisions, oldest first — not a
+    // filter over the page the feed happens to hold (FR-010, SC-003).
+    expect(rangeReads).toHaveBeenCalledWith(...MARCH_READ);
+  });
+
+  it('keys an entry row by its memory and a heading row by its period (research R8)', async () => {
+    const tree = await onMarch();
+    const { data, keyExtractor } = list(tree).props;
+
+    // An entry row keeps the key a day has always used — its `localId` — so `useViewableKeys`
+    // and the `isVisible` it answers see exactly the keys they see today, and a card does not
+    // lose track of whether it is on screen because it is being shown inside a month. A heading
+    // is namespaced, because a period key and a memory's id share one list.
+    expect(data.map((row, index) => keyExtractor(row, index))).toEqual([
+      'heading:2026-03-03',
+      'mar-03',
+      'heading:2026-03-14',
+      'mar-14',
+      'heading:2026-03-22',
+      'mar-22-a',
+      'mar-22-b',
+    ]);
+  });
+
+  it('leaves a memory known only to its year out of the month its 1st falls in (FR-016)', async () => {
+    const tree = await render();
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    await tap(tree, `calendar-month-tile-${'2026-01'}`);
+
+    // The holding area stores a memory known only to 2026 on 1 January. It belongs to the year,
+    // and January is not where somebody goes looking for it — the same answer the calendar's own
+    // faded 1st gives, and the same one `buildRows` gives.
+    expect(rowsOnScreen(tree)).toEqual(['heading:Mon 5 January', 'card:jan-05']);
+    expect(textsIn(tree.root)).toContain('1 memory');
+  });
+
+  it('draws them in one flat list, and never a section list (research R8)', async () => {
+    const tree = await onMarch();
+
+    expect(tree.root.findAllByType(SectionList)).toHaveLength(0);
+    expect(tree.root.findAllByType(FlatList)).toHaveLength(1);
+    // The function a pressed pin calls. A `SectionList` has none, which is the whole reason R8
+    // settled on one flat list.
+    expect(typeof list(tree).instance.scrollToIndex).toBe('function');
+  });
+
+  it('names the month and its count on the date bar (FR-007)', async () => {
+    const tree = await onMarch();
+    const said = textsIn(tree.root);
+
+    expect(said).toContain(MARCH_LABEL);
+    expect(said).toContain('4 memories');
+    // And it no longer names a day, which is the thing a month is not.
+    expect(barShows(tree, MONTHS_NEWEST_DAY)).toBe(false);
+  });
+
+  it('draws a card in March exactly as the same memory on its own day (SC-002, FR-009)', async () => {
+    const onItsDay = await render();
+    await tapDateBar(onItsDay, MONTHS_NEWEST_DAY);
+    for (let i = 0; i < monthsBetween(MONTHS_NEWEST_DAY, '2026-03-14'); i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await tap(onItsDay, 'calendar-prev');
+    }
+    await tap(onItsDay, dayTileId('2026-03-14'));
+    expect(cardIds(onItsDay)).toEqual(['mar-14']);
+    const asADay = cardShape(cardProps(onItsDay, 'mar-14'));
+
+    const inMarch = await onMarch();
+    const asAMonth = cardShape(cardProps(inMarch, 'mar-14'));
+
+    // Zero differences (SC-002). ⚠ If this ever disagrees, the **list** is wrong, not the card:
+    // FR-009 and this feature's governing rule put `JournalEntryCard` out of bounds entirely.
+    expect(asAMonth).toEqual(asADay);
+    // ⚠ `updatedAt` is when this phone last wrote the row, which `insertEntry` stamps from the
+    // clock, so it is the one field a committed snapshot cannot name. It is still compared
+    // exactly by the assertion above — both reads are of the same row — so nothing is lost here.
+    expect(asAMonth).toMatchSnapshot({ entry: { updatedAt: expect.any(Number) } });
+  });
+
+  it('scrolls to the row a pressed pin is really in, not to the memory’s place (FR-017)', async () => {
+    const scrollToIndex = jest
+      .spyOn(FlatList.prototype, 'scrollToIndex')
+      .mockImplementation(() => {});
+    const tree = await onMarch();
+
+    await act(async () => {
+      cardProps(tree, 'mar-14').onRequestScrollTo(160);
+    });
+
+    // Row **3** of the seven: the three day headings are rows of the same list. The memory is
+    // the second *card*, so an implementation that counted memories would say 1 and scroll the
+    // person to the heading above 14 March instead of to the piece they pressed.
+    expect(scrollToIndex).toHaveBeenCalledTimes(1);
+    expect(scrollToIndex).toHaveBeenCalledWith({ index: 3, viewOffset: -160, animated: true });
+  });
+
+  it('does not throw when a pin is pressed on the last card of the month (FR-017)', async () => {
+    silenceWarnings();
+    const tree = await onMarch();
+
+    // The real `scrollToIndex` this time, unmocked. `VirtualizedList` throws an invariant for an
+    // index past the end of its own `data`, so this is what proves the row index and the list's
+    // data are the same list: with the four entries as data, row 6 of 7 would be out of range
+    // and a pressed pin would take the Journal down — there is no error boundary in `src`.
+    expect(() => cardProps(tree, 'mar-22-b').onRequestScrollTo(80)).not.toThrow();
+    expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
+  });
+
+  it('sends a like from a card in the month list, and reads the month again (FR-017, G1)', async () => {
+    const tree = await onMarch();
+    const before = rangeReads.mock.calls.length;
+
+    await act(async () => {
+      await cardProps(tree, 'mar-22-a').onReact('mar-22-a', 'heart');
+    });
+    await settle();
+
+    // ⚠ The rows carry no `localId` (research R8), so a handler resolving the memory out of the
+    // *row* array would find nothing and return — the heart tapped, and nothing happening on
+    // screen or on the server (analyze round 4, finding G1).
+    expect(ReactionsApi.likeEntry).toHaveBeenCalledWith('server-mar-22-a');
+    expect(rangeReads.mock.calls.length).toBeGreaterThan(before);
+    expect(rangeReads).toHaveBeenLastCalledWith(...MARCH_READ);
+  });
+
+  it('sends a reply from a card in the month list (FR-017, G1)', async () => {
+    const { CommentsApi } = require('../../api');
+    const tree = await onMarch();
+
+    await act(async () => {
+      await cardProps(tree, 'mar-03').onAddResponse('mar-03', 'I remember this');
+    });
+    await settle();
+
+    expect(CommentsApi.addComment).toHaveBeenCalledWith('server-mar-03', 'I remember this');
+  });
+
+  it('goes to the later month with memories, on ► and on a forward swipe (scenario 2)', async () => {
+    const tree = await onMarch();
+
+    // April and May hold nothing, so ► reaches June rather than stepping onto the next
+    // calendar month and showing an empty one (FR-007, FR-008).
+    expect(swipe(tree).props.hasNext).toBe(true);
+    expect(swipe(tree).props.hasPrevious).toBe(true);
+
+    await tapDateArrow(tree, 1);
+    expect(textsIn(tree.root)).toContain('June 2026');
+    expect(rowsOnScreen(tree)).toEqual(['heading:Wed 10 June', 'card:jun-10']);
+
+    // ◄ comes back to March, and the swipe does what the arrow does.
+    await tapDateArrow(tree, -1);
+    expect(textsIn(tree.root)).toContain(MARCH_LABEL);
+
+    await act(async () => {
+      swipe(tree).props.onNextDate();
+    });
+    await settle();
+    expect(textsIn(tree.root)).toContain('June 2026');
+  });
+
+  it('stops where there is no further month with memories (FR-007)', async () => {
+    const tree = await onMarch();
+    await tapDateArrow(tree, 1);
+
+    // June is the newest month in this journal, so ► has nowhere to go and says so.
+    expect(swipe(tree).props.hasNext).toBe(false);
+    await tapDateArrow(tree, 1);
+    expect(textsIn(tree.root)).toContain('June 2026');
+    expect(cardIds(tree)).toEqual(['jun-10']);
+  });
+
+  it('puts a memory dated only “July 2024” last, under its own label (scenario 3, FR-005)', async () => {
+    const tree = await render();
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    // Month view's ◄ steps the year, so two taps reach 2024 — browsing, which tells the
+    // Journal nothing until a month is really chosen.
+    await tap(tree, 'calendar-prev');
+    await tap(tree, 'calendar-prev');
+    await tap(tree, `calendar-month-tile-${'2024-07'}`);
+
+    expect(rowsOnScreen(tree)).toEqual([
+      'heading:Fri 19 July',
+      'card:jul24-19',
+      'heading:July 2024',
+      'card:jul24-month',
+    ]);
+    expect(textsIn(tree.root)).toContain('2 memories');
+  });
+
+  it('shows a month it reopens the sheet on, rather than a day (FR-001, FR-007)', async () => {
+    const tree = await onMarch();
+
+    await tapBarSaying(tree, MARCH_LABEL);
+
+    // The sheet opens in Month view on the month the Journal is on, rather than making somebody
+    // find it again (`initialView`).
+    expect(sheet(tree).props.visible).toBe(true);
+    expect(sheet(tree).props.picked).toEqual(MARCH_PICKED);
+  });
+
+  it('goes back to a single day when a day is picked again', async () => {
+    const tree = await onMarch();
+    await tapBarSaying(tree, MARCH_LABEL);
+
+    await tap(tree, 'calendar-view-date');
+    await tap(tree, dayTileId('2026-03-22'));
+
+    // That day, newest first and with no headings at all — exactly as a day is today (FR-004,
+    // FR-005).
+    expect(barShows(tree, '2026-03-22')).toBe(true);
+    expect(headingLabels(tree)).toEqual([]);
+    expect(cardIds(tree)).toEqual(['mar-22-b', 'mar-22-a']);
+    expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
+  });
+
+  /**
+   * The "needs a story" worklist is memories from across the whole journal, not a period — so
+   * while it is on, nothing on screen may describe a period: not the date bar, and not the
+   * arrows behind it. The pick is kept, so turning the chip off puts the month back.
+   *
+   * FR-013 makes the two exclusive outright (the chip switches off when a period is picked), and
+   * that is T008's. This case is about the meantime being honest rather than about that rule.
+   */
+  it('does not name a month over the worklist, and gives it back when the chip goes off', async () => {
+    const tree = await render();
+    const chipSaying = () => tree.root
+      .findAllByType(TouchableOpacity)
+      .find((node) => textsIn(node).some((said) => said.startsWith('No story yet')));
+
+    await act(async () => {
+      chipSaying().props.onPress();
+    });
+    await settle();
+    expect(cardIds(tree)).toEqual(['jun-10']);
+
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+
+    // The worklist is still what is on screen, so the bar still names a day and says no count.
+    expect(cardIds(tree)).toEqual(['jun-10']);
+    expect(headingLabels(tree)).toEqual([]);
+    expect(textsIn(tree.root)).not.toContain(MARCH_LABEL);
+    expect(textsIn(tree.root)).not.toContain('1 memory');
+
+    await act(async () => {
+      chipSaying().props.onPress();
+    });
+    await settle();
+
+    // And March, which was never thrown away, is what the chip going off reveals.
+    expect(textsIn(tree.root)).toContain(MARCH_LABEL);
+    expect(cardIds(tree)).toEqual(['mar-03', 'mar-14', 'mar-22-a', 'mar-22-b']);
+  });
+
+  /**
+   * The month's half of Task 5's three-valued discipline, which its own review ruled on: a read
+   * that failed must never be drawn as a period that really has nothing in it.
+   *
+   * It is reachable on its own — the month query is its own SQL, with its own precision clause —
+   * so it can fail while the rest of the screen looks perfectly healthy. Saying *"No entries
+   * yet"* then, or *"0 memories"*, would be this screen making a claim about somebody's own
+   * memories that it has no basis for.
+   */
+  it('says nothing about a month it could not read, rather than that it is empty', async () => {
+    silenceWarnings();
+    const tree = await render();
+    await tapDateBar(tree, MONTHS_NEWEST_DAY);
+    await tap(tree, 'calendar-view-month');
+    jest
+      .spyOn(DatabaseService, 'getEntriesInRange')
+      .mockRejectedValue(new Error('the month is unreadable'));
+    await tap(tree, `calendar-month-tile-${'2026-03'}`);
+
+    const said = textsIn(tree.root);
+    expect(cardIds(tree)).toEqual([]);
+    expect(said).toContain(MARCH_LABEL);
+    expect(said).not.toContain('No entries yet');
+    expect(said).not.toContain('Start journaling your thoughts, photos, and memories');
+    expect(said).not.toContain('0 memories');
+  });
+
+  /**
+   * And the other half, which is this case's control: a month that really has been read and
+   * really holds nothing does say so. Without it, the case above could pass on an empty state
+   * and a count that never render at all.
+   *
+   * Reached the way it happens in life — the month on screen losing its last memory, which the
+   * spec's own edge cases name — rather than by picking an empty month, which the calendar
+   * rightly will not let anybody do.
+   */
+  it('does say a month is empty once it has really been read and really is', async () => {
+    const tree = await onMarch();
+    jest.spyOn(DatabaseService, 'getEntriesInRange').mockResolvedValue([]);
+
+    await tapDateArrow(tree, 1);
+
+    const said = textsIn(tree.root);
+    expect(said).toContain('June 2026');
+    expect(cardIds(tree)).toEqual([]);
+    expect(said).toContain('No entries yet');
+    expect(said).toContain('0 memories');
   });
 });

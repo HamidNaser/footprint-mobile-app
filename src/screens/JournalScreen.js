@@ -69,6 +69,10 @@ import {
 // two platform entry points (`CalendarSheet.js`, `CalendarSheet.web.js`) are what metro resolves
 // between, exactly as it does for `CalendarPickerModal`.
 import { CalendarSheet } from '../components/journal/CalendarSheet';
+// 016 FR-005: a month (and, with T007, a year) is this screen's own feed with headings threaded
+// through it. `CalendarListHeading` draws the heading rows; `memoriesLabel` is the one home of
+// the words a count is said in, which the date bar below says about the same period (FR-007).
+import { CalendarListHeading, memoriesLabel } from '../components/journal/CalendarListHeading';
 
 // Hooks
 import { useJournalRealtime } from '../hooks/useJournalRealtime';
@@ -86,8 +90,20 @@ import { JournalService } from '../services/JournalService';
 // has loaded; these two queries are local and read everything.
 import { DatabaseService } from '../services/DatabaseService';
 // `buildIndex` turns `getCalendarIndexRows`'s rows into the counts behind the calendar's faded
-// days; `dayKeyOf` is the one answer to "which civil day is this memory on" for this feature.
-import { buildIndex, dayKeyOf } from '../utils/calendarModel';
+// days; `dayKeyOf` is the one answer to "which civil day is this memory on" for this feature;
+// `buildRows` turns a picked period's memories into the flat rows a month or year list draws
+// (research R8); `neighbourMonth` is what ◄ ► step over in month mode (FR-007, FR-008).
+import {
+  buildIndex,
+  buildRows,
+  dayKeyOf,
+  daysInMonth,
+  monthKey,
+  neighbourMonth,
+} from '../utils/calendarModel';
+// FR-007's wording for the period on the date bar, from the one module that words this
+// feature's dates -- so "March 2026" on the bar and "March 2026" on a heading cannot differ.
+import { formatPeriodDate } from '../utils/periodDate';
 import CaptureDraftStore, { DraftSlot } from '../services/CaptureDraftStore';
 import CaptureLocation from '../services/CaptureLocation';
 
@@ -157,9 +173,64 @@ function draftFirstWords(draft) {
 }
 
 /**
- * Date selector component
+ * The civil-date range and precisions one picked period is read with (016 FR-005, FR-010).
+ *
+ * A month is its 1st to its last day, **day and month precision only**: a memory known only to
+ * its year is stored on 1 January and belongs to its year, not to the January it happens to sit
+ * in (FR-011, FR-016) -- the same answer `calendarModel.buildRows` gives, so the query and the
+ * rows cannot disagree about which memories a month has.
+ *
+ * `null` for anything this cannot read, and that is the fail-closed answer: an unreadable period
+ * must not become a query for some other range. A year is T007's and is answered `null` here
+ * until then rather than silently read as something else.
+ *
+ * `'ASC'` is the calendar order FR-005 asks for -- oldest first, within a day too. (Only a
+ * single day reads `'DESC'`, which is the order the feed has today; `DatabaseService` reads the
+ * word through `calendarModel.isDescending`, so anything else means ascending anyway.)
  */
-const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
+function rangeFor(picked) {
+  if (picked?.kind !== 'month') return null;
+
+  const { year, month } = picked;
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return null;
+  if (month < 1 || month > 12) return null;
+
+  const key = monthKey(year, month);
+  return {
+    from: `${key}-01`,
+    to: `${key}-${String(daysInMonth(year, month)).padStart(2, '0')}`,
+    precisions: ['day', 'month'],
+    order: 'ASC',
+  };
+}
+
+/**
+ * What the date bar calls a picked period (FR-007) -- "March 2026" -- or null in day mode.
+ *
+ * `formatPeriodDate` of a month-precision date, which is those exact words: the same call
+ * `calendarModel` makes for a month heading, so the bar and a heading cannot word the same month
+ * differently, and the date on a card beneath them agrees with both.
+ */
+function periodLabel(picked) {
+  if (picked?.kind !== 'month') return null;
+  const range = rangeFor(picked);
+  return range ? formatPeriodDate(range.from, 'month') : null;
+}
+
+/**
+ * Date selector component -- the date bar at the top of the feed.
+ *
+ * 016 FR-007: with a month (or, from T007, a year) picked, the bar **names the period and its
+ * count** instead of a day -- "March 2026", and "4 memories" under it. `label` is what a period
+ * is named; `count` is how many memories it holds. Neither is given in day mode, which is drawn
+ * exactly as it has always been.
+ *
+ * ⚠ `count` is three-valued and the third value matters: `null` or `undefined` means *nobody has
+ * read the period yet*, and nothing is said then. A `0` under a month whose memories are still a
+ * microsecond away would be telling somebody a month of their life is empty when it is not --
+ * which is the same mistake, in the same place, that the list's own empty state guards against.
+ */
+const DateSelector = ({ date, label = null, count = null, onPrevious, onNext, onDatePress }) => {
   const formattedDate = useMemo(() => {
     const d = new Date(date);
     return d.toLocaleDateString(undefined, {
@@ -169,13 +240,18 @@ const DateSelector = ({ date, onPrevious, onNext, onDatePress }) => {
     });
   }, [date]);
 
+  // `memoriesLabel` answers '' for a count there is not one of, which is how "say nothing" and
+  // "say 0 memories" stay two different outcomes.
+  const counted = label ? memoriesLabel(count) : '';
+
   return (
     <View style={styles.dateSelector}>
       <TouchableOpacity style={styles.dateArrow} onPress={onPrevious}>
         <Ionicons name="chevron-back" size={20} color="#666" />
       </TouchableOpacity>
       <TouchableOpacity onPress={onDatePress}>
-        <Text style={styles.dateText}>{formattedDate}</Text>
+        <Text style={styles.dateText}>{label || formattedDate}</Text>
+        {counted ? <Text style={styles.dateCount}>{counted}</Text> : null}
       </TouchableOpacity>
       <TouchableOpacity style={styles.dateArrow} onPress={onNext}>
         <Ionicons name="chevron-forward" size={20} color="#666" />
@@ -303,6 +379,28 @@ export default function JournalScreen({ navigation }) {
    * is not. The list's `ListEmptyComponent` is withheld until there is an answer.
    */
   const [dayEntries, setDayEntries] = useState(null);
+
+  /**
+   * The period the calendar put on screen instead of a single day (`picked` in `data-model.md`).
+   *
+   * `null` is day mode -- the Journal exactly as it has always been, on `selectedDate`. A month
+   * is `{kind: 'month', year, month}` (FR-005); a year, `{kind: 'year', year}`, is T007's and is
+   * never set here yet. A day pick sets `selectedDate` and puts this back to `null`, which is
+   * what makes a day and a period one choice rather than two that can both be on.
+   */
+  const [picked, setPicked] = useState(null);
+
+  /**
+   * The picked period's memories, read from the phone's own database (FR-005, FR-010).
+   *
+   * **Three-valued, exactly as `dayEntries` is, and for the same reason.** `null` means "not read
+   * yet, or a read that failed"; `[]` means "read, and there are none". A month that could not be
+   * read must not be drawn as a month with nothing in it -- *"No entries yet"* over March, or a
+   * date bar reading *"0 memories"*, is this screen making a claim about somebody's own memories
+   * that it has no basis for. The list's empty state and the bar's count are both withheld until
+   * there is an answer.
+   */
+  const [periodEntries, setPeriodEntries] = useState(null);
 
   // Whether a typed note is still being kept. See `handleSendMessage` and `KEEPING_NOTE`.
   const [keepingNote, setKeepingNote] = useState(false);
@@ -526,6 +624,62 @@ export default function JournalScreen({ navigation }) {
   }, [reloadDay]);
 
   /**
+   * Which period read is the current one -- `dayReadRef`'s counterpart for a month.
+   *
+   * The bug it prevents is the one the arrows make easy: ► pressed twice, or a month picked and
+   * then another, leaves two reads outstanding, and without this the slower one would win and
+   * draw March's memories under June's name on the bar. Only the newest token may write.
+   */
+  const periodReadRef = useRef(0);
+
+  /**
+   * The picked period's memories, oldest first (FR-005).
+   *
+   * Day **and** month precision for a month, and `rangeFor` is the one place that decides that:
+   * a memory known only to its year sits on a stored 1 January and belongs to its year, not to
+   * that January (FR-016).
+   *
+   * Nothing is read, and nothing is recorded, in day mode: `periodEntries` stays as it was and
+   * `displayEntries` is not reading it. The token is still taken, so a period read that was
+   * already outstanding when the person picked a day cannot land afterwards.
+   */
+  const reloadPeriod = useCallback(async () => {
+    const token = periodReadRef.current + 1;
+    periodReadRef.current = token;
+
+    const range = rangeFor(picked);
+    // Nothing to read, or nothing readable. Deliberately **not** `setPeriodEntries(NO_ENTRIES)`:
+    // see the `catch` below, and `reloadDay`'s, for why an absent answer is not an empty one.
+    if (!journalId || !range) return;
+
+    try {
+      const found = await DatabaseService.getEntriesInRange(
+        journalId,
+        range.from,
+        range.to,
+        range.precisions,
+        range.order,
+      );
+      if (periodReadRef.current === token) setPeriodEntries(found);
+    } catch (error) {
+      // ⚠ Left exactly as it was -- `null` after a period change, which the list draws as nothing
+      // at all and the date bar as a month with no count. This query is its own SQL, with its own
+      // precision clause, so it can fail while the rest of the screen looks perfectly healthy;
+      // answering `[]` here would put *"No entries yet"* over a March holding twenty memories.
+      // Recorded rather than said, as the day's read is: nobody asked for this read, and an alert
+      // over somebody's memories on every failed month would be worse than a quiet page.
+      console.warn('[JournalScreen] the month could not be read', error?.message);
+    }
+  }, [journalId, picked]);
+
+  // Whenever the picked period or the journal changes. The last period's memories are let go of
+  // first, so that nothing is ever drawn under a period it does not belong to.
+  useEffect(() => {
+    setPeriodEntries(null);
+    reloadPeriod();
+  }, [reloadPeriod]);
+
+  /**
    * Both local reads again: the open day, and the calendar's index.
    *
    * **One function, because the two must not drift apart.** They were two calls and the second
@@ -542,8 +696,30 @@ export default function JournalScreen({ navigation }) {
    */
   const reloadDayAndIndex = useCallback(async () => {
     await reloadDay();
+    // The picked month with them, for the same reason the index is here: a like tapped on a card
+    // in a month list leaves that list a separate read, which would go on showing the counts it
+    // was drawn with. Extended rather than paired with a second function of its own, so the three
+    // reads behind one screen cannot drift apart -- which is the mistake this function was merged
+    // to stop. `reloadPeriod` returns at once in day mode, and the day's read is worth making in
+    // month mode: it is one grouped read of the phone's own database, and without it a person who
+    // liked a memory in March and then picked its own day would be shown the count from before.
+    await reloadPeriod();
     await loadCalendarIndex();
-  }, [reloadDay, loadCalendarIndex]);
+  }, [reloadDay, reloadPeriod, loadCalendarIndex]);
+
+  /**
+   * The period the list is really showing, or `null` for one day's worth of memories.
+   *
+   * `picked`, **except while the "needs a story" worklist is on**: that is memories from across
+   * the whole journal and not a period at all, so a date bar naming March over it, and ◄ ►
+   * stepping months behind it, would both be describing something that is not on screen. The
+   * pick itself is kept rather than cleared, so turning the chip off puts March back.
+   *
+   * FR-013 makes the two exclusive outright -- the chip switches off when a period is picked, and
+   * turning it on closes the period -- which is T008's. That makes this guard moot rather than
+   * wrong: it is here so that nothing on screen can describe something else in the meantime.
+   */
+  const periodOnScreen = noStoryOnly ? null : picked;
 
   const displayEntries = useMemo(() => {
     // The worklist ignores the selected day on purpose. Somebody asking what they have
@@ -552,8 +728,44 @@ export default function JournalScreen({ navigation }) {
     // the loaded feed, exactly as it did before: widening it is not this task's.
     if (noStoryOnly) return noStoryEntries;
 
+    // A picked month, or the open day. **This is the one answer to "which memories are on
+    // screen"**, which is what the card actions resolve a tapped memory from (finding G1) and
+    // what the rows below are built out of -- so a like in a month list reaches the right memory
+    // without a second notion of what is on screen to keep in step.
+    if (periodOnScreen) return periodEntries || NO_ENTRIES;
+
     return dayEntries || NO_ENTRIES;
-  }, [noStoryOnly, noStoryEntries, dayEntries]);
+  }, [noStoryOnly, noStoryEntries, periodOnScreen, periodEntries, dayEntries]);
+
+  /**
+   * The rows of a month or year list, or **null** in day mode (research R8).
+   *
+   * One flat list, never a `SectionList`: a card's map pin scrolls by row index
+   * (`scrollPieceIntoView`) and a section list has no `scrollToIndex` at all, so a month drawn as
+   * one would call a function that does not exist the moment a pin is pressed. Every row -- a
+   * grey day heading as much as a card -- is therefore a row of the same list, with a flat index
+   * of its own.
+   *
+   * The shaping is `calendarModel.buildRows`': which day a memory is on, what a heading says, and
+   * that a month's month-only memories come last under "March 2026". None of that is decided
+   * here, so there is one implementation of it and it is the one with its own tests.
+   *
+   * Null rather than an empty array in day mode, because "no rows" and "this is not a list of
+   * rows" are different things: a day draws its entries directly, exactly as it does today.
+   */
+  const displayRows = useMemo(() => {
+    // The worklist is a list of memories and not of a period, so it keeps the day feed's shape.
+    if (!periodOnScreen) return null;
+    return buildRows(displayEntries, periodOnScreen);
+  }, [periodOnScreen, displayEntries]);
+
+  /**
+   * Whether what the list is showing has actually been read.
+   *
+   * `null` is "no answer yet" and `[]` is "read, and there are none" -- the distinction the two
+   * reads above keep, and the one the empty state and the date bar's count both depend on.
+   */
+  const listAnswered = noStoryOnly || (periodOnScreen ? periodEntries !== null : dayEntries !== null);
 
   /**
    * Sorted civil dates that have entries. Drives ◄ ► and the left/right swipe, which move to
@@ -642,6 +854,19 @@ export default function JournalScreen({ navigation }) {
    * unusable. `direction` is 1 for later, -1 for earlier.
    */
   const navigateDate = useCallback((direction) => {
+    // 016 FR-007: with a month picked, ◄ ► move to the **earlier or later month with memories**,
+    // over `calendarModel`'s month neighbours rather than over the day index -- so they skip the
+    // months that hold nothing rather than stepping onto an empty one, and stop where there is no
+    // further month at all rather than wrapping round. FR-008: +1 is the later one, in a month
+    // exactly as in a day. (A picked year is T007's, and falls through to doing nothing until
+    // then rather than being stepped as a month.)
+    if (periodOnScreen?.kind === 'month') {
+      const target = neighbourMonth(calendarIndex, periodOnScreen, direction);
+      if (target) setPicked(target);
+      return;
+    }
+    if (periodOnScreen) return;
+
     setSelectedDate(prev => {
       const target = adjacentDateKey(datesWithEntries, toDateKey(prev), direction);
       // No populated date that way -- stay put. The swipe container also guards
@@ -649,20 +874,22 @@ export default function JournalScreen({ navigation }) {
       // date keeps the screen stable rather than jumping somewhere arbitrary.
       return target ? parseDateKey(target) : prev;
     });
-  }, [datesWithEntries]);
+  }, [datesWithEntries, periodOnScreen, calendarIndex]);
 
   /**
-   * Whether a populated date exists in each direction, so the swipe container
-   * can refuse the gesture at either end of the journal.
+   * Whether a period with memories exists in each direction, so the swipe container can refuse
+   * the gesture at either end of the journal. The picked month's neighbours, or the day index's.
    */
-  const hasNextDate = useMemo(
-    () => adjacentDateKey(datesWithEntries, selectedDateKey, 1) !== null,
-    [datesWithEntries, selectedDateKey],
-  );
-  const hasPreviousDate = useMemo(
-    () => adjacentDateKey(datesWithEntries, selectedDateKey, -1) !== null,
-    [datesWithEntries, selectedDateKey],
-  );
+  const hasNeighbour = useCallback((direction) => {
+    if (periodOnScreen?.kind === 'month') {
+      return neighbourMonth(calendarIndex, periodOnScreen, direction) !== null;
+    }
+    if (periodOnScreen) return false;
+    return adjacentDateKey(datesWithEntries, selectedDateKey, direction) !== null;
+  }, [periodOnScreen, calendarIndex, datesWithEntries, selectedDateKey]);
+
+  const hasNextDate = useMemo(() => hasNeighbour(1), [hasNeighbour]);
+  const hasPreviousDate = useMemo(() => hasNeighbour(-1), [hasNeighbour]);
 
   /**
    * Go to next date (for swipe gesture)
@@ -730,18 +957,36 @@ export default function JournalScreen({ navigation }) {
    * alone, and `CalendarSheet.test.js` pins that side of it, so closing here is the whole of it
    * and nothing double-closes.
    *
-   * Only a day does anything yet. A month and a year arrive with `picked` in T006 and T007; until
-   * then the sheet closes on one and the Journal stays where it was, which is no worse than the
-   * picker this replaces -- that had no month or year view at all.
+   * A day and a month are **one** choice, not two: a day sets `selectedDate` and clears `picked`,
+   * a month sets `picked`. Otherwise both could be on, and the screen would be showing a month
+   * under a date bar naming a day inside it. A year is T007's; until then the sheet closes on one
+   * and the Journal stays where it was, which is no worse than the picker this replaces -- that
+   * had no month or year view at all.
+   *
+   * A pick this cannot read changes nothing whatever, rather than clearing what is on screen:
+   * somebody who tapped March must not be left looking at an arbitrary day because the pick was
+   * malformed.
    */
   const handleCalendarPick = useCallback((period) => {
     setShowCalendarSheet(false);
 
-    if (period?.kind !== 'day') return;
-    // `dayKeyOf` rather than a bare assignment: it is this feature's one answer to "which civil
-    // day is this", and it refuses anything that is not one rather than passing it to the query.
-    const key = dayKeyOf(period.date);
-    if (key) setSelectedDate(parseDateKey(key));
+    if (period?.kind === 'day') {
+      // `dayKeyOf` rather than a bare assignment: it is this feature's one answer to "which civil
+      // day is this", and it refuses anything that is not one rather than passing it to the query.
+      const key = dayKeyOf(period.date);
+      if (key) {
+        setPicked(null);
+        setSelectedDate(parseDateKey(key));
+      }
+      return;
+    }
+
+    // Checked here as well as in `rangeFor`, so a month nothing could be read for never becomes
+    // the thing on screen: the date bar would name it and the list would sit empty under it
+    // for ever, with no read to answer and nothing said.
+    if (period?.kind === 'month' && rangeFor(period)) {
+      setPicked({ kind: 'month', year: period.year, month: period.month });
+    }
   }, []);
 
   const closeCalendar = useCallback(() => setShowCalendarSheet(false), []);
@@ -1339,9 +1584,18 @@ export default function JournalScreen({ navigation }) {
   }, [refresh, reloadDayAndIndex]);
 
   /**
-   * Key extractor
+   * Key extractor -- for a day's entry, and for a month or year list's rows (research R8).
+   *
+   * **An entry row keeps keying by its own `localId`**, which is what a day has always keyed by,
+   * so `useViewableKeys` and the `isVisible` it answers see exactly the keys they see today and a
+   * card does not lose track of whether it is on screen when the same memory appears in a month.
+   * A heading row keys as `heading:<period>`, which no `localId` can collide with.
    */
-  const keyExtractor = useCallback((item) => item.localId, []);
+  const keyExtractor = useCallback((item) => {
+    if (item?.kind === 'entry') return item.key;
+    if (item?.kind) return `heading:${item.key}`;
+    return item.localId;
+  }, []);
 
   /**
    * Which cards are on screen, and the list itself (013 T052).
@@ -1429,6 +1683,35 @@ export default function JournalScreen({ navigation }) {
       />
     );
   }, [authUser?.id, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, handleReact, handleAddResponse, handleReshare, handleMenuPress, unfinishedEditOf, openEdit, isViewable, scrollPieceIntoView]);
+
+  /**
+   * One row of the one list: a heading, or a memory drawn by the card above (research R8).
+   *
+   * ⚠ **A memory is rendered by `renderEntry` and by nothing else, in a day and in a month
+   * alike.** FR-009 and this feature's governing rule -- *we should not change how journal
+   * entries are shown* -- mean a month list is the same card with the same props, including the
+   * row index it hands `scrollPieceIntoView`: that index counts **rows**, so a pressed pin brings
+   * the piece into view past the day headings rather than landing short of it by one heading per
+   * day above it.
+   *
+   * A day's `data` is entries and a period's is rows, so a row arrives either way and is unwrapped
+   * here. `row.entry` is where a period's memory lives, which is also the only place a card action
+   * can resolve one from -- the rows themselves carry no `localId` (finding G1).
+   */
+  const renderRow = useCallback(({ item, index: rowIndex }) => {
+    if (item?.kind === 'dayHeading' || item?.kind === 'monthHeading') {
+      return (
+        <CalendarListHeading
+          kind={item.kind}
+          label={item.label}
+          count={item.count}
+          open={item.open}
+        />
+      );
+    }
+
+    return renderEntry({ item: item?.kind === 'entry' ? item.entry : item, index: rowIndex });
+  }, [renderEntry]);
 
   // Show entry detail view
   if (showEntryDetail && selectedEntry) {
@@ -1528,8 +1811,16 @@ export default function JournalScreen({ navigation }) {
       )}
 
       {/* Date Selector */}
+      {/*
+        FR-007: with a month picked the bar names the period and its count ("March 2026",
+        "4 memories") instead of a day. The count is the memories really read for it, not the
+        calendar index's tally -- so it is what is on screen beneath it, and it is `null` until
+        the read lands, which is how a month nobody could read says nothing rather than "0".
+      */}
       <DateSelector
         date={selectedDate}
+        label={periodLabel(periodOnScreen)}
+        count={periodOnScreen && listAnswered ? displayEntries.length : null}
         onPrevious={() => navigateDate(-1)}
         onNext={() => navigateDate(1)}
         onDatePress={openCalendar}
@@ -1551,8 +1842,15 @@ export default function JournalScreen({ navigation }) {
         ) : (
           <ViewportFlatList
             ref={listRef}
-            data={displayEntries}
-            renderItem={renderEntry}
+            /*
+              The day's memories, or a month's rows -- **the same list either way** (research
+              R8). One `ViewportFlatList`, with the props it has always had: a card's map pin
+              scrolls by row index and only a `FlatList` has `scrollToIndex` at all, so a month
+              drawn as a `SectionList` would call a function that does not exist the moment
+              somebody pressed a pin.
+            */
+            data={displayRows ? displayRows.rows : displayEntries}
+            renderItem={renderRow}
             keyExtractor={keyExtractor}
             onViewableItemsChanged={onViewableItemsChanged}
             onScrollToIndexFailed={handleScrollToIndexFailed}
@@ -1573,9 +1871,11 @@ export default function JournalScreen({ navigation }) {
               feed, so there is a moment between a day being chosen and its memories arriving --
               and telling somebody their day is empty during it would be saying the one thing
               this task exists to stop the screen saying. `dayEntries === null` is "not read
-              yet"; `[]` is "read, and there are none", which does get the empty state.
+              yet"; `[]` is "read, and there are none", which does get the empty state. A picked
+              month answers the same question through `periodEntries`, and for the same reason:
+              a month that could not be read must not be drawn as a month with nothing in it.
             */
-            ListEmptyComponent={noStoryOnly || dayEntries ? <EmptyFeed /> : null}
+            ListEmptyComponent={listAnswered ? <EmptyFeed /> : null}
           />
         )}
       </DateSwipeContainer>
@@ -1651,15 +1951,18 @@ export default function JournalScreen({ navigation }) {
         The book-style calendar (FR-001), in place of the platform's own white date picker.
 
         `picked` is one prop with three kinds, and `data-model.md` keeps `selectedDate` for day
-        mode beside `picked`, so the two are mapped into it here. There is no `picked` state yet
-        -- month and year modes are T006 and T007 -- so for now this is always the day on screen.
+        mode beside `picked`, so the two are mapped into it here: a picked month as it is, and
+        otherwise the day on screen -- `periodOnScreen` rather than `picked`, so the sheet opens
+        on what the list is showing. The sheet reads it to decide which view it opens in, so
+        reopening it over a month puts somebody back in Month view on that month rather than
+        making them find it again (`initialView`). Year mode is T007's.
 
         `index` cannot be null while `visible` is true: `openCalendar` resolves one first, and
         nothing ever sets it back. See its comment for why that matters.
       */}
       <CalendarSheet
         visible={showCalendarSheet}
-        picked={{ kind: 'day', date: selectedDateKey }}
+        picked={periodOnScreen || { kind: 'day', date: selectedDateKey }}
         index={calendarIndex}
         onPick={handleCalendarPick}
         onClose={closeCalendar}
@@ -1787,6 +2090,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#333',
+    textAlign: 'center',
+  },
+  // FR-007's count, under the period it is a count of, and quieter than it.
+  dateCount: {
+    fontSize: 12,
+    color: '#8E8E93',
+    textAlign: 'center',
   },
 
   // Feed content

@@ -1,0 +1,53 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`a whole month (User Story 2) draws a card in March exactly as the same memory on its own day (SC-002, FR-009) 1`] = `
+{
+  "currentUserId": "user-1",
+  "entry": {
+    "commentsCount": 0,
+    "contentBlocks": [
+      {
+        "content": "a memory of 2026-03-14",
+        "order": 0,
+        "type": "text",
+      },
+    ],
+    "createdAt": 2000100,
+    "date": "2026-03-14",
+    "datePrecision": "day",
+    "deletedAt": null,
+    "journalId": "journal-months",
+    "localId": "mar-14",
+    "location": null,
+    "locationSharing": "private",
+    "reactions": {
+      "likedByUserIds": [],
+      "likes": 0,
+    },
+    "serverId": "server-mar-14",
+    "serverUpdatedAt": null,
+    "shareState": null,
+    "syncStatus": "pending",
+    "syncedAt": null,
+    "updatedAt": Any<Number>,
+    "userId": "user-1",
+    "visibility": "private",
+  },
+  "hasUnfinishedEdit": false,
+  "isVisible": true,
+  "onAddResponse": "[a handler]",
+  "onContinueEdit": "[a handler]",
+  "onGalleryPress": "[a handler]",
+  "onMenuPress": "[a handler]",
+  "onPhotoPress": "[a handler]",
+  "onReact": "[a handler]",
+  "onRequestScrollTo": "[a handler]",
+  "onReshare": "[a handler]",
+  "onVideoPress": "[a handler]",
+  "primaryColor": "#4361ee",
+  "user": {
+    "avatarUrl": "https://randomuser.me/api/portraits/women/47.jpg",
+    "name": "Sam",
+  },
+}
+`;
