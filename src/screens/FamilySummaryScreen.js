@@ -30,6 +30,11 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
 import { ViewportSectionList } from '../components/media/ViewportLists';
+// The same viewability helper the Journal uses, for the same reason: `JournalEntryCard` mounts a
+// native map view for a memory with places, and this screen is a paginating list of those cards
+// -- `onEndReached` keeps adding to it, so the maps accumulate. research R10 *Lazy rendering* and
+// plan.md's risk table treat gating as a requirement, not an optimisation (review fix, Important 3).
+import { useViewableKeys } from '../hooks/mediaVisibility';
 import { useAuth } from '../context/AuthContext';
 import { getJournalBook } from '../services/SocialService';
 import { journalBookToDays } from '../utils/journalBookDays';
@@ -190,6 +195,26 @@ export default function FamilySummaryScreen({ navigation, route }) {
   // day's entries carries it instead, drawing everyone and dimming whoever recorded nothing.
   const listSections = useMemo(() => journalBookToDays(days, household), [days, household]);
 
+  /**
+   * One key per entry, hoisted out of the list's props so the viewability helper below is asked
+   * by exactly the key the list is keyed on. Two copies of this rule would be two chances for
+   * the lookup to miss, and a miss here reads as "that card has no map".
+   */
+  const keyExtractor = useCallback(
+    (item, index) => item.serverId || item.localId || String(index),
+    [],
+  );
+
+  /**
+   * Which cards are on screen (review fix, Important 3).
+   *
+   * `ViewportSectionList` composes this callback with its own, and React Native forbids changing
+   * `onViewableItemsChanged` on a live list, so both are stable. Until the list has reported
+   * anything every row counts as on screen, which is what makes this agree with the card's own
+   * `isVisible` default of true.
+   */
+  const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
+
   // Carry the reader to the entry a face is about. Only ever called for somebody who
   // recorded that day, so the entry is present in the list by construction; the guard is
   // for a list that has since been refreshed out from under the press.
@@ -262,7 +287,8 @@ export default function FamilySummaryScreen({ navigation, route }) {
           ref={listRef}
           sections={listSections}
           onScrollToIndexFailed={() => {}}
-          keyExtractor={(item, index) => item.serverId || item.localId || String(index)}
+          keyExtractor={keyExtractor}
+          onViewableItemsChanged={onViewableItemsChanged}
           renderSectionHeader={({ section }) => (
             <View style={styles.dayBlock}>
               <Text style={styles.dayHeading}>{section.title}</Text>
@@ -276,7 +302,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
               />
             </View>
           )}
-          renderItem={({ item }) => (
+          renderItem={({ item, index }) => (
             // `user` is who the card draws in its header. journalBookToDays attributes each
             // entry from the household roster rather than from the entry's own author field,
             // precisely so a member the API returns without an author is not labelled
@@ -288,6 +314,8 @@ export default function FamilySummaryScreen({ navigation, route }) {
               user={item.author}
               currentUserId={user?.id}
               showAuthor
+              // Off screen, the card holds its map's height open instead of mounting one.
+              isVisible={isViewable(keyExtractor(item, index))}
             />
           )}
           onEndReached={loadMore}

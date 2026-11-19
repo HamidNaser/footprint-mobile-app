@@ -16,8 +16,29 @@ import { JournalRepository } from '../repositories';
 import { JournalService } from '../services/JournalService';
 import { SettingsService, StorageMode } from '../services/SettingsService';
 import { DatabaseService } from '../services/DatabaseService';
-import { SyncStatus } from '../database/schema';
+// `ShareState` lives beside `SyncStatus` because `share_state` is that file's column, and
+// because the memory's card renders these two states too -- importing a card string out of the
+// sync engine would be a dependency pointing the wrong way.
+import { SyncStatus, ShareState } from '../database/schema';
 import { API_CONFIG } from '../config/api.config';
+
+/**
+ * The closed vocabulary `unresolvedAudience[].reason` uses
+ * (`Footprint.Hub.Contracts/Api/Journals/JournalDtos.cs`, `UnresolvedAudienceReasons`). Only
+ * the one this code branches on is named: see `_settleUnresolvedAudience` for why everything
+ * else, including `source_unavailable` itself, is handled by the same retryable default the
+ * server uses.
+ */
+const UnresolvedAudienceReason = {
+  DO_NOT_RESEND: 'do_not_resend',
+};
+
+/**
+ * How the single-operation routes say the same thing: the title of the problem response
+ * `AudienceRefusalExtensions.AudienceCouldNotBeDetermined` builds, whose two forms -- 503
+ * "could not be determined" and 422 "can never be determined" -- share this opening.
+ */
+const AUDIENCE_PROBLEM_TITLE = 'The audience for this entry';
 
 /**
  * Sync states
@@ -346,6 +367,17 @@ class SyncEngineClass {
       // nothing, so the operation was never marked completed and the next sync pushed it
       // again, producing a duplicate memory every retry. The local column is still
       // `local_id`; only the wire name is the server's.
+      //
+      // Every operation this reply settles as DONE. Carried into `_settleUnresolvedAudience`
+      // so it cannot resurrect one: these three lists are settled first, and the `waiting` arm
+      // returns an operation to `pending` unconditionally, so an item named in both a success
+      // list and `unresolvedAudience` would put a COMPLETED create back in the queue and the
+      // next batch would write the memory a second time. Today's Hub cannot send that reply --
+      // its refusal arm deliberately omits the item from all three lists (FR-012b) -- so this
+      // is insurance against a contract change, and a duplicated memory is expensive enough
+      // and the guard cheap enough to keep it.
+      const completedOperationIds = new Set();
+
       for (const created of batchResult.created) {
         // A reply item with no correlation id cannot be matched to anything. Without this
         // guard `undefined === undefined` was true, so such an item matched the first
@@ -363,6 +395,7 @@ class SyncEngineClass {
         if (op) {
           await this._handleCreateSuccess(op, created.serverId);
           await SyncQueue.markCompleted(op.id, { serverId: created.serverId });
+          completedOperationIds.add(op.id);
           result.succeeded++;
         }
       }
@@ -375,6 +408,7 @@ class SyncEngineClass {
         if (op) {
           await this._handleUpdateSuccess(op);
           await SyncQueue.markCompleted(op.id);
+          completedOperationIds.add(op.id);
           result.succeeded++;
         }
       }
@@ -383,6 +417,7 @@ class SyncEngineClass {
         const op = deletes.find(o => o.serverId === serverId);
         if (op) {
           await SyncQueue.markCompleted(op.id);
+          completedOperationIds.add(op.id);
           result.succeeded++;
         }
       }
@@ -410,6 +445,25 @@ class SyncEngineClass {
       //     `syncBadgeStatus` renders as a failure.
       // No new column and no new status: `conflict` and `conflict_data` both already
       // exist and are already what the single-operation path uses.
+      //
+      // Handled BEFORE `unresolvedAudience` below, and what is settled here is carried into
+      // it. For an update to an entry that is no longer on the server the Hub deliberately
+      // sends both signals for one item -- a conflict "Entry not found" and an
+      // `unresolvedAudience` `do_not_resend` -- and the owner ruled that the conflict wins
+      // (round-3 H2): "deleted on another device" is the true account of what happened, and a
+      // memory that no longer exists is not a memory waiting for an audience.
+      //
+      // ⚠ Carried as the MEMORIES the reply named as conflicts, NOT as the operations.
+      // `SyncQueue.enqueue` does not deduplicate, so two offline edits to one memory are two
+      // `UPDATE_ENTRY` rows with the same `serverId` -- and `_findRefusedOperation` matches by
+      // `serverId` with `.find`, so both of the Hub's conflict items resolve to the FIRST of
+      // them. Keyed on the operation, the exclusion therefore held one row while the audience
+      // path settled the other, and the memory ended up carrying a conflict row AND a
+      // `share_state`: two records of one fact, in the exact case the owner settled as "the
+      // conflict wins". `clientId` is the memory's local id and is what both signals correlate
+      // on, so that is the key.
+      const conflictedClientIds = new Set();
+
       if (batchResult.conflicts && batchResult.conflicts.length > 0) {
         const refusals = await ConflictResolver.processServerConflicts(
           batchResult.conflicts
@@ -417,6 +471,17 @@ class SyncEngineClass {
 
         for (const refusal of refusals) {
           const op = this._findRefusedOperation(refusal, { creates, updates, deletes });
+
+          // Every name this refusal gives the memory: the reply's own `clientId`, and -- for a
+          // refusal correlated by `serverId`, which carries no `clientId` of its own -- the
+          // matched operation's. Both spellings of the queued payload, as elsewhere.
+          for (const clientId of [
+            refusal.clientId,
+            op?.data?.local_id || op?.data?.localId,
+            op?.entityId,
+          ]) {
+            if (clientId) conflictedClientIds.add(clientId);
+          }
 
           if (op) {
             await SyncQueue.markConflict(op.id, {
@@ -428,10 +493,12 @@ class SyncEngineClass {
             });
           } else {
             // Reported, not swallowed. A refusal we cannot tie to an operation still has
-            // to be counted, or we are back to claiming a clean sync. It happens today
-            // for a refused *create*: the server can only echo `ClientId`, and this client
-            // sends the local id as `localId`, so it comes back null. That correlation gap
-            // is PR #42's, not this change's.
+            // to be counted, or we are back to claiming a clean sync.
+            //
+            // It is not the gap this comment used to describe: `JournalApi._formatEntryForApi`
+            // sends the local id as `clientId`, for creates and updates alike, and the Hub
+            // echoes that field -- so a refused create IS correlatable and PR #42 closed this.
+            // What is left is a reply naming neither id, or naming one no longer queued.
             console.warn(
               '[SyncEngine] Server refused a change that matches no queued operation:',
               { clientId: refusal.clientId, serverId: refusal.serverId, reason: refusal.reason }
@@ -459,6 +526,17 @@ class SyncEngineClass {
           });
         }
       }
+
+      // Then the memories whose audience the server could not apply -- and which it therefore
+      // did not save at all: the refusal arm of `BatchSync` reports the item and `continue`s
+      // before the entity is built, which is why its problem title says "nothing was saved".
+      // Not conflicts, not failures, and not on the sync badge: shown on the memory's own card
+      // and nowhere else.
+      await this._settleUnresolvedAudience(
+        batchResult.unresolvedAudience,
+        { creates, updates },
+        { conflictedClientIds, completedOperationIds }
+      );
 
     } catch (error) {
       // The batch itself was accepted; only the local bookkeeping after it failed. There
@@ -548,6 +626,11 @@ class SyncEngineClass {
         await this._processSingleOperation(op);
         result.succeeded++;
       } catch (opError) {
+        // Before anything generic, and before this is logged as an error at all: an audience
+        // the server could not apply is not an operation that failed. It is settled on the
+        // memory itself, counted nowhere, and does not spend a retry (FR-011, round-3 H1).
+        if (await this._settledAsAudienceRefusal(op, opError)) continue;
+
         // The response body, not just the status. A 400 here says the server rejected
         // the payload and nothing else; without the body there is no way to tell which
         // field it objected to, and the operation retries against the same objection
@@ -705,6 +788,240 @@ class SyncEngineClass {
     }
 
     return null;
+  }
+
+  /**
+   * Record what the server said about the audiences it could not apply, and settle their
+   * operations (FR-011, SC-010, research R15).
+   *
+   * The Hub saves **nothing** for such a memory -- its refusal arm reports the item and
+   * `continue`s before the entity is built, which is why the problem title on the
+   * single-operation route says "nothing was saved" -- and reports, per item,
+   * `{ clientId, reason }` with `reason` one of two tokens. Until this existed the phone read
+   * none of it, so the operation stayed pending and was re-sent on every sync forever with
+   * nothing shown anywhere -- a sharing failure that was both silent and permanent.
+   *
+   *   - `source_unavailable`: the same write will succeed unchanged once the audience can be
+   *     determined. `share_state = 'waiting'`, and the operation goes back to `pending`
+   *     without spending a retry, so the phone sends it again by itself.
+   *   - `do_not_resend`: it never will. `share_state = 'refused'`, and the operation is
+   *     removed, which is what stops the re-sending.
+   *
+   * ⚠ **Neither arm touches the memory's audience.** The server holds nothing for it, so it is
+   * shown to nobody else in the meantime, and the local row is never quietly rewritten with a
+   * different audience -- a partial or substituted audience is the one failure mode with no
+   * safe side (CLAUDE.md *Sharing fails closed*).
+   *
+   * ⚠ **`share_state` is written BEFORE the queue is touched**, and the order is not
+   * incidental. Settle the operation first and a crash in between leaves a memory with no
+   * record of the refusal and no operation to produce one again: never shared, with nothing
+   * on its card to say so. This way round, the same crash leaves the operation pending, the
+   * next batch asks again, and the server -- idempotent on `clientId` -- answers the same.
+   *
+   * ⚠ **One pass per memory, not per item.** The Hub answers per update, so two queued edits
+   * to one entry come back as two items carrying the same `clientId`. Settling only the first
+   * would leave the second re-sending a memory already refused for good (round-4 U2).
+   *
+   * ⚠ **What this reply has already settled is left alone**, in two different ways:
+   *   - a memory the reply named as a conflict is the conflict's, whole: the conflict is the
+   *     one record of it and `share_state` stays unset (round-3 H2). Keyed on the MEMORY, not
+   *     on the operation -- two queued edits to one memory both resolve to the first operation
+   *     in the conflicts loop, so an operation-keyed exclusion left the second one here and
+   *     wrote a `share_state` beside an existing conflict row.
+   *   - an operation the reply settled as COMPLETED is not resurrected: returning a finished
+   *     create to `pending` would make the next batch write the memory a second time. Only
+   *     the QUEUE action is skipped there -- `share_state` is still written, because a memory
+   *     the server says it saved without the chosen audience must not be left showing a card
+   *     that reads as shared with it.
+   *
+   * @param {array} items - `unresolvedAudience` from the batch reply
+   * @param {object} pushed - the operations just pushed, as `{ creates, updates }`
+   * @param {object} settled - what this reply has already accounted for:
+   *   `conflictedClientIds` (the memories it settled as conflicts) and
+   *   `completedOperationIds` (the operations it marked completed)
+   */
+  async _settleUnresolvedAudience(
+    items,
+    { creates, updates },
+    { conflictedClientIds, completedOperationIds }
+  ) {
+    if (!items || items.length === 0) return;
+
+    const reasonByClientId = new Map();
+    for (const item of items) {
+      // An item with no correlation id identifies no memory, so there is nothing to mark and
+      // nothing to settle. Reported rather than swallowed: guessing would mark the wrong
+      // memory as unshared, and silence is the defect this whole path exists to end. The
+      // operation stays pending, and the next batch -- which is idempotent on `clientId` --
+      // can correlate the answer.
+      if (!item?.clientId) {
+        console.warn(
+          '[SyncEngine] unresolvedAudience item has no clientId; cannot correlate it:',
+          { reason: item?.reason ?? null }
+        );
+        continue;
+      }
+      // Two items for one memory are the normal case (one per queued update). Where they
+      // disagree, `do_not_resend` wins: it is the server stating plainly that this will never
+      // work, and taking the other token instead would leave the memory in the retry loop
+      // this whole path exists to end -- for as long as the app is installed.
+      const known = reasonByClientId.get(item.clientId);
+      if (known === UnresolvedAudienceReason.DO_NOT_RESEND) continue;
+      reasonByClientId.set(item.clientId, item.reason);
+    }
+
+    for (const [clientId, reason] of reasonByClientId) {
+      // The conflict wins for the whole memory, whatever this reply also said about its
+      // audience, and however many operations for it are queued (round-3 H2). Skipped here
+      // rather than per operation so that the second of two queued edits cannot be settled
+      // as an audience refusal while the first is settled as the conflict.
+      if (conflictedClientIds.has(clientId)) continue;
+
+      // Both spellings, as `_findRefusedOperation` takes them: the queued payload is a SQLite
+      // row (`local_id`) on some paths and an in-memory entry (`localId`) on others.
+      const matching = [...creates, ...updates].filter(
+        (op) => (op.data?.local_id || op.data?.localId) === clientId
+      );
+
+      const operations = matching.filter((op) => !completedOperationIds.has(op.id));
+
+      // `do_not_resend` and nothing else means give up. Anything unrecognised falls to
+      // `waiting`, which mirrors the server's own rule -- both default arms of
+      // `AudienceRefusalExtensions` are the retryable one -- and fails closed the way that
+      // matters: the memory keeps trying and keeps saying "Waiting to share..." on its card,
+      // where abandoning it would lose a share that would have gone through.
+      const refusedForGood = reason === UnresolvedAudienceReason.DO_NOT_RESEND;
+      const shareState = refusedForGood ? ShareState.REFUSED : ShareState.WAITING;
+
+      if (operations.length === 0) {
+        if (matching.length === 0) {
+          console.warn(
+            '[SyncEngine] The server could not apply an audience for a change that matches no queued operation:',
+            { clientId, reason }
+          );
+          continue;
+        }
+
+        // Every operation for this memory was settled as COMPLETED by the same reply, which
+        // today's Hub never sends -- its refusal arm leaves the item out of `created`,
+        // `updated` and `deleted` -- so this is the shape of a server that has changed.
+        // Settling it means recording the refusal on the memory and NOT touching the queue:
+        // skipping both would leave a memory the server says it saved without the chosen
+        // audience showing a card that reads as shared with exactly that audience, which is
+        // the wrong way round for a guard (CLAUDE.md *Sharing fails closed* -- too many and
+        // it reaches someone it should not). The queue is what must be left alone: returning
+        // a finished create to `pending` would write the memory a second time, and removing
+        // the operation would undo a settlement that already stands.
+        console.warn(
+          '[SyncEngine] The server refused this memory\'s audience in a reply that had already settled every operation for it; the refusal is recorded on the memory and the queue settlement stands:',
+          { clientId, reason, shareState }
+        );
+        for (const localId of new Set(matching.map((op) => op.entityId || clientId))) {
+          await JournalRepository.setShareState(localId, shareState);
+        }
+        continue;
+      }
+
+      // The entity each matched operation is about. `clientId` IS the local id -- it is sent
+      // as the entry's `local_id` -- so this is one memory in every realistic case; derived
+      // from the operations rather than assumed, so a queue row that disagreed would still be
+      // recorded against the memory it names instead of silently against another one's.
+      for (const localId of new Set(operations.map((op) => op.entityId || clientId))) {
+        await JournalRepository.setShareState(localId, shareState);
+      }
+
+      for (const op of operations) {
+        if (refusedForGood) {
+          await SyncQueue.removeOperation(op.id);
+        } else {
+          await SyncQueue.returnToPending(op.id);
+        }
+      }
+
+      console.log(
+        '[SyncEngine] The server could not apply this memory\'s audience:',
+        { clientId, reason, shareState, operations: operations.length }
+      );
+    }
+  }
+
+  /**
+   * Is this single-operation failure the server saying it could not apply the audience, and
+   * has it been settled as one? (research R15, round-2 M6, round-3 H1)
+   *
+   * Checked BEFORE the generic handling in `_fallbackToSingleOperations`, which marks the
+   * operation failed. An audience refusal is not a failure to upload: the server saved nothing
+   * and nothing about the memory is shared, and FR-011 says it is reported on the memory's own
+   * card and is not counted among the memories that failed to send. Marking it failed would
+   * put it on the sync badge, spend a retry it needs, and -- after three -- abandon the share
+   * in silence.
+   *
+   * Recognised by the problem's title, which is the one thing both statuses share
+   * (`AudienceRefusalExtensions.AudienceCouldNotBeDetermined`); `ApiError.data` is the parsed
+   * problem body. Which refusal it is comes from the status first -- 503 could succeed later,
+   * 422 never can -- and, for any other status, from the `reason` token the Hub already ships
+   * in the problem body (`details.Extensions["reason"]`). The status alone was right for
+   * today's server, where only those two carry this title, but a third added later would have
+   * fallen through to `markFailed` and been abandoned in silence after three retries, which is
+   * the very defect this path exists to remove.
+   *
+   * Any other 503 or 422 -- the service being down, a payload the server would not take --
+   * keeps today's handling exactly, because it is a failure like any other. So does a matching
+   * title under an unknown status with no token at all: there is nothing to say which refusal
+   * it is, and today's handling at least counts it, where guessing `waiting` would retry an
+   * unknown condition for as long as the app is installed.
+   *
+   * @param {object} operation - the queued operation that was being sent
+   * @param {Error} error - what the API threw
+   * @returns {Promise<boolean>} True when this was an audience refusal and has been settled
+   */
+  async _settledAsAudienceRefusal(operation, error) {
+    const title = error?.data?.title;
+    if (typeof title !== 'string' || !title.startsWith(AUDIENCE_PROBLEM_TITLE)) return false;
+
+    const status = error?.status;
+    const reason = error?.data?.reason;
+    const classifiable =
+      status === 422 || status === 503 || (typeof reason === 'string' && reason.length > 0);
+    if (!classifiable) return false;
+
+    // No entity means no memory to record this against, so there is nothing to show and the
+    // refusal would be silent. Left to today's handling, which at least counts it.
+    if (!operation?.entityId) return false;
+
+    // The status decides where it says anything; otherwise the token does, and an unrecognised
+    // token falls to `waiting` exactly as it does on the batch route -- both default arms of
+    // the Hub's own `AudienceRefusalExtensions` are the retryable one, because abandoning a
+    // share that would have gone through loses it in silence.
+    const refusedForGood =
+      status === 422
+        ? true
+        : status === 503
+          ? false
+          : reason === UnresolvedAudienceReason.DO_NOT_RESEND;
+
+    // Before the queue is touched, for the reason given on `_settleUnresolvedAudience`.
+    await JournalRepository.setShareState(
+      operation.entityId,
+      refusedForGood ? ShareState.REFUSED : ShareState.WAITING
+    );
+
+    // The operation is `in_progress` by now -- `_processSingleOperation` marks it so before it
+    // calls out -- which is exactly why `cancelOperation`, which deletes only `pending` rows,
+    // cannot settle one of these.
+    if (refusedForGood) {
+      await SyncQueue.removeOperation(operation.id);
+    } else {
+      await SyncQueue.returnToPending(operation.id);
+    }
+
+    console.log(
+      '[SyncEngine] The server could not apply this memory\'s audience:',
+      { localId: operation.entityId, status, reason: reason ?? null,
+        shareState: refusedForGood ? ShareState.REFUSED : ShareState.WAITING }
+    );
+
+    return true;
   }
 
   /**
@@ -937,6 +1254,12 @@ class SyncEngineClass {
         contentBlocks: mapped.contentBlocks,
         location: mapped.location,
         visibility: mapped.visibility,
+        // The server's own last-save time, which `createFromServer` records for a memory
+        // arriving for the first time and this records for every later copy of one. It is the
+        // reference the read-time piece-ordering rule compares a capture moment against
+        // (FR-029, research R2), so a copy that updated everything except this would leave
+        // the ordering judged against whatever the memory arrived with.
+        updatedAt: mapped.updatedAt,
       });
     }
   }

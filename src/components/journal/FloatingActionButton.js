@@ -269,6 +269,7 @@ export const SimpleFAB = ({
   disabled = false,
   label,
   style,
+  testID,
 }) => {
   const getPositionStyle = () => {
     switch (position) {
@@ -305,6 +306,7 @@ export const SimpleFAB = ({
         onPress={onPress}
         disabled={disabled}
         activeOpacity={0.8}
+        testID={testID}
       >
         <Ionicons name={icon} size={28} color="#FFF" />
       </TouchableOpacity>

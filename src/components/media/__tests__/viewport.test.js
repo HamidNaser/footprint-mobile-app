@@ -130,15 +130,41 @@ describe('ViewportFlatList: numColumns keys, extraData, host callbacks', () => {
 });
 
 describe('ViewportSectionList', () => {
-  it('gates items by the key the host extracts', () => {
-    const sections = [{ title: 'T', data: [{ id: 'a' }, { id: 'b' }] }];
+  const sections = [{ title: 'T', data: [{ id: 'a' }, { id: 'b' }] }];
+  const mount = () => {
     let tree;
     act(() => {
       tree = renderer.create(
         <ViewportSectionList sections={sections} keyExtractor={(i) => i.id} renderItem={({ item }) => <Probe id={item.id} />} />,
       );
     });
+    return tree;
+  };
+
+  it('gates items by the key the host extracts', () => {
+    const tree = mount();
     act(() => tree.root.findByType(SectionList).props.onViewableItemsChanged({ viewableItems: [token('b', 1)], changed: [] }));
+    expect([state(tree, 'a'), state(tree, 'b')]).toEqual(['hidden', 'visible']);
+  });
+
+  /**
+   * The key a real SectionList reports is **not** the key the host extractor made.
+   * `VirtualizedSectionList._subExtractor` builds a row's key as `<section>:<itemKey>` (see
+   * `@react-native/virtualized-lists/Lists/VirtualizedSectionList.js`), and the case above uses
+   * a bare `'b'`, which no SectionList ever sends. With only the reported key recorded, every
+   * `isViewable(keyExtractor(item))` lookup missed and every row read as off screen the instant
+   * the list reported anything -- silently, and only on a device, since nothing in jest produces
+   * the real shape. Found while wiring `FamilySummaryScreen`'s cards to viewability (review fix,
+   * Important 3), where it would have hidden every memory map in the family book.
+   */
+  it('gates items when the list reports the prefixed keys a real SectionList sends', () => {
+    const tree = mount();
+    act(() =>
+      tree.root.findByType(SectionList).props.onViewableItemsChanged({
+        viewableItems: [{ key: '0:b', item: sections[0].data[1], index: 1, isViewable: true }],
+        changed: [],
+      }),
+    );
     expect([state(tree, 'a'), state(tree, 'b')]).toEqual(['hidden', 'visible']);
   });
 });

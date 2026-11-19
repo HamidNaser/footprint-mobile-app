@@ -10,7 +10,11 @@ import { JournalRepository, EntryVisibility, LocationSharing, SortOrder } from '
 import { FileService, MediaType } from './FileService';
 import { DatabaseService } from './DatabaseService';
 import { SettingsService, StorageMode } from './SettingsService';
-import { ContentBlockType, UploadStatus } from '../database/schema';
+// The queue, for the one operation `reshareEntry` has to put there itself (see its comment).
+// A static import is safe: SyncQueue reaches only the database, so it closes no cycle the way
+// SyncEngine would -- that one is still required lazily in `_syncNow`.
+import { SyncQueue, SyncOperationType } from '../sync/SyncQueue';
+import { ContentBlockType, UploadStatus, SyncStatus } from '../database/schema';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -562,7 +566,29 @@ class JournalServiceClass {
    * @returns {Promise<object>} Updated entry
    */
   async updateEntry(localId, updates) {
-    const updatedEntry = await this.repository.update(localId, updates);
+    // Copy anything captured during the edit out of the OS cache -- and out of the draft
+    // folder, which is deleted the moment this resolves (`CaptureDraftStore`, FR-016) --
+    // before the entry references it. Exactly what `createEntry` does, and for the same
+    // reason: an entry pointing at a file that has since been removed renders as a grey
+    // placeholder. This path only queued uploads before, so the edit door led straight past
+    // it (research R7).
+    //
+    // Media the server already holds is left alone: a piece loaded back by an edit carries
+    // `{id, url}` and no `localPath`, which `_persistMediaBlocks` skips and
+    // `_queueMediaBlockForUpload` skips, so it is neither copied nor uploaded a second time.
+    // That matters beyond the wasted upload -- a second copy takes a new media id, and the
+    // server carries a piece's capture moment across an edit by matching on that id and then
+    // on its url, so re-uploading would lose the original moment of a piece nobody touched
+    // (FR-019, research R3).
+    //
+    // Only when the edit actually carries pieces. An update that changes something else, an
+    // audience say, must pass `contentBlocks` through untouched: `_persistMediaBlocks`
+    // answers `[]` for a missing block list, and storing that would empty the memory.
+    const persisted = Array.isArray(updates?.contentBlocks)
+      ? { ...updates, contentBlocks: await this._persistMediaBlocks(updates.contentBlocks) }
+      : updates;
+
+    const updatedEntry = await this.repository.update(localId, persisted);
 
     // Queue any new media for upload
     if (updates.contentBlocks) {
@@ -654,6 +680,114 @@ class JournalServiceClass {
     return this.updateEntry(localId, { visibility });
   }
 
+  /**
+   * Share a memory again, with an audience the person has just chosen, after the server could
+   * not apply the last one (FR-011, research R15).
+   *
+   * Three things happen, in this order: the chosen audience is stored, the memory is queued
+   * for the server **once**, and only then is the refusal cleared.
+   *
+   * ⚠ **Exactly one operation**, queued here on both arms, and the order is not
+   * interchangeable:
+   *
+   *   - **With a server id** this is an ordinary edit of the audience, so one `UPDATE_ENTRY`
+   *     carrying that server id, and the memory goes back to pending so the push collects it.
+   *   - **Without one** the server has never held this memory. Its create was removed from the
+   *     queue when the refusal was final (`SyncQueue.removeOperation`), so something has to
+   *     put a create back -- and it must carry the content **as it stands now**, because a
+   *     memory refused before it ever uploaded keeps its later edits on the phone until it is
+   *     re-shared (R15, round-3 L4).
+   *   - **The refusal is cleared last, and only when the operation is known to exist.**
+   *     Clearing it over a memory that was not queued leaves a card reading "Friends" over a
+   *     memory on nobody else's screen -- SC-010's "appears as shared", and the one failure
+   *     mode with no safe side. The other way round is harmless: the card says "Not shared"
+   *     for a moment longer over a memory already on its way, and a successful push clears it
+   *     anyway (`JournalRepository.markSynced`).
+   *
+   * ⚠ **`JournalRepository.update` is deliberately not used, on either arm** (round-1
+   * Critical 1). It queues through the private `_enqueueSync`, which **returns early when
+   * sync is disabled and catches every enqueue error** -- so it resolves identically whether
+   * or not an operation was really written, and its caller cannot tell. That is fine for an
+   * ordinary edit, whose worst case is a memory the background sweep picks up later; it is not
+   * fine here, where the thing being cleared on the strength of it is the *only* record that
+   * the memory is unshared. Queued here, a failure is a rejection, the refusal survives
+   * untouched, and the person is told. (`update` would also queue an `UPDATE_ENTRY` with no
+   * server id on the other arm, which `SyncEngine._processSingleOperation` drops as completed
+   * -- so the memory would stay unshared with nothing on its card to say so.)
+   *
+   * `SyncQueue.hasPendingOperations` was the alternative: clear the refusal only if a row for
+   * this memory exists. Not taken, because it cannot tell *this* operation from one that was
+   * already queued for the same memory -- so it would pass on the Local Only path whenever
+   * some other row happened to be pending, which is the case it most needs to catch.
+   *
+   * **Local Only storage refuses outright, before anything is written.** Nothing drains the
+   * queue in that mode, so the memory cannot reach the server however long it waits; a stored
+   * audience the server will never be told about is the same lie one layer down, so not even
+   * that is written (*sharing fails closed*).
+   *
+   * No audience is ever guessed or substituted: without an explicit choice this refuses and
+   * changes nothing (FR-011, *sharing fails closed*).
+   *
+   * @param {string} localId - Entry local ID
+   * @param {string} visibility - The audience the person chose, from `SaveAudienceSheet`
+   * @returns {Promise<object>} The entry as stored, with no share state left on it
+   */
+  async reshareEntry(localId, visibility) {
+    if (!localId) throw new Error('reshareEntry requires a localId');
+    if (!visibility) {
+      throw new Error('reshareEntry requires an audience: a memory is never shared without an explicit choice');
+    }
+
+    const entry = await this.repository.getByLocalId(localId);
+    if (!entry) throw new Error(`Entry not found: ${localId}`);
+
+    if (!(await this.repository.isSyncEnabled())) {
+      // Coded, because the screen has something useful to say about this one and nothing
+      // useful to say about the others: trying again changes nothing until cloud sync is back
+      // on, so "please try again" would be the wrong advice.
+      throw Object.assign(
+        new Error(
+          'Storage is Local Only, so this memory cannot be shared: nothing queued for it would ever be sent',
+        ),
+        { code: 'local_only_storage' },
+      );
+    }
+
+    // The audience, and -- for a memory the server already holds -- a return to pending, which
+    // is what makes the push collect it. Only from `synced`: a row sitting in `conflict` or
+    // `failed` has something else to settle first, and `JournalRepository.update` is careful
+    // about the same thing (`:346-349`).
+    const updates = { visibility };
+    if (entry.syncStatus === SyncStatus.SYNCED) {
+      updates.syncStatus = SyncStatus.PENDING;
+    }
+    await this.dbService.updateEntry(localId, updates);
+
+    // The operation carries the memory as it stands, audience included: anything the person
+    // added while it was refused exists nowhere else yet. (The push also re-reads the row, so
+    // a media upload that lands in the meantime is still picked up.)
+    await SyncQueue.enqueue({
+      type: entry.serverId ? SyncOperationType.UPDATE_ENTRY : SyncOperationType.CREATE_ENTRY,
+      entityId: localId,
+      serverId: entry.serverId || null,
+      data: { ...entry, ...updates, local_id: localId },
+    });
+
+    await this.repository.setShareState(localId, null);
+
+    const updated = await this.repository.getByLocalId(localId);
+
+    // The card stops saying "Not shared" without the screen reloading: useJournal listens
+    // for this and replaces the entry it holds.
+    this._emit('entryUpdated', updated);
+
+    // Same reasoning as create and edit: the person has just asked for this memory to be
+    // shared, so it goes now rather than at the next five-minute sweep.
+    this._syncNow('reshareEntry');
+
+    return updated;
+  }
+
   // ============================================================
   // Entry Deletion
   // ============================================================
@@ -739,7 +873,15 @@ class JournalServiceClass {
 
     for (const item of items) {
       // Already uploaded: nothing to do.
-      if (item?.serverUrl) continue;
+      //
+      // `url` as well as `serverUrl`, so this gate agrees with the other one on the upload
+      // path: `SyncEngine._isUnuploadedItem` (`:658`) reads either as proof the server holds
+      // the file. A piece loaded back by an edit carries `{id, url}` and no local file, so it
+      // was already excluded here by having no path -- but it is one stray field away from
+      // being uploaded a second time, and a second copy takes a new media id, which loses the
+      // moment and place the server carries across an edit by matching on that id and then on
+      // its url (research R7, R3; FR-019).
+      if (item?.serverUrl || item?.url) continue;
 
       const localPath = item?.localPath || item?.uri;
       if (!localPath) continue;

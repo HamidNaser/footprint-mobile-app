@@ -11,10 +11,16 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { getTimelineCandidates, getLifeline, getLifelineYear } from '../api/LifelineApi';
 import { useAuth } from '../context/AuthContext';
+import { useUpcomingEvents } from '../hooks/useUpcomingEvents';
 import { MILESTONE_ICONS, formatMilestoneDate } from '../utils/milestones';
 import TimelineCandidateCard from '../components/timeline/TimelineCandidateCard';
 import DerivativeImage from '../components/media/DerivativeImage';
 import { ViewportScrollView, ViewportTile } from '../components/media/ViewportLists';
+// Imported from its own file, not the `components/events` barrel: the barrel also exports
+// `DateTimeField`, which reaches `expo-media-library`/`expo-image-picker` through the journal
+// compose chain (`EventsScreen.route.test.js`'s own comment records the same chain) -- neither
+// loads under jest, and `EventsList` itself needs none of it.
+import EventsList from '../components/events/EventsList';
 
 const C = {
   bg: '#0a1424',
@@ -30,6 +36,13 @@ const C = {
 
 // How many year-nodes are visible on the axis at once.
 const WINDOW = 5;
+
+/**
+ * What the Events pane asks `useUpcomingEvents` for. A module constant, not an inline literal:
+ * the hook reads `includeDrafts` off as a primitive, but a stable object makes it plain at the
+ * call site that nothing here changes between renders.
+ */
+const EVENTS_PANE_OPTIONS = { includeDrafts: true };
 
 const ordinal = (n) => {
   const s = ['th', 'st', 'nd', 'rd'];
@@ -144,13 +157,120 @@ function TimelineAxis({ years, activeYear, onSelect, windowStart, onPageLeft, on
 }
 
 /**
+ * The "Timeline | Events" header control (FR-031). Timeline is the default; a tap swaps the
+ * whole pane below the header (R11) -- the two labels are two separate pressables, not one
+ * literal "Timeline | Events" string.
+ */
+function ViewSwitch({ value, onChange }) {
+  const options = [
+    { key: 'timeline', label: 'Timeline' },
+    { key: 'events', label: 'Events' },
+  ];
+  return (
+    <View style={styles.viewSwitch}>
+      {options.map((opt) => {
+        const active = value === opt.key;
+        return (
+          <TouchableOpacity
+            key={opt.key}
+            style={[styles.viewSwitchBtn, active && styles.viewSwitchBtnActive]}
+            onPress={() => onChange(opt.key)}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.viewSwitchText, active && styles.viewSwitchTextActive]}>
+              {opt.label}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
+/**
+ * The Events pane (FR-031-033, research R11): `EventsList` in its sectioned mode, fed by
+ * `useUpcomingEvents`. This pane mirrors `EventsScreen`, so it offers the same recovery that
+ * screen does -- Try again (`onRetry`, the bare `refresh()`) and pull-to-refresh (`onRefresh`,
+ * wrapped the same way `EventsScreen.handleRefresh` is, to drive `refreshing` without the
+ * full-screen spinner swap mid-pull).
+ */
+function EventsPane({
+  upcoming,
+  past,
+  draftsCount,
+  isLoading,
+  error,
+  refreshing,
+  onRefresh,
+  onRetry,
+  onSelect,
+  onDrafts,
+  onCreate,
+}) {
+  return (
+    <View style={styles.eventsPane}>
+      <EventsList
+        upcoming={upcoming}
+        past={past}
+        draftsCount={draftsCount}
+        isLoading={isLoading}
+        error={error}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
+        onRetry={onRetry}
+        onSelect={onSelect}
+        onDrafts={onDrafts}
+        onCreate={onCreate}
+      />
+    </View>
+  );
+}
+
+/**
  * TimelineScreen — the "Timeline" (Lifeline) tab.
  * Three zones: the year's STORY (text + audio) up top, a centered TIMELINE AXIS
  * in the middle (circular year nodes + paging arrows), and the year's MEDIA
  * (photos + videos) at the bottom. A lineage lane keeps the generational story.
  */
-export default function TimelineScreen({ navigation }) {
+export default function TimelineScreen({ navigation, route }) {
   const { user } = useAuth();
+  // "Timeline" is the default; a route param opens straight into "Events" (Home's "See all ›",
+  // research R11) -- used as the initial state, for the first mount.
+  const [view, setView] = useState(route?.params?.view === 'events' ? 'events' : 'timeline');
+  // `TimelineScreen` is a bottom-tab screen (`AppNavigator.js`), kept mounted for the app's
+  // lifetime -- unlike the stack screens elsewhere in this file (`EventDetail`, `EventForm`,
+  // `InterviewMode`), which remount per `navigate`. A second "See all ›" from Home after this
+  // tab has already been visited only changes `route.params`; the `useState` initializer above
+  // does not re-run, so without this effect the param would be silently ignored past the first
+  // visit. Only an explicit `'events'`/`'timeline'` moves the pane -- an unrelated param change
+  // (or none) leaves whatever the person is already looking at alone.
+  useEffect(() => {
+    const requested = route?.params?.view;
+    if (requested === 'events' || requested === 'timeline') {
+      setView(requested);
+    }
+  }, [route?.params?.view]);
+  const {
+    upcoming,
+    past,
+    draftsCount,
+    isLoading: eventsLoading,
+    error: eventsError,
+    refresh: refreshEvents,
+    // This pane shows "Drafts (n)", so it is the caller that asks for the drafts tab. Home's
+    // card reads `upcoming` and `error` only, and asks for neither (review fix, Minor 6).
+  } = useUpcomingEvents(EVENTS_PANE_OPTIONS);
+  // Pull-to-refresh's own flag, kept apart from `eventsLoading` the same way `EventsScreen`'s
+  // `refreshing` is kept apart from `isLoading`: while this is true, `EventsList` keeps the list
+  // on screen with the native pull spinner instead of swapping in the full-screen one.
+  const [eventsRefreshing, setEventsRefreshing] = useState(false);
+  const handleEventsRefresh = () => {
+    setEventsRefreshing(true);
+    refreshEvents();
+    // `useUpcomingEvents` flips `isLoading`; clear the spinner shortly after (same timing
+    // `EventsScreen.handleRefresh` uses).
+    setTimeout(() => setEventsRefreshing(false), 600);
+  };
   const [personId, setPersonId] = useState(null); // null = current user
   const [year, setYear] = useState(null);
   const [windowStart, setWindowStart] = useState(0);
@@ -250,6 +370,12 @@ export default function TimelineScreen({ navigation }) {
     setYear(null);
   };
 
+  // Events pane handlers (FR-031-033) -- the same targets `EventsScreen` itself uses.
+  const handleSelectEvent = (event) =>
+    navigation?.navigate('EventDetail', { eventId: event.id, event });
+  const handleCreateEvent = () => navigation?.navigate('EventForm', { mode: 'create' });
+  const handleOpenDrafts = () => navigation?.navigate('Events', { initialTab: 'drafts' });
+
   // Keep the active year inside the visible window when it changes.
   useEffect(() => {
     if (year == null) return;
@@ -282,7 +408,9 @@ export default function TimelineScreen({ navigation }) {
   // Failed and empty are kept apart because they look identical here and want opposite
   // things. Telling somebody their life has no years in it when the request simply
   // failed is the worse of the two mistakes.
-  if (!loading && years.length === 0) {
+  // The Events pane does not depend on the Lifeline overview at all, so an empty/failed
+  // Timeline must not hide it -- this early return is Timeline-only.
+  if (view === 'timeline' && !loading && years.length === 0) {
     return (
       <View style={styles.root}>
         <View style={styles.header}>
@@ -300,6 +428,7 @@ export default function TimelineScreen({ navigation }) {
               />
             </TouchableOpacity>
           </View>
+          <ViewSwitch value={view} onChange={setView} />
         </View>
 
         <View style={styles.emptyWrap}>
@@ -339,12 +468,31 @@ export default function TimelineScreen({ navigation }) {
             />
           </TouchableOpacity>
         </View>
-        <Text style={styles.headerSub}>
-          {headerTitle}
-          {year ? ` · ${year}` : ''}
-        </Text>
+        {view === 'timeline' && (
+          <Text style={styles.headerSub}>
+            {headerTitle}
+            {year ? ` · ${year}` : ''}
+          </Text>
+        )}
+        <ViewSwitch value={view} onChange={setView} />
       </View>
 
+      {view !== 'timeline' ? (
+        <EventsPane
+          upcoming={upcoming}
+          past={past}
+          draftsCount={draftsCount}
+          isLoading={eventsLoading}
+          error={eventsError}
+          refreshing={eventsRefreshing}
+          onRefresh={handleEventsRefresh}
+          onRetry={refreshEvents}
+          onSelect={handleSelectEvent}
+          onDrafts={handleOpenDrafts}
+          onCreate={handleCreateEvent}
+        />
+      ) : (
+        <>
       {/* Lineage lane */}
       <View style={styles.laneWrap}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.lane}>
@@ -511,6 +659,8 @@ export default function TimelineScreen({ navigation }) {
           </ViewportScrollView>
         )}
       </View>
+        </>
+      )}
     </View>
   );
 }
@@ -549,6 +699,17 @@ const styles = StyleSheet.create({
   headerAvatar: { borderWidth: 2, borderColor: C.accent },
   headerBrand: { color: C.text, fontSize: 20, fontWeight: '800', letterSpacing: 0.3 },
   headerSub: { color: C.textMuted, fontSize: 13, marginTop: 3, textTransform: 'capitalize' },
+
+  // "Timeline | Events" control (FR-031)
+  viewSwitch: {
+    flexDirection: 'row', backgroundColor: C.surface2, borderRadius: 10,
+    padding: 3, marginTop: 10, alignSelf: 'flex-start',
+  },
+  viewSwitchBtn: { paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8 },
+  viewSwitchBtnActive: { backgroundColor: C.accent },
+  viewSwitchText: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
+  viewSwitchTextActive: { color: '#fff' },
+  eventsPane: { flex: 1 },
 
   laneWrap: { borderBottomWidth: 1, borderBottomColor: C.border },
   lane: { paddingHorizontal: 14, paddingVertical: 9, alignItems: 'center', gap: 6 },

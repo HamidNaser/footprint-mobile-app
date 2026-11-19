@@ -267,6 +267,22 @@ class JournalApiClass {
       updated: response.updated || [],      // Array of { clientId, serverId, serverTimestamp }
       deleted: response.deleted || [],      // Array of serverId (strings)
       conflicts: response.conflicts || [],  // Array of conflict details
+      // The memories the server saved but could not work out an audience for -- an array of
+      // UnresolvedAudienceItem, `{ clientId, reason }`, with `reason` one of exactly two
+      // tokens: `source_unavailable` (send it again later) and `do_not_resend` (never).
+      //
+      // This was the one place a sharing failure appears on the wire, and it was dropped one
+      // function below the engine that needed it: the return value was built field by field
+      // and this field was not in the list, so an audience the server refused left the
+      // operation pending and the phone re-sent it forever with nothing shown anywhere
+      // (research R15, round-3 H3).
+      //
+      // Passed through word for word, because the engine branches on the token: anything
+      // that reworded one here would send a permanently refused memory round the retry loop
+      // forever, or abandon one that would have sent perfectly well. `|| []` because the Hub
+      // omits nulls rather than writing them (WhenWritingNull), so a reply that refused
+      // nothing -- and any server older than feature 006 -- carries no such field at all.
+      unresolvedAudience: response.unresolvedAudience || [],
       // No `serverChanges`: BatchSyncResponse declares Created, Updated, Deleted,
       // Conflicts and ServerTimestamp and nothing else, so the field was always [] and
       // nothing read it. Dead, and worse than dead -- it read as a pull that happens on

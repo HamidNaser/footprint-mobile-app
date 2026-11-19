@@ -29,6 +29,11 @@ import { Ionicons } from '@expo/vector-icons';
 // Components
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
 import { ViewportFlatList } from '../components/media/ViewportLists';
+// The same viewability helper the Journal uses, for the same reason: `JournalEntryCard` mounts a
+// native map view for a memory with places, and this screen is a list of those cards. Without
+// gating, every card on screen mounts its map at once -- which research R10 *Lazy rendering* and
+// plan.md's risk table treat as a requirement, not an optimisation (review fix, Important 3).
+import { useViewableKeys } from '../hooks/mediaVisibility';
 import { 
   CalendarCoils,
   DateSwipeContainer,
@@ -374,6 +379,21 @@ export default function PersonJournalScreen({ route, navigation }) {
   }, []);
 
   /**
+   * Key extractor
+   */
+  const keyExtractor = useCallback((item) => item.localId, []);
+
+  /**
+   * Which cards are on screen (review fix, Important 3).
+   *
+   * Declared before `renderEntry`, which closes over `isViewable`. `ViewportFlatList` composes
+   * this callback with its own, and React Native forbids changing `onViewableItemsChanged` on a
+   * live list, so both are stable. Until the list has reported anything every row counts as on
+   * screen, which is what makes this agree with the card's own `isVisible` default of true.
+   */
+  const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
+
+  /**
    * Render entry card
    */
   const renderEntry = useCallback(({ item }) => {
@@ -388,15 +408,11 @@ export default function PersonJournalScreen({ route, navigation }) {
         onGalleryPress={handleEntryGalleryPress}
         onPhotoPress={handleGalleryPhotoPress}
         onVideoPress={handleGalleryVideoPress}
+        isVisible={isViewable(item.localId)}
         primaryColor={PRIMARY_COLOR}
       />
     );
-  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress]);
-
-  /**
-   * Key extractor
-   */
-  const keyExtractor = useCallback((item) => item.localId, []);
+  }, [authUser?.id, isGroup, getUserForEntry, handleEntryGalleryPress, handleGalleryPhotoPress, handleGalleryVideoPress, isViewable]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -430,6 +446,7 @@ export default function PersonJournalScreen({ route, navigation }) {
           data={displayEntries}
           renderItem={renderEntry}
           keyExtractor={keyExtractor}
+          onViewableItemsChanged={onViewableItemsChanged}
           contentContainerStyle={styles.feedContent}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={

@@ -579,6 +579,89 @@ describe('every field this app sends exists in the record', () => {
     expect(fieldsOf('UpdateSyncEntry').has('locationSharing')).toBe(true);
     expect(fieldsOf('UpdateSyncEntry').has('datePrecision')).toBe(true);
   });
+
+  it('sends capturedAt on media items and on text blocks (M8, FR-027)', async () => {
+    // FR-027: a piece's capture moment travels with the memory, so the order is the same on
+    // every device and survives editing. Sent into a contract with no such field it would have
+    // been dropped in silence -- the sixth instance of exactly the bug class listed at the top
+    // of this file -- so this case exists to hold the vendored record and the phone together.
+    //
+    // Principle II, and contract C3: `capturedAt` is a recorded fact on media items and on
+    // blocks that carry no media. A block WITH media carries no block-level time; its time is
+    // its media's. That shape has to pass the walk, so it is asserted here as well.
+    ApiClient.post.mockResolvedValue({
+      created: [], updated: [], deleted: [], conflicts: [], serverTimestamp: 'x',
+    });
+
+    const entry = {
+      ...fullyPopulatedLocalEntry(),
+      content_blocks: [
+        {
+          type: 'text',
+          content: 'A note, captured first and still first',
+          capturedAt: '2026-11-08T09:00:00.000Z',
+        },
+        {
+          type: 'audio',
+          media: [
+            {
+              id: 'media-clip',
+              url: 'https://example.invalid/clip.m4a',
+              capturedAt: '2026-11-08T09:01:00.000Z',
+            },
+          ],
+        },
+        {
+          type: 'photos',
+          media: [
+            {
+              id: 'media-a',
+              url: 'https://example.invalid/a.jpg',
+              capturedAt: '2026-11-08T09:02:00.000Z',
+            },
+            {
+              id: 'media-b',
+              url: 'https://example.invalid/b.jpg',
+              capturedAt: '2026-11-08T09:02:00.000Z',
+            },
+          ],
+        },
+      ],
+    };
+
+    // Both halves of the batch, because a create and an update are recorded as separate types
+    // and a field added to one only would pass a create-shaped test and lose every edit.
+    await JournalApi.batchSync({
+      creates: [entry],
+      updates: [{ entry, serverId: 'srv-1', lastModifiedAt: entry.updated_at }],
+      deletes: [],
+    });
+
+    const [, posted] = ApiClient.post.mock.calls[0];
+    const body = asSentOnTheWire(posted);
+
+    expect([...new Set(divergencesIn(body, 'BatchSyncRequest'))]).toEqual([]);
+
+    // And the times genuinely reached the wire on both halves, or the walk above proved
+    // nothing: an empty divergence list is also what a payload with no times at all produces.
+    for (const blocks of [body.creates[0].contentBlocks, body.updates[0].contentBlocks]) {
+      expect(blocks[0].capturedAt).toBe('2026-11-08T09:00:00.000Z');
+      expect(blocks[1].media[0].capturedAt).toBe('2026-11-08T09:01:00.000Z');
+      expect(blocks[2].media.map((m) => m.capturedAt)).toEqual([
+        '2026-11-08T09:02:00.000Z',
+        '2026-11-08T09:02:00.000Z',
+      ]);
+
+      // No block-level time on a block that carries media (C3).
+      expect(blocks[1].capturedAt).toBeUndefined();
+      expect(blocks[2].capturedAt).toBeUndefined();
+    }
+
+    // Recorded on both ends of a block, not just one. A record carrying it on the block and
+    // not on the media would pass the walk for the text note and silently drop every photo's.
+    expect(fieldsOf('ContentBlockRequest').get('capturedAt').shape).toBe('date-time');
+    expect(fieldsOf('MediaInfoRequest').get('capturedAt').shape).toBe('date-time');
+  });
 });
 
 // ============================================================

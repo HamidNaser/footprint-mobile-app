@@ -1,0 +1,636 @@
+/**
+ * VoiceRecorderBar (013 T022) -- voice capture for the capture screen.
+ *
+ * One tap starts, one tap stops, and there is nothing to hold down (FR-006). That used to be
+ * the whole point of this component existing beside `src/components/media/AudioRecorder.js` --
+ * until 013 T068 retired that file's press-and-hold default, which is one tap too now. What
+ * still keeps them separate: this is the capture screen's own recorder, combining the dock's
+ * idle "Voice" button and the recording bar in one component (below) and handling backgrounding
+ * and interruptions (FR-007, T038) that `AudioRecorder.js` -- kept only for
+ * `JournalComposeModal`'s editing path -- has no need to. Each stop produces exactly one clip,
+ * and the 5:00 cap **keeps** the clip rather than discarding it.
+ *
+ * Idle, it is the dock's "Voice" button; recording, it is the bar from the prototype --
+ * timer, "Recording ..." and Stop. One component owns both so that the single tap that
+ * starts a recording is literally one tap (FR-006), with no intermediate "now press record".
+ *
+ * It follows `AudioRecorder.js`'s use of expo-audio (`useAudioRecorder` +
+ * `useAudioRecorderState`), including the two lessons that file paid for:
+ *   - `prepareToRecordAsync()` before *every* recording, not just the first -- expo-audio
+ *     invalidates the recorder on `stop()`, and without it `record()` only appears to work;
+ *   - the status poll lives in a child that is mounted only while recording, so no poll can
+ *     land on a native recorder that has already been freed.
+ *
+ * Two things it does differently, on purpose:
+ *   - `isMeteringEnabled: true` in the recording options. Without it expo-audio's status
+ *     carries no `metering` at all, so there is no waveform to collect.
+ *   - elapsed time comes from `RecorderState.durationMillis`, the field expo-audio 57
+ *     actually reports from `recorder.getStatus()`.
+ *
+ * What jest cannot prove: that recording continues while the phone is locked or the app is
+ * backgrounded (FR-007, SC-003). That needs a release build on an iPhone and an Android
+ * phone (quickstart Q-D1-Q-D3). What the code can do, and does, is *request* the audio mode
+ * that allows it (research R5) -- the plugin options that make it possible on a real build
+ * are T024's.
+ *
+ * Interruptions -- an incoming call, or the system taking the audio session -- are T038, and
+ * they are one effect calling `finishClip`, which was already reason-agnostic and guarded
+ * against finishing twice. The signal is research R5's: the polled `useAudioRecorderState`
+ * stops saying `isRecording` and nobody tapped Stop, so the part recorded before the call is
+ * finalized and handed over as its own clip (US2-2).
+ *
+ * The one thing that signal cannot be read naively for is its own first moment. `record()` is
+ * synchronous and returns before the native session is necessarily running, so the first
+ * polled status of a perfectly healthy recording may read `isRecording: false`. Taking that
+ * for an interruption would end every recording at birth. So the interruption is only
+ * believed once a status has confirmed the recording really was under way
+ * (`recorderConfirmedRef`) -- **or** once `START_GRACE_MS` has gone by since `record()`
+ * without any status confirming it, because a session taken inside that window reports the
+ * very same thing and never reports anything else, so the confirmation alone would be a flag
+ * nothing could ever open and the bar would claim to record until somebody tapped Stop.
+ *
+ * That second half is a **timer armed at `record()`**, not a check made on the next status, and
+ * it has to be: `useAudioRecorderState` hands back the previous status object unless one of its
+ * fields changed, and in this one scenario the interruption is the last field change there is.
+ * So no further status is ever delivered, and anything waiting for one waits for ever. When it
+ * fires it asks the recorder directly -- a slow-but-real start is confirmed, not ended.
+ *
+ * An **unmount is not an interruption** and is handled here, not there: nothing takes the
+ * session back, so without a cleanup `stop()` is never called, the session is never
+ * released, and the status poll's interval goes with the tree -- leaving a native recording
+ * that keeps the microphone hot, suppresses other apps' audio (`interruptionMode:
+ * 'doNotMix'` asks for exclusive focus, and on Android the plugin's recording foreground
+ * service keeps it alive), can no longer hit its own 5:00 cap, and has no UI left to stop
+ * it. The cleanup effect finishes the clip, which is also the only way the recorded audio
+ * reaches anybody.
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import {
+  useAudioRecorder,
+  useAudioRecorderState,
+  setAudioModeAsync,
+  requestRecordingPermissionsAsync,
+  IOSOutputFormat,
+  AudioQuality,
+} from 'expo-audio';
+import { Ionicons } from '@expo/vector-icons';
+
+/** FR-006: a clip is limited to 5 minutes. */
+export const MAX_CLIP_MS = 5 * 60 * 1000;
+
+/** How often the recorder's status is polled while recording. */
+const POLL_INTERVAL_MS = 250;
+
+/**
+ * How long after `record()` a status that does not say `isRecording` is read as a recorder
+ * that has not got going yet, rather than as an interruption (research R5, T037).
+ *
+ * `record()` is synchronous and returns before the native session is necessarily running, so
+ * the first polled statuses of a perfectly healthy recording can read `isRecording: false`;
+ * taking those for a stop would end every recording at birth. But a session taken *inside*
+ * that window reports exactly the same thing and never reports anything else, so a flag
+ * waiting to be opened by a status that says `isRecording` would never open, and the bar
+ * would claim to record -- timer frozen at 0:00, the 5:00 cap unable to fire -- until the
+ * person tapped Stop. The clock is the only thing that separates the two, so it decides.
+ *
+ * Why this long: the suite's pessimistic native start latency is 600 ms, and this is more
+ * than three times it. The two ways of being wrong are not symmetrical, which is what sets
+ * the direction of the margin: too short ends a slow-but-healthy start, where `stop()` on a
+ * recorder that never began is the "no file" failure the person has to be told about; too
+ * long leaves the bar overstating the microphone for a moment longer. Neither loses a clip
+ * that was recorded -- a recording already under way is confirmed by its first status and
+ * never reaches this at all.
+ */
+export const START_GRACE_MS = 2000;
+
+/** How many waveform levels a clip carries at most (`AudioPlayer` draws ~50 bars). */
+export const WAVEFORM_BARS = 50;
+
+/**
+ * Mono voice at a middling bitrate: a spoken clip, not music. `isMeteringEnabled` is what
+ * puts `metering` in the status, and so what makes a waveform possible at all.
+ *
+ * This is field-for-field `RecordingQuality.MEDIUM` from `AudioRecorder.js` plus
+ * `isMeteringEnabled`, and **the duplication is deliberate, not an oversight.** `plan.md`
+ * records `AudioRecorder.js` as superseded for capture by this component, so importing its
+ * presets would tie the capture path's audio format to a file that is on its way out and
+ * whose own presets are missing `isMeteringEnabled` (which is why its waveform is always
+ * empty). Capture owns its format here, in one literal a reader can check against the
+ * expo-audio typings without opening another file.
+ */
+const VOICE_RECORDING_OPTIONS = {
+  isMeteringEnabled: true,
+  extension: '.m4a',
+  sampleRate: 44100,
+  numberOfChannels: 1,
+  bitRate: 128000,
+  android: { outputFormat: 'mpeg4', audioEncoder: 'aac' },
+  ios: { outputFormat: IOSOutputFormat.MPEG4AAC, audioQuality: AudioQuality.MEDIUM },
+  web: { mimeType: 'audio/webm', bitsPerSecond: 128000 },
+};
+
+/**
+ * The audio mode voice capture asks for (FR-007, research R5):
+ * recording allowed, audible with the ringer switch off, allowed to keep going in the
+ * background, and not mixed with whatever else wants the session.
+ */
+export const VOICE_AUDIO_MODE = {
+  allowsRecording: true,
+  playsInSilentMode: true,
+  allowsBackgroundRecording: true,
+  interruptionMode: 'doNotMix',
+};
+
+/** m:ss, as the prototype's recording bar shows it ("0:00", "5:00"). */
+export const formatElapsed = (ms) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
+
+/** expo-audio reports metering in dB (about -160 to 0); -60 dB and below reads as silence. */
+const normalizeMetering = (db) => Math.min(1, Math.max(0, (db + 60) / 60));
+
+/**
+ * Averages a recording's levels down to at most `bars` values, keeping the shape of the
+ * whole clip. Taking the last N instead would describe only the end of a long recording,
+ * and keeping every sample would put ~1,200 numbers for a five-minute clip into the draft
+ * and then onto the wire.
+ */
+export const downsampleWaveform = (samples, bars = WAVEFORM_BARS) => {
+  if (samples.length <= bars) return samples.slice();
+
+  const out = [];
+  for (let i = 0; i < bars; i += 1) {
+    const from = Math.floor((i * samples.length) / bars);
+    const to = Math.max(Math.floor(((i + 1) * samples.length) / bars), from + 1);
+    const bucket = samples.slice(from, to);
+    out.push(bucket.reduce((sum, level) => sum + level, 0) / bucket.length);
+  }
+  return out;
+};
+
+/**
+ * Polls the recorder and reports its status upward; renders nothing.
+ *
+ * It exists so the polling can be *unmounted* the instant recording ends.
+ * `useAudioRecorderState` polls for as long as it is mounted, and a poll that lands after
+ * the native recorder has been freed throws an uncaught `NotFoundException` with no call
+ * site in our own code -- the failure documented at length in `AudioRecorder.js`.
+ */
+const RecorderStatePoll = ({ recorder, onStatus }) => {
+  const status = useAudioRecorderState(recorder, POLL_INTERVAL_MS);
+
+  useEffect(() => {
+    onStatus(status);
+  }, [status, onStatus]);
+
+  return null;
+};
+
+/**
+ * @param {object} props
+ * @param {(clip: {uri: string, duration: number, waveform: number[], capturedAt: string}) => void} props.onClip
+ *   Called once per recording, with `duration` in seconds and `capturedAt` the ISO-8601 UTC
+ *   instant recording started (research R8).
+ * @param {() => void} [props.onPermissionDenied] Called when the microphone is refused. The
+ *   inline message and Open Settings belong to the capture screen, not here (UI contract).
+ * @param {(failure: {reason: 'stop-failed'|'no-file'|'handler-failed', error: Error|null,
+ *   capturedAt: string|null, duration: number}) => void} [props.onCaptureFailed]
+ *   Called instead of `onClip` when a recording ended without a usable file, and after it
+ *   when the parent's own `onClip` threw. See the note on `finishClip`.
+ * @param {(isRecording: boolean) => void} [props.onRecordingChange] Called with `true` when
+ *   recording starts and `false` when it ends, however it ended. The idle Voice button is a
+ *   dock-sized button and the recording bar is full width above the dock (UI contract), so
+ *   the parent has to be able to see the change to lay either of them out. Not called on
+ *   mount -- only on a change.
+ * @param {number} [props.maxDurationMs] The cap; defaults to 5 minutes (FR-006).
+ */
+export default function VoiceRecorderBar({
+  onClip,
+  onPermissionDenied,
+  onCaptureFailed,
+  onRecordingChange,
+  maxDurationMs = MAX_CLIP_MS,
+  style,
+}) {
+  const recorder = useAudioRecorder(VOICE_RECORDING_OPTIONS);
+
+  const [isRecording, setIsRecording] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [status, setStatus] = useState(null);
+
+  // The clip's capturedAt: stamped at the start and read at the stop, so a long recording
+  // is still placed in the order by when it began (research R8).
+  const capturedAtRef = useRef(null);
+  const elapsedRef = useRef(0);
+  const levelsRef = useRef([]);
+  // One clip per recording, whatever ended it -- a Stop tap, the cap, an unmount, or (T038)
+  // an interruption that arrives while the stop is still in flight.
+  const finishingRef = useRef(false);
+  // The same guard on the *start* side. It cannot be the `isRecording` state: the state is
+  // not set until after three awaits, one of which is the OS permission dialog, and the
+  // Voice button stays live behind it the whole time.
+  const startingRef = useRef(false);
+  // `isRecording` as the unmount cleanup can see it -- a cleanup closes over its mount.
+  // Written synchronously beside every `setIsRecording`, deliberately rather than from an
+  // effect: an unmount committed in the same batch as the state change would still see the
+  // old value if the ref were only synced afterwards.
+  const isRecordingRef = useRef(false);
+  // Which polled status has already contributed a waveform level, so a re-run of the status
+  // effect for some *other* reason cannot record the same level twice.
+  const lastLevelStatusRef = useRef(null);
+  // Whether a polled status has confirmed that this recording really is under way. It is what
+  // makes "the recorder is not recording" mean an interruption rather than "it has not got
+  // going yet" -- see the file header, and T037's fourth case.
+  const recorderConfirmedRef = useRef(false);
+  // When `record()` was called, so that an interruption arriving *before* the first status
+  // that says `isRecording` is still believed once `START_GRACE_MS` has gone by. Without it
+  // the confirmation above is a flag that can never be opened, and the bar claims to record
+  // for as long as the person leaves it alone (T037 fix round 1).
+  const recordStartedAtRef = useRef(0);
+  // The one-shot that *asks* at the end of that window. The clock has to be read by something
+  // that fires by itself: `useAudioRecorderState` de-duplicates (see `startRecording`), so in
+  // the very case this is for there is no later status to read it on (fix round 2).
+  const graceTimerRef = useRef(null);
+
+  /**
+   * Ends the recording and hands the clip over, whatever ended it.
+   *
+   * Everything from here on is inside a `try`/`finally` that releases `finishingRef`. The
+   * guard is "one clip per recording", not "one clip ever" (US1 captures two clips in one
+   * memory), and leaving it set would put the bar back to the idle Voice button while
+   * `startRecording` silently refused every tap -- recorded once per mount, then quietly
+   * dead. A synchronous throw from the parent's `onClip` is enough to reach that, and
+   * tasks.md's T029 case ("`addPiece` rejects (storage full)") is exactly that shape.
+   *
+   * **A recording that produced no file is signalled, never swallowed.** Going back to the
+   * idle Voice button is indistinguishable from "you have not recorded yet", and this app
+   * has no crash reporting, so a `console.warn` is not a signal. Task 20's analogous case
+   * chose to *throw*, and the asymmetry is deliberate: `buildContentBlocks` had no caller
+   * that could render anything and was in the middle of a save, whereas this component has
+   * a parent that owns the inline failed-capture message (UI contract) and the capture is
+   * already over -- so a callback the screen can render is better than an exception it
+   * would have to catch.
+   */
+  const finishClip = useCallback(async () => {
+    // There is no recording to finish. Two callers can arrive here with none: the Stop
+    // button, whose node Sam's thumb may already be on when an interruption ends the
+    // recording underneath it (T037), and the unmount cleanup. Without this a second
+    // finish would stop an already-stopped recorder, read its still-valid `uri` and hand
+    // over the same recording as a **second clip** -- the memory said twice.
+    if (!isRecordingRef.current) return;
+    if (finishingRef.current) return;
+    finishingRef.current = true;
+
+    try {
+      // The recorder's own length, read before stop() invalidates it -- `elapsedRef` is
+      // only as fresh as the last 250 ms poll, so a clip stopped between polls under-
+      // reports, and one stopped before the first poll reports 0 with a valid uri.
+      let durationMs = elapsedRef.current;
+      try {
+        const finalStatus = recorder.getStatus?.();
+        if (Number.isFinite(finalStatus?.durationMillis) && finalStatus.durationMillis > 0) {
+          durationMs = finalStatus.durationMillis;
+        }
+      } catch {
+        // An already-invalidated recorder: the last polled value is the best we have.
+      }
+
+      let stopError = null;
+      try {
+        await recorder.stop();
+      } catch (error) {
+        stopError = error instanceof Error ? error : new Error(String(error));
+      }
+
+      // The uri is only final once stop() has resolved.
+      const uri = recorder.uri ?? null;
+      const clip = {
+        uri,
+        duration: durationMs / 1000, // seconds (data-model.md)
+        waveform: downsampleWaveform(levelsRef.current),
+        capturedAt: capturedAtRef.current,
+      };
+
+      setIsRecording(false);
+      isRecordingRef.current = false;
+      setStatus(null);
+      setElapsedMs(0);
+      elapsedRef.current = 0;
+      levelsRef.current = [];
+      lastLevelStatusRef.current = null;
+      recorderConfirmedRef.current = false;
+      // However this recording ended, nothing is waiting on its start any more.
+      if (graceTimerRef.current) {
+        clearTimeout(graceTimerRef.current);
+        graceTimerRef.current = null;
+      }
+      capturedAtRef.current = null;
+      onRecordingChange?.(false);
+
+      try {
+        await setAudioModeAsync({ allowsRecording: false });
+      } catch (error) {
+        console.warn('[VoiceRecorderBar] releasing the audio session failed', error);
+      }
+
+      if (uri) {
+        // A parent that throws here has failed to keep the piece, and may not know it:
+        // `onClip` is called, not awaited, so only a *synchronous* throw reaches us.
+        try {
+          onClip?.(clip);
+        } catch (error) {
+          onCaptureFailed?.({
+            reason: 'handler-failed',
+            error: error instanceof Error ? error : new Error(String(error)),
+            capturedAt: clip.capturedAt,
+            duration: clip.duration,
+          });
+        }
+      } else {
+        // No file means nothing was recorded; a piece pointing at nothing is worse than
+        // none -- but the screen has to be told, or the loss is invisible.
+        onCaptureFailed?.({
+          reason: stopError ? 'stop-failed' : 'no-file',
+          error: stopError,
+          capturedAt: clip.capturedAt,
+          duration: clip.duration,
+        });
+      }
+    } finally {
+      finishingRef.current = false;
+    }
+  }, [onCaptureFailed, onClip, onRecordingChange, recorder]);
+
+  const startRecording = useCallback(async () => {
+    // `startingRef` is set synchronously, so a second tap during the permission dialog or
+    // either of the two awaits after it cannot start a second recording on the same
+    // recorder -- which would also overwrite `capturedAt` with the later tap's instant,
+    // losing R8's start instant for audio already being captured.
+    if (isRecording || startingRef.current || finishingRef.current) return;
+    startingRef.current = true;
+
+    try {
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) {
+        onPermissionDenied?.();
+        return;
+      }
+
+      await setAudioModeAsync(VOICE_AUDIO_MODE);
+      // Before every recording, not just the first; see the file header.
+      await recorder.prepareToRecordAsync();
+
+      levelsRef.current = [];
+      lastLevelStatusRef.current = null;
+      recorderConfirmedRef.current = false;
+      elapsedRef.current = 0;
+      setElapsedMs(0);
+      capturedAtRef.current = new Date().toISOString();
+      // Read beside `record()` rather than from `capturedAt`: this is a stopwatch for the
+      // grace window, and the stamp is a recorded fact about the clip (research R8).
+      recordStartedAtRef.current = Date.now();
+      recorder.record();
+      setIsRecording(true);
+      isRecordingRef.current = true;
+      onRecordingChange?.(true);
+
+      // Ask once, at the end of the start-up window, whether this recording ever got going.
+      //
+      // **It has to be a timer, and it cannot be the status effect.** `useAudioRecorderState`
+      // hands back the *previous* status object unless one of its fields changed
+      // (`expo-audio/build/utils/useAudioRecorderState.js`), so in the one case this is for --
+      // the session taken before the recorder ever reported itself -- the last field to change
+      // is the interruption itself, inside this window, and no further status is ever
+      // delivered. An effect keyed on the status therefore never runs again, and the clock it
+      // would have read is never read: the bar goes on claiming to record, with the timer
+      // frozen and the 5:00 cap unable to fire, until somebody taps Stop. That is exactly what
+      // fix round 1 shipped, and the suite only passed it because the mock handed out a fresh
+      // object every poll. Nothing else in this component owns a timer, so this is it.
+      //
+      // The recorder is asked **directly** rather than through the polled status, for the same
+      // reason: the status may be stale by design.
+      if (graceTimerRef.current) clearTimeout(graceTimerRef.current);
+      graceTimerRef.current = setTimeout(() => {
+        graceTimerRef.current = null;
+        // Already answered, or already over: the status effect confirmed the recording, or the
+        // clip has been finished by a Stop, the cap, an interruption or an unmount.
+        if (recorderConfirmedRef.current || !isRecordingRef.current) return;
+
+        let stillRecording = false;
+        try {
+          stillRecording = !!recorder.getStatus?.()?.isRecording;
+        } catch {
+          // An invalidated recorder is not a recording one.
+          stillRecording = false;
+        }
+
+        if (stillRecording) {
+          // A start slower than the whole window, but a real one. Confirmed here so the next
+          // status that stops saying `isRecording` is read as the interruption it is.
+          recorderConfirmedRef.current = true;
+          return;
+        }
+
+        // It never got going and it is not going to: the session was taken. Finished the way
+        // every other ending finishes it, so the part that was recorded is kept (US2-2).
+        finishClipRef.current();
+      }, START_GRACE_MS);
+    } catch (error) {
+      console.warn('[VoiceRecorderBar] could not start recording', error);
+    } finally {
+      startingRef.current = false;
+    }
+  }, [isRecording, onPermissionDenied, onRecordingChange, recorder]);
+
+  /**
+   * Held in a ref so the effect below runs when the *status* changes and not every time
+   * the parent hands down a fresh `onClip` closure -- which would otherwise re-run it on
+   * the same status and record the same level twice in the waveform.
+   */
+  const finishClipRef = useRef(finishClip);
+  useEffect(() => {
+    finishClipRef.current = finishClip;
+  }, [finishClip]);
+
+  /**
+   * Elapsed time, waveform levels and the 5:00 cap, all from the polled status.
+   */
+  useEffect(() => {
+    if (!isRecording || !status?.isRecording) return;
+
+    const ms = status.durationMillis || 0;
+    elapsedRef.current = ms;
+    setElapsedMs(ms);
+
+    // Keyed on the status object's identity, not on the effect running: `maxDurationMs` is
+    // a dependency too, and a prop change mid-recording would otherwise record the level
+    // from an already-recorded status a second time.
+    if (lastLevelStatusRef.current !== status) {
+      lastLevelStatusRef.current = status;
+      if (typeof status.metering === 'number') {
+        levelsRef.current.push(normalizeMetering(status.metering));
+      }
+    }
+
+    // The cap stops the recording; it never throws the clip away (FR-006).
+    if (ms >= maxDurationMs) finishClipRef.current();
+  }, [isRecording, maxDurationMs, status]);
+
+  /**
+   * An interruption: the recorder stopped and nobody tapped Stop (research R5, US2-2).
+   *
+   * **A separate effect from the one above on purpose.** That one early-returns on
+   * `!status?.isRecording` -- which is exactly the condition this one is looking *for*, so
+   * reading the interruption there would mean removing the guard that keeps the elapsed time
+   * and the waveform from being fed by a stopped recorder.
+   *
+   * The clip is finished rather than dropped: Sam spoke for a minute before the call, and
+   * going back to the idle Voice button with nothing handed over reads as "you have not
+   * recorded yet". `finishClip` is the same ending the Stop tap and the 5:00 cap use, so an
+   * interrupted clip is an ordinary clip -- which is also why the Stop tap that lands
+   * afterwards adds no second one.
+   */
+  useEffect(() => {
+    if (!isRecording || !status) return;
+
+    if (status.isRecording) {
+      recorderConfirmedRef.current = true;
+      return;
+    }
+
+    // No status has said `isRecording` yet, which means one of two opposite things: the
+    // recording has not got going, or it was taken away before it ever reported itself. The
+    // clock is the only thing that can tell them apart, so until the grace window is out the
+    // recorder is given the benefit of the doubt, and after it the recorder has plainly been
+    // taken. Deciding this on the flag alone left the bar claiming to record for good, with
+    // the timer frozen and the 5:00 cap unable to fire. See `START_GRACE_MS`.
+    if (
+      !recorderConfirmedRef.current &&
+      Date.now() - recordStartedAtRef.current < START_GRACE_MS
+    ) {
+      return;
+    }
+
+    finishClipRef.current();
+  }, [isRecording, status]);
+
+  /**
+   * An unmount mid-recording finishes the clip. **A separate effect on purpose:** the
+   * status effect above early-returns on `!status?.isRecording`, which is precisely the
+   * interruption condition, so the two must not share a cleanup.
+   *
+   * It reads refs rather than state because a cleanup closes over the mount it was created
+   * on, and `[]` is what makes it run on unmount only.
+   */
+  useEffect(
+    () => () => {
+      // The start-up one-shot goes with the tree, whether or not there was a clip to finish:
+      // a timer outliving its component has nothing left to decide and nowhere to report.
+      if (graceTimerRef.current) {
+        clearTimeout(graceTimerRef.current);
+        graceTimerRef.current = null;
+      }
+      if (isRecordingRef.current) finishClipRef.current();
+    },
+    [],
+  );
+
+  if (!isRecording) {
+    return (
+      <TouchableOpacity
+        testID="voice-record-button"
+        accessibilityRole="button"
+        accessibilityLabel="Record a voice clip"
+        style={[styles.voiceButton, style]}
+        onPress={startRecording}
+      >
+        <Ionicons name="mic" size={22} color="#2B7DE9" />
+        <Text style={styles.voiceLabel}>Voice</Text>
+      </TouchableOpacity>
+    );
+  }
+
+  return (
+    <View testID="voice-recorder-bar" style={[styles.bar, style]}>
+      {/* Renders nothing; polls only while there is a recorder to poll. */}
+      <RecorderStatePoll recorder={recorder} onStatus={setStatus} />
+
+      <View testID="voice-recording-dot" style={styles.dot} />
+
+      <View style={styles.barText}>
+        <Text testID="voice-recorder-timer" style={styles.timer}>
+          {formatElapsed(elapsedMs)}
+        </Text>
+        <Text style={styles.hint}>Recording · keeps going when the phone is locked</Text>
+      </View>
+
+      <TouchableOpacity
+        testID="voice-stop-button"
+        accessibilityRole="button"
+        accessibilityLabel="Stop recording"
+        style={styles.stopButton}
+        onPress={finishClip}
+      >
+        <Text style={styles.stopLabel}>Stop</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  voiceButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  voiceLabel: {
+    marginTop: 4,
+    fontSize: 12,
+    color: '#2B7DE9',
+  },
+  bar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#FDECEC',
+  },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#E5484D',
+  },
+  barText: {
+    flex: 1,
+  },
+  timer: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1C1C1E',
+    fontVariant: ['tabular-nums'],
+  },
+  hint: {
+    fontSize: 12,
+    color: '#8E8E93',
+  },
+  stopButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: '#E5484D',
+  },
+  stopLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+});

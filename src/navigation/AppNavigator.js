@@ -23,12 +23,41 @@ import InterviewModeScreen from '../screens/InterviewModeScreen';
 import EventsScreen from '../screens/EventsScreen';
 import EventDetailScreen from '../screens/EventDetailScreen';
 import EventFormScreen from '../screens/EventFormScreen';
+import CaptureScreen from '../screens/capture/CaptureScreen';
+import CaptureFab from '../components/capture/CaptureFab';
 
 // Auth context
 import { useAuth } from '../context/AuthContext';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
+
+/**
+ * Wraps a tab's screen with the capture FAB (FR-001). Defined once per screen, outside
+ * `MainTabs`, so `Tab.Screen`'s `component` prop keeps the same identity across renders --
+ * an inline wrapper recreated on every render of `MainTabs` would be a new component type
+ * each time, and React would remount the tab (and lose its state) whenever `MainTabs`
+ * re-rendered.
+ */
+function withCaptureFab(ScreenComponent) {
+  function TabScreenWithCaptureFab(props) {
+    return (
+      <View style={styles.tabScreenContainer}>
+        <ScreenComponent {...props} />
+        <CaptureFab />
+      </View>
+    );
+  }
+  TabScreenWithCaptureFab.displayName = `withCaptureFab(${ScreenComponent.displayName || ScreenComponent.name || 'Screen'})`;
+  return TabScreenWithCaptureFab;
+}
+
+const HomeTab = withCaptureFab(HomeScreen);
+const JournalTab = withCaptureFab(JournalScreen);
+const FamilyTab = withCaptureFab(FamilyScreen);
+const FriendsTab = withCaptureFab(FriendsScreen);
+const PlacesTab = withCaptureFab(PlacesScreen);
+const TimelineTab = withCaptureFab(TimelineScreen);
 
 function MainTabs() {
   return (
@@ -67,12 +96,12 @@ function MainTabs() {
         headerShown: false,
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Journal" component={JournalScreen} />
-      <Tab.Screen name="Family" component={FamilyScreen} />
-      <Tab.Screen name="Friends" component={FriendsScreen} />
-      <Tab.Screen name="Places" component={PlacesScreen} />
-      <Tab.Screen name="Timeline" component={TimelineScreen} />
+      <Tab.Screen name="Home" component={HomeTab} />
+      <Tab.Screen name="Journal" component={JournalTab} />
+      <Tab.Screen name="Family" component={FamilyTab} />
+      <Tab.Screen name="Friends" component={FriendsTab} />
+      <Tab.Screen name="Places" component={PlacesTab} />
+      <Tab.Screen name="Timeline" component={TimelineTab} />
     </Tab.Navigator>
   );
 }
@@ -170,6 +199,13 @@ export default function AppNavigator() {
                 presentation: 'fullScreenModal',
               }}
             />
+            <Stack.Screen
+              name="Capture"
+              component={CaptureScreen}
+              options={{
+                presentation: 'fullScreenModal',
+              }}
+            />
           </>
         ) : (
           // Not authenticated: Show login
@@ -192,5 +228,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#fff',
+  },
+  tabScreenContainer: {
+    flex: 1,
   },
 });

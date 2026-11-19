@@ -49,12 +49,34 @@ const QuickCaptureBar = memo(({
 
   const handleSend = useCallback(() => {
     if (!hasText) return;
-    
+
     onSend?.(text.trim(), visibility);
     setText('');
     setInputHeight(MIN_HEIGHT);
     Keyboard.dismiss();
   }, [text, hasText, visibility, onSend]);
+
+  /**
+   * The camera and the microphone hand up the chosen audience too — all three controls, not
+   * only Send (review fix round 2, item 3).
+   *
+   * The picker sits on this bar, so what it is left on is what the person has chosen for
+   * whatever they do next from here. Carrying it only with the text made the same mistake Send
+   * used to make, through another door: somebody who set the picker to **Only me** and then
+   * tapped the camera had their choice replaced by the capture screen's wider default, and
+   * silently widening an audience is the unsafe way to be wrong.
+   *
+   * Wrapped rather than handed straight to `onPress`, because a `TouchableOpacity` calls its
+   * handler with a press **event** — passed through as the audience, that would reach the
+   * capture screen as a route parameter.
+   */
+  const handleCamera = useCallback(() => {
+    onCameraPress?.(visibility);
+  }, [onCameraPress, visibility]);
+
+  const handleMic = useCallback(() => {
+    onMicPress?.(visibility);
+  }, [onMicPress, visibility]);
 
   const handleContentSizeChange = useCallback((event) => {
     const newHeight = Math.min(
@@ -98,7 +120,7 @@ const QuickCaptureBar = memo(({
       {/* Camera button */}
       <TouchableOpacity
         style={styles.iconButton}
-        onPress={onCameraPress}
+        onPress={handleCamera}
         activeOpacity={0.7}
       >
         <Ionicons name="camera-outline" size={24} color="#666" />
@@ -116,7 +138,7 @@ const QuickCaptureBar = memo(({
       ) : (
         <TouchableOpacity
           style={styles.iconButton}
-          onPress={onMicPress}
+          onPress={handleMic}
           activeOpacity={0.7}
         >
           <Ionicons name="mic-outline" size={24} color="#666" />

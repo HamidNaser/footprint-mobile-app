@@ -158,6 +158,14 @@ class JournalRepositoryClass extends BaseRepository {
       datePrecision: serverEntry.datePrecision || null,
       reactions: serverEntry.reactions || { likes: 0, likedByUserIds: [] },
       commentsCount: serverEntry.commentsCount || 0,
+      // The server's own `updatedAt`, kept exactly as it sent it. This is the last save the
+      // server knows about, and the reference a capture moment is judged against at read time
+      // (FR-029, research R2) -- a moment later than this, beyond a small tolerance for clock
+      // differences, cannot be true and must not order anything. `updatedAt` below is a
+      // different fact: when this phone last wrote the row, which says nothing about the
+      // server. Absent, this stays null, which means no threshold rather than a threshold of
+      // now.
+      serverUpdatedAt: serverEntry.updatedAt || null,
       syncStatus: SyncStatus.SYNCED,
       createdAt: serverEntry.createdAt ? new Date(serverEntry.createdAt).getTime() : now,
       updatedAt: now,
@@ -344,15 +352,58 @@ class JournalRepositoryClass extends BaseRepository {
 
     this.log('update', { localId, fields: Object.keys(updateData) });
 
-    const updated = await this.getByLocalId(localId);
+    let updated = await this.getByLocalId(localId);
 
-    // Queue the update for push (only meaningful once the entry has a serverId).
-    await this._enqueueSync(
-      SyncOperationType.UPDATE_ENTRY,
-      localId,
-      { ...updated, local_id: localId },
-      entry.serverId || null,
-    );
+    // ⚠ Everything below decides from `updated`, the row as it stands AFTER the write, never
+    // from the `entry` read at the top of this method.
+    //
+    // A push finishing inside this method's own awaits calls
+    // `SyncEngine._handleCreateSuccess` -> `markSynced`, which stamps the server id and marks
+    // the row synced through a direct write that enqueues nothing. The read at the top then
+    // describes a memory that no longer exists, and both decisions made from it are wrong in
+    // the same direction: nothing is queued, and the row is left reading `synced` over an edit
+    // the server has never seen. Nothing heals that -- over `src/sync` only
+    // `_backfillMediaQueue` and `reconcileDefaultJournal` re-enqueue anything, and neither
+    // looks for a dirty row with an empty queue -- so the edit returns only if the person
+    // happens to edit the memory again.
+    //
+    // The sync status first: the edit's own write could only carry PENDING if the stale read
+    // already said SYNCED, so a stamp that landed in between leaves it to be corrected here. A
+    // row reading `synced` over an unsent edit is not cosmetic: it is what tells
+    // `ConflictResolver.detectConflict` there is nothing local to protect, so an incoming
+    // server copy overwrites the edit with no conflict raised.
+    if (syncEnabled && updated?.syncStatus === SyncStatus.SYNCED) {
+      await this.dbService.updateEntry(localId, { syncStatus: SyncStatus.PENDING });
+      updated = await this.getByLocalId(localId);
+    }
+
+    // The server id the queued operation is for. `updated` is the authority -- it is the later
+    // read, and nothing in this codebase ever clears a server id, so it can only have gained
+    // one -- with `entry.serverId` kept as a fallback for the single case `updated` cannot
+    // speak to: a row deleted from under us, where `getByLocalId` answers null. It is also what
+    // keeps the `server_id` column and the `{...updated}` payload describing the same memory;
+    // they were read from different snapshots before this.
+    const serverId = updated?.serverId || entry.serverId || null;
+
+    // Queue the update for push -- but only for a memory the server already holds.
+    //
+    // Without a server id there is nothing there to update, and an UPDATE_ENTRY carrying none
+    // is worse than useless: `UpdateSyncEntry.ServerId` is a required string, so a batch
+    // containing one is most likely refused whole with 400, taking the memories that were fine
+    // down with it, and the single-operation path drops it as completed
+    // (`SyncEngine.js:1062-1071`). What carries the change instead is the memory's own pending
+    // CREATE, which the push re-reads the row for rather than sending its queued snapshot --
+    // or, for a memory whose share the server refused for good and whose create was therefore
+    // removed, the next `JournalService.reshareEntry`. This applies to every edit of a
+    // not-yet-uploaded memory, not only a refused one (research R15, analyze round-4 U1).
+    if (serverId) {
+      await this._enqueueSync(
+        SyncOperationType.UPDATE_ENTRY,
+        localId,
+        { ...updated, local_id: localId },
+        serverId,
+      );
+    }
 
     return updated;
   }
@@ -388,6 +439,13 @@ class JournalRepositoryClass extends BaseRepository {
     const updates = {
       syncStatus: SyncStatus.SYNCED,
       syncedAt: this.now(),
+      // The server has accepted the memory, audience and all, so whatever it last said about
+      // that audience is no longer true. Cleared here rather than at each call site because
+      // this is the one place both a successful create and a successful update pass through,
+      // on the batch route and on the single-operation one alike -- and a card still saying
+      // "Not shared" over a memory that is shared is the same silent lie as the original
+      // defect, pointing the other way (research R15).
+      shareState: null,
     };
 
     if (serverId) {
@@ -404,7 +462,7 @@ class JournalRepositoryClass extends BaseRepository {
    * fields directly and marks the entry SYNCED WITHOUT re-enqueuing a push,
    * so reconciliation never triggers a sync feedback loop.
    * @param {string} localId - Local ID
-   * @param {object} updates - Server fields { contentBlocks, location, visibility }
+   * @param {object} updates - Server fields { contentBlocks, location, visibility, updatedAt }
    */
   async applyServerUpdate(localId, updates = {}) {
     if (!localId) {
@@ -415,12 +473,61 @@ class JournalRepositoryClass extends BaseRepository {
     if (updates.contentBlocks !== undefined) updateData.contentBlocks = updates.contentBlocks;
     if (updates.location !== undefined) updateData.location = updates.location;
     if (updates.visibility !== undefined) updateData.visibility = updates.visibility;
+    // The server copy's own `updatedAt`, the same ordering reference `createFromServer`
+    // records (FR-029, research R2). Set only when the copy carried one, so a caller that
+    // applies a partial update cannot erase a threshold that is still valid -- and in
+    // particular cannot replace it with this phone's clock.
+    if (updates.updatedAt !== undefined) updateData.serverUpdatedAt = updates.updatedAt;
     updateData.syncStatus = SyncStatus.SYNCED;
     updateData.syncedAt = this.now();
 
     await this.dbService.updateEntry(localId, updateData);
 
     this.log('applyServerUpdate', { localId, fields: Object.keys(updateData) });
+  }
+
+  /**
+   * Record what the server last said about this memory's chosen audience.
+   *
+   * `'waiting'` when it could not work the audience out yet and the phone should send the
+   * memory again by itself; `'refused'` when it never will and the phone must stop;
+   * `null` when there is nothing to say -- the server has accepted the memory, or the person
+   * has chosen an audience again.
+   *
+   * ⚠ **This never touches `visibility` or `locationSharing`, and nothing here ever may.**
+   * It records a fact about a push that already happened; the audience itself is the person's
+   * choice and stays exactly as they made it. A partial or substituted audience is the one
+   * failure mode with no safe side -- narrower silently withholds the memory, wider shows it
+   * to somebody it was never meant for -- so a refusal is shown, never worked around
+   * (CLAUDE.md *Sharing fails closed*, FR-011, SC-010).
+   *
+   * No push is enqueued either, for the same reason: there is nothing new to tell the server,
+   * and re-sending a memory it has just refused for good is the loop research R15 closes.
+   *
+   * ⚠ **And the row's local `updated_at` is left exactly as it stands.** This is bookkeeping
+   * about a push that already happened, not a change the person made. It could not CREATE a
+   * conflict -- `ConflictResolver.detectConflict` keys on `syncStatus` and `syncedAt` -- but it
+   * could DECIDE one: the default strategy is last-write-wins, and
+   * `_resolveLastWriteWins` compares this column against the server copy's `updatedAt`, so
+   * stamping it on a still-PENDING memory can tip an already-detected UPDATE_UPDATE toward the
+   * client and discard a newer server copy -- including a narrower audience chosen on another
+   * device. That is a fail-closed concern, not a cosmetic one, so it is not stamped.
+   *
+   * @param {string} localId - Local ID
+   * @param {string|null} state - 'waiting', 'refused', or null to clear
+   */
+  async setShareState(localId, state) {
+    if (!localId) {
+      throw new Error('JournalRepository.setShareState requires a localId');
+    }
+
+    await this.dbService.updateEntry(
+      localId,
+      { shareState: state ?? null },
+      { touchUpdatedAt: false }
+    );
+
+    this.log('setShareState', { localId, state: state ?? null });
   }
 
   /**

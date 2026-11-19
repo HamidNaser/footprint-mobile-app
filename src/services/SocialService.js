@@ -136,7 +136,22 @@ function normalizeBlockType(type) {
   }
 }
 
-/** Map a backend ContentBlockResponse into the mobile card block shape. */
+/**
+ * Map a backend ContentBlockResponse into the mobile card block shape.
+ *
+ * This is a whitelist, deliberately: a field reaches a card only once it is mapped here.
+ *
+ * `location` and `capturedAt` are on the list because the map under a memory is drawn from
+ * them and its pieces are ordered by them (013 FR-022..FR-029). Without them the map would
+ * appear only on the viewer's own memories, which are read from SQLite and never pass through
+ * here — and US3 says it appears for anyone allowed to see the memory (research R10).
+ *
+ * Both are passed through **exactly as the API sent them**. The server has already coarsened
+ * every location for this particular viewer, and that is what satisfies FR-026; a phone that
+ * rounded or re-shaped the value would either leak precision this viewer may not have or
+ * quietly degrade precision they may. A capture moment is not coarsened at all (a time is not
+ * a location), and it is kept verbatim because it is a recorded fact (Principle III).
+ */
 function adaptBlock(block) {
   const media = (block.media || []).map((m) => ({
     id: m.id,
@@ -145,6 +160,10 @@ function adaptBlock(block) {
     width: m.width ?? null,
     height: m.height ?? null,
     duration: m.duration ?? null,
+    // Each media item carries its own place and moment: a photo taken a street from the note
+    // is a separate pin, and a photos block yields one piece per photo.
+    location: m.location ?? null,
+    capturedAt: m.capturedAt ?? null,
   }));
 
   return {
@@ -154,6 +173,9 @@ function adaptBlock(block) {
     media,
     duration: block.duration ?? null,
     waveform: block.waveform || [],
+    location: block.location ?? null,
+    // Only a block with no media carries its own moment; a media block's is its media's.
+    capturedAt: block.capturedAt ?? null,
   };
 }
 
@@ -184,6 +206,15 @@ export function adaptEntry(entry) {
     // read as recorded today just because the server omitted one field.
     createdAt: new Date(entry.createdAt || entry.date || Date.now()).getTime(),
     updatedAt: entry.updatedAt ? new Date(entry.updatedAt).getTime() : null,
+    // The server's own record of the last save, kept verbatim and spelled the way the
+    // own-memory path spells it (`server_updated_at` -> `serverUpdatedAt`), so both routes
+    // feed the read-time ordering rule one value (research R2, R15 *Field names*).
+    //
+    // A capture moment later than this, beyond a small tolerance, cannot be true and must not
+    // order pieces (FR-029). When the server sends none this stays **undefined**, meaning no
+    // threshold at all. `Date.now()` here would make the threshold a fact about when this
+    // phone happened to look, so two phones would order the same memory differently (SC-007).
+    serverUpdatedAt: entry.updatedAt ?? undefined,
     visibility: entry.visibility,
     syncStatus: 'synced',
     location: entry.location

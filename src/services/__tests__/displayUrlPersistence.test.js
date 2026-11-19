@@ -26,9 +26,11 @@ describe('display address column', () => {
     const m = adding();
     expect(m).toBeDefined();
     expect(m.up.join('\n')).toMatch(/ALTER TABLE media_queue ADD COLUMN display_server_url/i);
-    expect(m.version).toBe(SCHEMA_VERSION);
-    // v7, not v6: main shipped its own v6 (location_sharing) first, and a shipped number is fixed.
-    expect(SCHEMA_VERSION).toBe(7);
+    // v7, not v6: main shipped its own v6 (location_sharing) first, and a shipped number is
+    // fixed -- it never moves to make room for something later, which is why this checks the
+    // literal version rather than equality with SCHEMA_VERSION. 013 adds v8 on top of this.
+    expect(m.version).toBe(7);
+    expect(m.version).toBeLessThanOrEqual(SCHEMA_VERSION);
   });
 
   it('is read and written by the media row mapping', async () => {

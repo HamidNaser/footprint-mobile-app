@@ -74,9 +74,10 @@ const withoutLine = (sql, pattern) => sql.replace(new RegExp(`^.*${pattern}.*$`,
  * later columns taken back out -- derived from production, so it cannot drift from it) and the
  * schema_version rows it recorded.
  */
-function installedAt(version, { dropColumns }) {
+function installedAt(version, { dropColumns, dropTables = [] }) {
   const raw = new DatabaseSync(':memory:');
   for (const [table, sql] of Object.entries(CREATE_TABLES)) {
+    if (dropTables.includes(table)) continue; // the table itself didn't exist yet at this version
     let ddl = sql;
     for (const column of dropColumns[table] || []) ddl = withoutLine(ddl, `^\\s*${column}\\s`);
     raw.exec(ddl);
@@ -150,6 +151,13 @@ describe('migration numbering', () => {
     expect(versionAdding('display_server_url')).toBe(7);
     expect(SCHEMA_VERSION).toBe(Math.max(...numbers));
   });
+
+  it('013 lands capture_drafts, share_state and server_updated_at as v8', () => {
+    expect(versionAdding('capture_drafts')).toBe(8);
+    expect(versionAdding('share_state')).toBe(8);
+    expect(versionAdding('server_updated_at')).toBe(8);
+    expect(SCHEMA_VERSION).toBe(8);
+  });
 });
 
 describe('upgrade paths', () => {
@@ -158,9 +166,12 @@ describe('upgrade paths', () => {
     await open(raw);
 
     expect(columns(raw, 'journal_entries')).toEqual(
-      expect.arrayContaining(['date_precision', 'location_sharing'])
+      expect.arrayContaining(['date_precision', 'location_sharing', 'share_state', 'server_updated_at'])
     );
     expect(columns(raw, 'media_queue')).toContain('display_server_url');
+    expect(columns(raw, 'capture_drafts')).toEqual(
+      expect.arrayContaining(['id', 'entry_local_id', 'created_at', 'updated_at', 'pieces_json'])
+    );
     expect(versionOf(raw)).toBe(SCHEMA_VERSION);
   });
 
@@ -201,6 +212,33 @@ describe('upgrade paths', () => {
     const entry = raw.prepare("SELECT * FROM journal_entries WHERE local_id = 'e1'").get();
     expect(entry.location_sharing).toBe('private');
     expect(JSON.parse(entry.content_blocks)[0].media[0].thumbnailUrl).toBeUndefined();
+  });
+
+  it("013's v8 (M7): a v7 database gains capture_drafts, share_state and server_updated_at, data intact", async () => {
+    const raw = installedAt(7, {
+      dropColumns: { journal_entries: ['share_state', 'server_updated_at'] },
+      dropTables: ['capture_drafts'],
+    });
+    seedEntry(raw, { location_sharing: 'family' });
+
+    await open(raw);
+
+    expect(versionOf(raw)).toBe(SCHEMA_VERSION);
+    expect(columns(raw, 'journal_entries')).toEqual(
+      expect.arrayContaining(['share_state', 'server_updated_at'])
+    );
+    expect(columns(raw, 'capture_drafts')).toEqual(
+      expect.arrayContaining(['id', 'entry_local_id', 'created_at', 'updated_at', 'pieces_json'])
+    );
+
+    const entry = raw.prepare("SELECT * FROM journal_entries WHERE local_id = 'e1'").get();
+    // The row v7 wrote survives the upgrade, untouched -- and the two new columns start NULL,
+    // not some guessed default, because neither is computable from what v7 already knew.
+    expect(entry.location_sharing).toBe('family');
+    expect(entry.visibility).toBe('family');
+    expect(entry.date).toBe('2018-07-04');
+    expect(entry.share_state).toBeNull();
+    expect(entry.server_updated_at).toBeNull();
   });
 
   it('opening an up-to-date database again changes nothing', async () => {
