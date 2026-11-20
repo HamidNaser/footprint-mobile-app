@@ -4,7 +4,7 @@
  * Sits after the Events quick action on Home (`HomeScreen.js`), fed by `useUpcomingEvents`.
  * Shows the next one or two upcoming events (soonest first, a date tile, title and place per
  * row) with a "See all ›" link; tapping the card or "See all ›" is the same action -- both call
- * `onPress`, which `HomeScreen` wires to `navigate('Timeline', { view: 'events' })`. This
+ * `onPress`, which `HomeScreen` wires to `navigate('Events')`. This
  * component does not navigate itself and knows nothing about React Navigation, so it stays
  * testable on its own and HomeScreen keeps ownership of where "See all" actually goes.
  *

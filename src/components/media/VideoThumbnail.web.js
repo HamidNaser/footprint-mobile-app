@@ -87,7 +87,7 @@ const LegacyVideoThumbnail = ({
           <Ionicons name="videocam" size={24} color="#8E8E93" />
         </View>
       )}
-      {showDuration && duration && (
+      {showDuration && !!duration && (
         <View style={styles.durationBadge}>
           <Text style={styles.durationText}>{formatDuration(duration)}</Text>
         </View>

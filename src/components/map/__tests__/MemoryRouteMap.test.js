@@ -278,7 +278,110 @@ describe('the map it draws on', () => {
     const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
 
     expect(map(tree).props.scrollEnabled).toBe(false);
-    expect(map(tree).props.zoomEnabled).toBe(false);
+  });
+
+  it('zooms with a pinch, but leaves one-finger drags to the list', () => {
+    const tree = render({ entry: { contentBlocks: [text('a', { location: BUS })] } });
+
+    expect(map(tree).props.zoomEnabled).toBe(true);
+    expect(map(tree).props.scrollEnabled).toBe(false);
+  });
+
+  describe('the + and - buttons act from the region on screen', () => {
+    const entry = { contentBlocks: [text('a', { location: BUS })] };
+    const setup = () => {
+      const tree = render({ entry });
+      const press = (id) =>
+        act(() => tree.root.findAllByProps({ testID: id })[0].props.onPress());
+      const opening = map(tree).props.region;
+      const pinchTo = (factor) =>
+        act(() =>
+          map(tree).props.onRegionChangeComplete({
+            ...opening,
+            latitudeDelta: opening.latitudeDelta / factor,
+            longitudeDelta: opening.longitudeDelta / factor,
+          }),
+        );
+      return { tree, press, opening, pinchTo };
+    };
+
+    it('zooms in and out by 2x from the opening view', () => {
+      const { tree, press, opening } = setup();
+      press('memory-route-map-zoom-in');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta / 2);
+      press('memory-route-map-zoom-out');
+      press('memory-route-map-zoom-out');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta * 2);
+    });
+
+    it('+ after a 4x pinch goes to 8x, not back out to 2x', () => {
+      const { tree, press, opening, pinchTo } = setup();
+      pinchTo(4);
+      press('memory-route-map-zoom-in');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta / 8);
+      expect(map(tree).props.region.longitudeDelta).toBeCloseTo(opening.longitudeDelta / 8);
+    });
+
+    it('- after a 4x pinch goes to 2x', () => {
+      const { tree, press, opening, pinchTo } = setup();
+      pinchTo(4);
+      press('memory-route-map-zoom-out');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta / 2);
+    });
+
+    it('keeps the centre the person panned/pinched to', () => {
+      const { tree, press, opening } = setup();
+      act(() =>
+        map(tree).props.onRegionChangeComplete({
+          ...opening, latitude: opening.latitude + 0.001,
+          latitudeDelta: opening.latitudeDelta / 2, longitudeDelta: opening.longitudeDelta / 2,
+        }),
+      );
+      press('memory-route-map-zoom-in');
+      expect(map(tree).props.region.latitude).toBeCloseTo(opening.latitude + 0.001);
+    });
+
+    it('clamps to 1/64 of the opening span in and 8x out, from wherever the pinch left off', () => {
+      const { tree, press, opening, pinchTo } = setup();
+      pinchTo(32);
+      for (let i = 0; i < 5; i += 1) press('memory-route-map-zoom-in');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta / 64);
+      for (let i = 0; i < 12; i += 1) press('memory-route-map-zoom-out');
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta * 8);
+    });
+
+    it('keeps the zoom when the entry is refetched with the same places', () => {
+      const { tree, press, opening } = setup();
+      press('memory-route-map-zoom-in');
+      press('memory-route-map-zoom-in');
+      const zoomed = map(tree).props.region;
+      act(() =>
+        tree.update(
+          <MemoryRouteMap entry={{ contentBlocks: [text('a', { location: { ...BUS } })] }} />,
+        ),
+      );
+      expect(map(tree).props.region).toBe(zoomed);
+      expect(zoomed.latitudeDelta).toBeCloseTo(opening.latitudeDelta / 4);
+    });
+
+    it('resets to the opening view for a different memory', () => {
+      const { tree, press, opening } = setup();
+      press('memory-route-map-zoom-in');
+      act(() =>
+        tree.update(
+          <MemoryRouteMap entry={{ contentBlocks: [text('b', { location: ANOTHER_CITY })] }} />,
+        ),
+      );
+      expect(map(tree).props.region.latitudeDelta).toBeCloseTo(opening.latitudeDelta);
+      expect(map(tree).props.region.latitude).toBeCloseTo(ANOTHER_CITY.lat);
+    });
+
+    it('keeps the same region object across ordinary re-renders', () => {
+      const { tree } = setup();
+      const first = map(tree).props.region;
+      act(() => tree.update(<MemoryRouteMap entry={entry} onPinPress={() => {}} />));
+      expect(map(tree).props.region).toBe(first);
+    });
   });
 });
 

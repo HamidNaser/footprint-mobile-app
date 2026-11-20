@@ -91,7 +91,7 @@ export default function HomeScreen({ navigation }) {
         <ComingUpCard
           upcoming={upcoming}
           error={upcomingError}
-          onPress={() => navigation.navigate('Timeline', { view: 'events' })}
+          onPress={() => navigation.navigate('Events')}
         />
       </View>
     </SafeAreaView>

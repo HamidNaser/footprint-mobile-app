@@ -439,16 +439,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   camera: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   // Sits over the preview. box-none so the empty middle stays transparent to touch and
   // only the actual controls take presses.
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'space-between',
   },
   flashOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#FFF',
   },
   

@@ -281,7 +281,7 @@ const MemoryDetailModal = ({
 
 const styles = StyleSheet.create({
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: BACKGROUND_COLOR,
     zIndex: 20,
   },

@@ -96,11 +96,17 @@ const styles = StyleSheet.create({
   // Out of the row's flow and spanning it, directly above it -- the UI contract's
   // "recording bar above the dock, full width". `bottom` is the row's own height, so the
   // bar's lower edge meets the row's upper one.
+  // `width: '100%'` rather than `undefined`: `voiceSlot` sets `width: 88`, and in a style
+  // array an `undefined` does not reset it, so the bar stayed 88 px wide and "Stop" wrapped.
+  // The slot's own `paddingHorizontal` gives the bar its inset, and `alignItems: 'stretch'`
+  // lets the bar fill the slot's content width.
   voiceSlotRecording: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: DOCK_ROW_HEIGHT,
-    width: undefined,
+    width: '100%',
+    paddingHorizontal: 12,
+    alignItems: 'stretch',
   },
 });

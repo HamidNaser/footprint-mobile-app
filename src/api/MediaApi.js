@@ -13,6 +13,7 @@ import {
   buildUrl,
 } from '../config/api.config';
 import { NetworkMonitor } from '../sync/NetworkMonitor';
+import { wholeSeconds } from '../utils/wholeSeconds';
 
 /**
  * Media types supported by the API
@@ -147,7 +148,7 @@ class MediaApiClass {
       s3Key: presignedData.s3Key,
       width: mediaInfo.width,
       height: mediaInfo.height,
-      duration: mediaInfo.duration,
+      duration: wholeSeconds(mediaInfo.duration),
       // Carried through from MediaPicker, which is the only place that knows whether the
       // camera or the library produced this and what the file itself said (T023).
       photoMetadata: mediaInfo.photoMetadata,
@@ -364,7 +365,7 @@ class MediaApiClass {
       s3Key: params.s3Key,
       width: params.width ?? null,
       height: params.height ?? null,
-      duration: params.duration ?? null,
+      duration: wholeSeconds(params.duration) ?? null,
       // What the phone read off the photograph (FR-014, T023). The key is omitted rather
       // than sent as null when there is none -- audio and video carry no capture metadata,
       // and this request has a standing rule against inventing fields. A byte length alone

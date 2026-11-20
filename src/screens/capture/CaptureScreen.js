@@ -107,8 +107,11 @@ import {
   Alert,
   AppState,
   Linking,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -549,6 +552,7 @@ function restoreUnderCaptures(setPieces, stored) {
 const draftsLeftAfterSave = new Map();
 
 export default function CaptureScreen({ route, navigation }) {
+  const insets = useSafeAreaInsets();
   const isEditMode = route?.params?.mode === 'edit';
   const entryLocalId = route?.params?.entryLocalId ?? null;
   const slot = isEditMode ? DraftSlot.EDIT : DraftSlot.NEW;
@@ -681,6 +685,39 @@ export default function CaptureScreen({ route, navigation }) {
     return () => {
       mountedRef.current = false;
     };
+  }, []);
+
+  // ============================================================
+  // The keyboard (013 fix T12)
+  // ============================================================
+
+  const pieceScrollRef = useRef(null);
+  /** Read by the keyboard handler, which is subscribed once and must not see a stale list. */
+  const lastPieceIsNoteRef = useRef(false);
+  lastPieceIsNoteRef.current = pieces[pieces.length - 1]?.kind === 'text';
+  const [isKeyboardShown, setIsKeyboardShown] = useState(false);
+
+  /**
+   * iOS announces the keyboard *before* it moves, so the bottom inset is dropped in step with
+   * it; elsewhere only the Did events exist. While it is up the keyboard already covers the
+   * home-indicator area, so keeping the inset would leave a gap above it. When it opens with
+   * the last piece a note -- which Type makes almost always the one being typed -- the list
+   * scrolls to the end so the note stays visible above the keyboard.
+   */
+  useEffect(() => {
+    const ios = Platform.OS === 'ios';
+    const subscriptions = [
+      Keyboard.addListener(ios ? 'keyboardWillShow' : 'keyboardDidShow', () => {
+        if (mountedRef.current) setIsKeyboardShown(true);
+      }),
+      Keyboard.addListener(ios ? 'keyboardWillHide' : 'keyboardDidHide', () => {
+        if (mountedRef.current) setIsKeyboardShown(false);
+      }),
+      Keyboard.addListener('keyboardDidShow', () => {
+        if (lastPieceIsNoteRef.current) pieceScrollRef.current?.scrollToEnd?.({ animated: true });
+      }),
+    ];
+    return () => subscriptions.forEach((subscription) => subscription?.remove?.());
   }, []);
 
   /** Which journal a saved memory belongs to, as `JournalScreen` resolves it. */
@@ -1362,6 +1399,17 @@ export default function CaptureScreen({ route, navigation }) {
     setIsCameraOpen(false);
   }, []);
 
+  // 013 fix T9: the Journal bar's Camera asks for `open: 'camera'`. Once per screen instance, so
+  // closing the camera is not undone by a re-render; edit mode never opens it.
+  const openedFromParamRef = useRef(false);
+  const openParam = route?.params?.open;
+  useEffect(() => {
+    if (!openedFromParamRef.current && !isEditMode && openParam === 'camera') {
+      openedFromParamRef.current = true;
+      openCamera();
+    }
+  }, [openParam, isEditMode, openCamera]);
+
   // ============================================================
   // Leaving, discarding, saving
   // ============================================================
@@ -1699,8 +1747,25 @@ export default function CaptureScreen({ route, navigation }) {
     // The safe area wraps the *content*, not the screen, so that the camera overlay below
     // can be genuinely full screen: an overlay inside the inset box would leave a white band
     // under the notch and over the home indicator.
+    //
+    // The insets come from `useSafeAreaInsets` and are applied as padding, not through the
+    // library's native `SafeAreaView`: inside a `fullScreenModal` that wrapper sometimes kept a 0
+    // top inset, which left the X and Save buttons under the clock where they could not be tapped.
+    // The hook returned the right values (top 59, bottom 34) on every render on the device.
     <View style={styles.screen}>
-      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+      {/* Around the content only -- never the camera overlay or the sheet below. */}
+      <KeyboardAvoidingView
+        testID="capture-keyboard-avoider"
+        style={styles.safeArea}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+      <View
+        testID="capture-safe-content"
+        style={[
+          styles.safeArea,
+          { paddingTop: insets.top, paddingBottom: isKeyboardShown ? 0 : insets.bottom },
+        ]}
+      >
         <View style={styles.header}>
           <TouchableOpacity
             testID="capture-close-button"
@@ -1824,6 +1889,7 @@ export default function CaptureScreen({ route, navigation }) {
         )}
 
         <ScrollView
+          ref={pieceScrollRef}
           testID="capture-piece-scroll"
           style={styles.body}
           keyboardShouldPersistTaps="handled"
@@ -1865,7 +1931,8 @@ export default function CaptureScreen({ route, navigation }) {
             />
           }
         />
-      </SafeAreaView>
+      </View>
+      </KeyboardAvoidingView>
 
       {isCameraOpen && (
         // Over this screen, not instead of it: a replacement would unmount the voice bar and
@@ -2024,11 +2091,10 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
   },
   recordingBar: {
-    marginHorizontal: 12,
     marginBottom: 8,
   },
   cameraOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 10,
     elevation: 10,
     backgroundColor: '#000000',
