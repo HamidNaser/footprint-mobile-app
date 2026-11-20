@@ -6,8 +6,10 @@
  * and provides a clean API for repositories to use.
  */
 
+import { Platform } from 'react-native';
 import { getDatabase, initializeDatabase, getDatabaseStats, clearDatabase } from '../database';
 import { SyncStatus, UploadStatus, EntityType, SyncOperation } from '../database/schema';
+import { dayKeyOf, filterRange, isDescending } from '../utils/calendarModel';
 
 class DatabaseServiceClass {
   constructor() {
@@ -390,6 +392,252 @@ class DatabaseServiceClass {
       'UPDATE journal_entries SET deleted_at = ?, sync_status = ? WHERE local_id = ?',
       [Date.now(), SyncStatus.PENDING, localId]
     );
+  }
+
+  // ============================================================
+  // Calendar Queries (016)
+  //
+  // The Journal's feed is paged -- `useJournal` asks for 20 and asks for 20 more at the end
+  // of the list -- so it can answer "the newest twenty" and nothing else. The calendar has to
+  // answer "which days of March hold memories" and "every memory of March", over everything
+  // the phone holds (FR-010, SC-003), which is why these two read the database directly and
+  // why no screen may answer either question by filtering `allEntries`.
+  //
+  // Both are local. There is no server call anywhere in feature 016: the phone already holds
+  // every synced memory, and the only thing it lacked was a way to ask about all of them.
+  //
+  // Both have two implementations, and the web build is the reason. `src/database/index.web.js`
+  // is a shim, not a database: its `getAllAsync` recognises `journal_id = ?` and `local_id = ?`
+  // and ignores everything else -- a `BETWEEN`, a `substr(...)` comparison, a `GROUP BY`, an
+  // `ORDER BY`, even `deleted_at IS NULL`. A range query sent there would come back as the
+  // whole journal in the shim's own order, which is not a wrong-looking screen but a
+  // plausible-looking wrong one. So on web the journal's rows are selected whole and the same
+  // work is done in JS by `calendarModel`, which exists partly for this (research R2, F4).
+  // `calendarModel.filterRange` is the written contract for the order and the precision
+  // filter, and the SQL below follows it rather than the other way round.
+  // ============================================================
+
+  /**
+   * One row per civil day and precision a journal's memories are dated to, and how many there
+   * are of each -- the whole journal, never a page of it.
+   *
+   * These are the rows `calendarModel.buildIndex` turns into the counts behind the calendar's
+   * faded days and a period's "4 memories", so they are returned in the shape it accepts
+   * (`day`, `date_precision`, `count`) and are not interpreted here.
+   *
+   * The day is `substr(date, 1, 10)`, the leading `YYYY-MM-DD` of the stored date and nothing
+   * more. A stored date may carry a full instant -- a server pull can leave one -- and reading
+   * such a row as a moment in time would move it a day either way depending on where the
+   * reader is standing (FR-011). This is the same answer `calendarModel.dayKeyOf` gives, which
+   * is what keeps the two paths below from placing one memory on two different days.
+   *
+   * A precision is grouped as it is stored and is not defaulted here: `buildIndex` reads a
+   * missing one as a day, as the rest of the app does, and a second opinion about that in two
+   * places is a second thing to keep in step.
+   *
+   * `deleted_at IS NULL` as everywhere else in this file: a deleted memory counted in the
+   * index is a calendar day that offers a memory and then shows none.
+   *
+   * **Every row returned names a usable day.** A row whose stored date is empty or malformed
+   * (`'2026-3-5'`) is left out, on both paths. `buildIndex` would drop such a group anyway, so
+   * no screen depended on this -- but `substr` would still have produced a group, and the two
+   * paths then disagreed about the one thing nothing else checks: a caller that sums `count`
+   * for a total ("how many memories this year") would have got one number on a phone and
+   * another on the web build. Dropping it is the fail-closed answer `buildIndex` already
+   * documents -- a memory whose date cannot be read is reachable from nowhere in the calendar,
+   * rather than placed on a day of this file's choosing.
+   */
+  async getCalendarIndexRows(journalId) {
+    if (Platform.OS === 'web') {
+      return this._calendarIndexRowsOnWeb(journalId);
+    }
+
+    const db = await this.getDb();
+
+    // Ordered by day and then precision so the rows come back the same way every time, and the
+    // same way the web path below returns them -- the one thing that makes the two comparable.
+    const rows = await db.getAllAsync(
+      `SELECT substr(date, 1, 10) AS day, date_precision, COUNT(*) AS count
+       FROM journal_entries
+       WHERE journal_id = ? AND deleted_at IS NULL
+       GROUP BY day, date_precision
+       ORDER BY day ASC, date_precision ASC`,
+      [journalId]
+    );
+
+    // `substr` takes the first ten characters of whatever is stored, which for a malformed date
+    // is not a day. `dayKeyOf` is the one judge of that, and the web path drops the same rows.
+    return rows.filter(row => dayKeyOf(row.day));
+  }
+
+  /**
+   * The memories of a civil-date range, mapped exactly as the feed maps them.
+   *
+   * @param {string} journalId - The journal to read
+   * @param {string} fromKey - First day of the range, inclusive, as `YYYY-MM-DD`
+   * @param {string} toKey - Last day of the range, inclusive, as `YYYY-MM-DD`
+   * @param {string[]|null} [precisions] - The precisions to keep; no list means every one
+   * @param {string} [order] - `'DESC'` for newest first; anything else is calendar order
+   * @returns {Promise<Array>} The entries, mapped by `_mapEntryRow`
+   *
+   * Mapped through `_mapEntryRow`, deliberately and not through
+   * `JournalRepository.getByDateRange`, whose own `_mapRow` skips the content-block media
+   * normalisation (finding F3). The calendar shows the Journal's own card unchanged, so it has
+   * to be handed the entry the Journal's own feed would hand it, field for field.
+   *
+   * **Both ends are inclusive**, and the comparison is on the day the stored date names
+   * (`substr(date, 1, 10)`), so a row holding a full ISO instant lands on the day its key names
+   * in every time zone (FR-011, SC-004). The bounds themselves are read through
+   * `calendarModel.dayKeyOf`, so a caller handing in an instant is answered about the same day
+   * as a caller handing in a key, and a range that names no day at all is answered with
+   * nothing rather than with a query built on undefined.
+   *
+   * **`precisions`** is the list of precisions to keep. No list means every precision, which is
+   * how a whole day is asked for (FR-016: a day shows what is known to be that day). An empty
+   * list means none -- the same as SQL's own `IN ()`, which matches nothing, and which SQLite
+   * will not parse, so it is answered here instead of being sent.
+   *
+   * **`order`** is `'DESC'` for a single day, which keeps the Journal's own newest-first order
+   * (FR-004), and anything else -- a month, a year -- for calendar order, oldest first and
+   * oldest first within a day too (FR-005, FR-006). `'DESC'` reverses the created time as well
+   * as the day, because `calendarModel.filterRange` does, and the two must not disagree.
+   * `local_id` breaks a remaining tie so that two memories stored on the same day at the same
+   * moment keep one order between reads rather than shuffling under the list.
+   */
+  async getEntriesInRange(journalId, fromKey, toKey, precisions = null, order = 'ASC') {
+    // Read as `filterRange` reads them, so an instant or a malformed bound means the same thing
+    // on both paths rather than reaching SQLite as a parameter nobody checked.
+    const from = dayKeyOf(fromKey);
+    const to = dayKeyOf(toKey);
+    if (!from || !to) return [];
+
+    // Asked for no precision at all: there is nothing to look for. Answered rather than sent,
+    // because `date_precision IN ()` is a syntax error in SQLite, not an empty result.
+    if (Array.isArray(precisions) && precisions.length === 0) return [];
+
+    if (Platform.OS === 'web') {
+      return this._entriesInRangeOnWeb(journalId, from, to, precisions, order);
+    }
+
+    const db = await this.getDb();
+    const direction = this._rangeDirection(order);
+
+    const params = [journalId, from, to];
+    let precisionClause = '';
+    if (Array.isArray(precisions)) {
+      precisionClause = ` AND date_precision IN (${precisions.map(() => '?').join(', ')})`;
+      params.push(...precisions);
+    }
+
+    const rows = await db.getAllAsync(
+      `SELECT * FROM journal_entries
+       WHERE journal_id = ? AND deleted_at IS NULL
+         AND substr(date, 1, 10) BETWEEN ? AND ?${precisionClause}
+       ORDER BY substr(date, 1, 10) ${direction}, created_at ${direction}, local_id ASC`,
+      params
+    );
+
+    return rows.map(row => this._mapEntryRow(row));
+  }
+
+  /**
+   * Which way round a range is ordered, as one of the two words SQL understands.
+   *
+   * The reading of `order` itself is `calendarModel.isDescending` and is asked rather than
+   * repeated: the web path answers the same question through `filterRange`, which asks the
+   * same function, so the rule cannot be changed on one path alone. All this adds is the
+   * spelling -- and the narrowing, which matters, because the direction is interpolated into
+   * the SQL rather than bound (as `getEntriesByJournalId` does with its own order) and so may
+   * never be a caller's string.
+   */
+  _rangeDirection(order) {
+    return isDescending(order) ? 'DESC' : 'ASC';
+  }
+
+  /**
+   * A journal's rows, whole, for the web build to work over in JS.
+   *
+   * The select is cut down to the one predicate the web shim understands (`journal_id = ?`,
+   * and that parameter must be the first one it is given). `deleted_at IS NULL` is still here
+   * because it is right on any real engine and because this file's every entry query has it --
+   * but the shim ignores it, so the rows are filtered again in JS. Without that second filter
+   * a deleted memory returns to a month list on web and is counted on a calendar day.
+   */
+  async _allJournalRowsOnWeb(journalId) {
+    const db = await this.getDb();
+
+    const rows = await db.getAllAsync(
+      'SELECT * FROM journal_entries WHERE journal_id = ? AND deleted_at IS NULL',
+      [journalId]
+    );
+
+    return rows.filter(row => row && row.deleted_at == null);
+  }
+
+  /**
+   * `getCalendarIndexRows` for the web build: the same grouping and the same order, counted in
+   * JS because the shim ignores a `GROUP BY` entirely.
+   *
+   * The day comes from `calendarModel.dayKeyOf` of the stored date -- the same leading
+   * `YYYY-MM-DD` the SQL takes with `substr`. The date *string* is passed rather than the whole
+   * row on purpose: handed an entry, `dayKeyOf` falls back to the day it was created, and SQL
+   * has no such fallback, so taking it here would make the two paths disagree about a row whose
+   * date is empty. A row that names no day is left out, exactly as the SQL's own `''` group is
+   * left out by `buildIndex`.
+   */
+  async _calendarIndexRowsOnWeb(journalId) {
+    const rows = await this._allJournalRowsOnWeb(journalId);
+
+    const counts = new Map();
+    rows.forEach((row) => {
+      const day = dayKeyOf(row.date);
+      if (!day) return;
+
+      // Not defaulted, as in the SQL: `buildIndex` is the one place that reads a missing
+      // precision as a day.
+      const precision = row.date_precision;
+      const key = `${day} ${precision}`;
+
+      const seen = counts.get(key);
+      if (seen) {
+        seen.count += 1;
+        return;
+      }
+      counts.set(key, { day, date_precision: precision, count: 1 });
+    });
+
+    return [...counts.values()].sort((a, b) => {
+      if (a.day !== b.day) return a.day < b.day ? -1 : 1;
+      if (a.date_precision === b.date_precision) return 0;
+      return a.date_precision < b.date_precision ? -1 : 1;
+    });
+  }
+
+  /**
+   * `getEntriesInRange` for the web build: the same range, the same precisions and the same
+   * order, done by `calendarModel.filterRange` because the shim honours none of them.
+   *
+   * The rows are sorted by `local_id` before they are mapped, because `filterRange` settles a
+   * memory that cannot otherwise be told apart by the order it was handed in -- and the order
+   * the shim hands them in is its own. The SQL path breaks the same tie with `local_id ASC`,
+   * so the two paths agree even there.
+   *
+   * The whole journal is mapped and then filtered, rather than filtered and then mapped, which
+   * is more work than the SQL path does for the same answer. That is the deliberate price of
+   * one answer: deciding what is in range here as well as in `filterRange` would be two
+   * filters to keep in step, and the one that drifted would be the one only the web build runs.
+   */
+  async _entriesInRangeOnWeb(journalId, fromKey, toKey, precisions, order) {
+    const rows = await this._allJournalRowsOnWeb(journalId);
+
+    const entries = [...rows]
+      .sort((a, b) => {
+        if (a.local_id === b.local_id) return 0;
+        return a.local_id < b.local_id ? -1 : 1;
+      })
+      .map(row => this._mapEntryRow(row));
+
+    return filterRange(entries, fromKey, toKey, precisions, order);
   }
 
   /**
