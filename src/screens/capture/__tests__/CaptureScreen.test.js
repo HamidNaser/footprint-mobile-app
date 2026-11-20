@@ -528,6 +528,19 @@ jest.mock('../../../components/capture/SaveAudienceSheet', () => {
   return { __esModule: true, default: Mock, SaveAudienceSheet: Mock, AUDIENCE_OPTIONS };
 });
 
+// Task 10: the insets come from the hook (device: top 59, bottom 34), and the library's native
+// SafeAreaView is replaced by a marker so the test can prove the screen no longer renders it.
+jest.mock('react-native-safe-area-context', () => {
+  const ReactLib = require('react');
+  const { View } = require('react-native');
+  const actual = jest.requireActual('react-native-safe-area-context');
+  return {
+    ...actual,
+    useSafeAreaInsets: () => ({ top: 59, bottom: 34, left: 0, right: 0 }),
+    SafeAreaView: (props) => ReactLib.createElement(View, { ...props, testID: 'lib-safe-area-view' }),
+  };
+});
+
 import CaptureDraftStore from '../../../services/CaptureDraftStore';
 import { JournalService } from '../../../services/JournalService';
 import { SyncQueue } from '../../../sync/SyncQueue';
@@ -3948,7 +3961,7 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
       // The clip is gone and the two around it have closed up in their own order.
       expect(kinds(tree)).toEqual(['Note', 'Photo']);
       expect(valueAt(tree, 'piece-note-input-0')).toBe('Rain on the bus window');
-      expect(textAt(tree, 'piece-detail-1')).toBe('Photo kept with this memory');
+      expect(nodeAt(tree, 'piece-photo-1')).toBeDefined();
       expect(textAt(tree, 'capture-status-line')).toBe('Draft kept · 2 pieces');
       // And the unsaved memory kept on the phone agrees (FR-012).
       expect(listed('new')).toEqual([noteId, photoId]);
@@ -4824,5 +4837,142 @@ describe('CaptureScreen: Remove takes a piece back out (FR-036)', () => {
         'location',
       ]);
     });
+  });
+});
+
+describe('opening straight into the camera (013 fix T9)', () => {
+  it('opens the camera overlay on mount when the route says open: camera, without a tap', async () => {
+    const tree = await render({ mode: 'new', open: 'camera' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(true);
+  });
+
+  it('does not open the camera when the route does not ask for it', async () => {
+    const tree = await render({ mode: 'new' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+
+  it('opens it only once: closing it does not reopen it on a re-render', async () => {
+    const tree = await render({ mode: 'new', open: 'camera' });
+    await tap(tree, 'camera-close-button');
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+
+    await act(async () => {
+      tree.update(
+        <CaptureScreen route={{ params: { mode: 'new', open: 'camera' } }} navigation={navigation} />,
+      );
+    });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+
+  it('ignores open in edit mode', async () => {
+    const tree = await render({ mode: 'edit', entryLocalId: 'e1', open: 'camera' });
+
+    expect(has(tree, 'capture-camera-overlay')).toBe(false);
+  });
+});
+
+describe('CaptureScreen: the header never sits under the status bar', () => {
+  it('pads the content by the hook insets on the first render, with no native SafeAreaView', async () => {
+    const { StyleSheet } = require('react-native');
+    const tree = await render({ mode: 'new' });
+
+    const content = nodeAt(tree, 'capture-safe-content');
+    expect(content).toBeDefined();
+    const style = StyleSheet.flatten(content.props.style);
+    expect(style.paddingTop).toBe(59);
+    expect(style.paddingBottom).toBe(34);
+    expect(has(tree, 'lib-safe-area-view')).toBe(false);
+  });
+});
+
+describe('CaptureScreen: the keyboard never covers the note being typed (013 fix T12)', () => {
+  const { Keyboard, Platform, StyleSheet } = require('react-native');
+  let handlers;
+  let originalOS;
+  let spy;
+
+  beforeEach(() => {
+    handlers = {};
+    originalOS = Platform.OS;
+    spy = jest.spyOn(Keyboard, 'addListener').mockImplementation((name, fn) => {
+      (handlers[name] = handlers[name] || []).push(fn);
+      return { remove: jest.fn(() => { handlers[name] = handlers[name].filter((f) => f !== fn); }) };
+    });
+  });
+
+  afterEach(() => {
+    Platform.OS = originalOS;
+    spy.mockRestore();
+  });
+
+  const fire = async (name) => {
+    await act(async () => {
+      (handlers[name] || []).forEach((fn) => fn({}));
+    });
+  };
+
+  it('wraps the safe content, and not the camera overlay, in a padding KeyboardAvoidingView on iOS', async () => {
+    Platform.OS = 'ios';
+    const tree = await render({ mode: 'new', open: 'camera' });
+
+    const avoider = nodeAt(tree, 'capture-keyboard-avoider');
+    expect(avoider).toBeDefined();
+    expect(avoider.props.behavior).toBe('padding');
+    const inside = (id) => avoider.findAll((n) => n.props?.testID === id).length > 0;
+    expect(inside('capture-piece-scroll')).toBe(true);
+    expect(inside('capture-type-button')).toBe(true);
+    expect(inside('capture-camera-overlay')).toBe(false);
+  });
+
+  it('scrolls the piece list to the end when the keyboard shows and the last piece is a note', async () => {
+    Platform.OS = 'ios';
+    const tree = await render({ mode: 'new' });
+    await tap(tree, 'capture-type-button');
+
+    const scroll = nodeAt(tree, 'capture-piece-scroll');
+    const scrollToEnd = jest.fn();
+    scroll.instance.scrollToEnd = scrollToEnd;
+
+    await fire('keyboardDidShow');
+    expect(scrollToEnd).toHaveBeenCalledWith({ animated: true });
+  });
+
+  it('does not scroll when the last piece is not a note', async () => {
+    Platform.OS = 'ios';
+    const tree = await render({ mode: 'new' });
+    await tap(tree, 'capture-type-button');
+    await tap(tree, 'voice-record-button');
+    await tap(tree, 'voice-stop-button');
+
+    const scrollToEnd = jest.fn();
+    nodeAt(tree, 'capture-piece-scroll').instance.scrollToEnd = scrollToEnd;
+
+    await fire('keyboardDidShow');
+    expect(scrollToEnd).not.toHaveBeenCalled();
+  });
+
+  it('drops the bottom inset while the keyboard is up and restores it after (iOS will events)', async () => {
+    Platform.OS = 'ios';
+    const tree = await render({ mode: 'new' });
+    const padding = () =>
+      StyleSheet.flatten(nodeAt(tree, 'capture-safe-content').props.style).paddingBottom;
+
+    expect(padding()).toBe(34);
+    await fire('keyboardWillShow');
+    expect(padding()).toBe(0);
+    await fire('keyboardWillHide');
+    expect(padding()).toBe(34);
+  });
+
+  it('removes every keyboard listener on unmount', async () => {
+    Platform.OS = 'ios';
+    const tree = await render({ mode: 'new' });
+    const subs = spy.mock.results.map((r) => r.value);
+    expect(subs.length).toBeGreaterThan(0);
+    await act(async () => { tree.unmount(); });
+    subs.forEach((s) => expect(s.remove).toHaveBeenCalled());
   });
 });

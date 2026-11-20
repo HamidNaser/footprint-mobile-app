@@ -308,7 +308,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#E5E5E5',
   },
   map: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   mapOverlay: {
     position: 'absolute',
@@ -373,7 +373,7 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   playOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.3)',
     justifyContent: 'center',
     alignItems: 'center',

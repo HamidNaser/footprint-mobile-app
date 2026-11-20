@@ -81,6 +81,22 @@ describe.each([
   });
 });
 
+describe.each([
+  ['native', NativeThumb],
+  ['web', WebThumb],
+])('VideoThumbnail (%s): a duration of zero', (_name, Thumb) => {
+  it.each([0, NaN])('renders without a badge or stray text for duration %s', (duration) => {
+    const tree = render(Thumb, { videoUri: 'file:///x.mov', thumbnailUri: 'file:///x.jpg', duration, onPress: jest.fn() });
+    const strings = [];
+    const walk = (n) => {
+      if (typeof n === 'string') strings.push(n);
+      else if (n && n.children) n.children.forEach(walk);
+    };
+    walk(tree.toJSON());
+    expect(strings.filter((t) => /\d|NaN/.test(t))).toEqual([]);
+  });
+});
+
 describe('VideoThumbnail (native): no poster yet', () => {
   it('never shows the original as an image; it makes a frame from the file on the device', async () => {
     const tree = render(NativeThumb, { media: { id: 'v2', kind: 'video', localPath: 'file:///v2.mov' }, onPress: jest.fn() });

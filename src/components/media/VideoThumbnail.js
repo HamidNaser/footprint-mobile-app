@@ -258,7 +258,7 @@ const LegacyVideoThumbnail = ({
       )}
 
       {/* Duration badge */}
-      {showDuration && duration && !isLoading && (
+      {showDuration && !!duration && !isLoading && (
         <View style={styles.durationBadge}>
           <Text style={styles.durationText}>{formatDuration(duration)}</Text>
         </View>
@@ -380,7 +380,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   playIconContainer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
   },

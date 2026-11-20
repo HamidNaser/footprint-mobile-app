@@ -1185,7 +1185,7 @@ const styles = StyleSheet.create({
   },
   // Laid over the piece, so lighting one reflows nothing under the reader's thumb.
   pieceHighlight: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     borderRadius: 12,
     borderWidth: 2,
     borderColor: HIGHLIGHT_COLOUR,
@@ -1243,7 +1243,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F0F0',
   },
   moreOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.5)',
     borderRadius: 12,
     justifyContent: 'center',

@@ -86,6 +86,18 @@ const TICK_INTERVAL_MS = 500;
 export const PHOTO_SHUTTER_COLOR = '#FFFFFF';
 export const VIDEO_SHUTTER_COLOR = '#E5484D';
 
+/** Backstop for a `recordAsync` that still says the camera is not ready (013-capture-fixes). */
+const RECORD_MAX_ATTEMPTS = 5;
+const RECORD_RETRY_DELAY_MS = 200;
+/**
+ * If the preview never reports ready again after the picture -> video flip (not guaranteed on
+ * every iOS version), start anyway rather than leave the person on a recording that never begins.
+ */
+const CAMERA_READY_FALLBACK_MS = 1500;
+
+const isNotReadyError = (error) =>
+  error?.code === 'ERR_CAMERA_NOT_READY' || /not ready/i.test(String(error?.message ?? ''));
+
 /** m:ss, as the prototype's camera shows a clip's length. */
 export const formatSeconds = (seconds) => {
   const total = Math.floor(Math.max(0, seconds));
@@ -161,6 +173,9 @@ export default function DualShutterCamera({
   // `photoInFlightRef` as render can see it, so the Video shutter can be disabled while a
   // still capture is in flight -- the mirror of Photo being disabled while recording.
   const [photoInFlight, setPhotoInFlight] = useState(false);
+  // The preview's own "ready" report. `recordAsync` is not called until it arrives after the
+  // picture -> video flip: iOS rejects a start on an output that is not configured yet.
+  const [cameraReady, setCameraReady] = useState(false);
 
   const cameraRef = useRef(null);
   /** Set the render before `recordAsync` is called, so the preview is in video output first. */
@@ -342,16 +357,31 @@ export default function DualShutterCamera({
     }
 
     capturedAtRef.current = new Date().toISOString();
-    startedAtRef.current = Date.now();
+    // Stamped just before `recordAsync` is called, once the camera is ready (see the effect).
+    startedAtRef.current = null;
     stoppedAtRef.current = null;
     setRecordedMs(0);
+    // The flip to video output reconfigures the camera; wait for it to report ready again.
+    setCameraReady(false);
     // Flips the preview to video output and disables Photo in the same render.
     setIsRecording(true);
   }, [isRecording, micPermission, requestMicPermission]);
 
   /** FR-008: ... and stops on the next. */
   const endRecording = useCallback(() => {
-    if (!isRecording || !cameraRef.current) return;
+    if (!isRecording) return;
+    if (pendingRecordRef.current) {
+      // Stopped before the camera was ready: `recordAsync` has not been called, so there is
+      // nothing to stop and nothing to keep. Cancel cleanly -- no piece, no failure notice.
+      pendingRecordRef.current = false;
+      startedAtRef.current = null;
+      stoppedAtRef.current = null;
+      capturedAtRef.current = null;
+      setRecordedMs(0);
+      setIsRecording(false);
+      return;
+    }
+    if (!cameraRef.current) return;
     // Read here, not after the call: this is the instant the recording was ended.
     const stoppedAt = Date.now();
     try {
@@ -379,16 +409,51 @@ export default function DualShutterCamera({
    * produces the piece and it cannot produce two.
    */
   useEffect(() => {
-    if (!isRecording || !pendingRecordRef.current) return;
+    if (!isRecording || !cameraReady || !pendingRecordRef.current) return;
     pendingRecordRef.current = false;
 
     (async () => {
       let video;
       let recordError = null;
-      try {
-        video = await cameraRef.current?.recordAsync({ maxDuration: maxVideoSeconds });
-      } catch (error) {
-        recordError = error;
+      let cancelled = false;
+      // Backstop: a not-ready rejection is retried (200 ms apart, 5 attempts in all) rather
+      // than losing the video; any other error, or the last attempt, takes the failure path.
+      for (let attempt = 1; attempt <= RECORD_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          // The clip's clock starts here, not at the tap: the ready-wait and any retries
+          // are not part of the video. (`capturedAt` stays at the tap, research R8.)
+          startedAtRef.current = Date.now();
+          video = await cameraRef.current?.recordAsync({ maxDuration: maxVideoSeconds });
+          recordError = null;
+          break;
+        } catch (error) {
+          recordError = error;
+          if (!isNotReadyError(error)) break;
+          if (stoppedAtRef.current != null) {
+            // The person ended it while it was still failing to start: nothing to keep,
+            // and no notice for a recording they ended -- even on the last attempt.
+            cancelled = true;
+            recordError = null;
+            break;
+          }
+          if (attempt === RECORD_MAX_ATTEMPTS) break;
+          await new Promise((resolve) => setTimeout(resolve, RECORD_RETRY_DELAY_MS));
+          if (!mountedRef.current) return;
+          if (stoppedAtRef.current != null) {
+            cancelled = true;
+            recordError = null;
+            break;
+          }
+        }
+      }
+
+      if (cancelled) {
+        startedAtRef.current = null;
+        stoppedAtRef.current = null;
+        capturedAtRef.current = null;
+        setIsRecording(false);
+        setRecordedMs(0);
+        return;
       }
 
       const endedAt = stoppedAtRef.current ?? Date.now();
@@ -438,7 +503,14 @@ export default function DualShutterCamera({
         );
       }
     })();
-  }, [isRecording, maxVideoSeconds]);
+  }, [isRecording, cameraReady, maxVideoSeconds]);
+
+  /** See CAMERA_READY_FALLBACK_MS: a preview that never reports ready must not hang a start. */
+  useEffect(() => {
+    if (!isRecording || cameraReady || !pendingRecordRef.current) return undefined;
+    const handle = setTimeout(() => setCameraReady(true), CAMERA_READY_FALLBACK_MS);
+    return () => clearTimeout(handle);
+  }, [isRecording, cameraReady]);
 
   /** The time on screen while recording. The cap itself is the camera's, not this timer's. */
   useEffect(() => {
@@ -451,11 +523,52 @@ export default function DualShutterCamera({
     return () => clearInterval(handle);
   }, [isRecording]);
 
-  // Still being asked. Nothing is shown that could look like a camera that works.
-  if (!permission) {
+  // Ask on first open (owner's decision, 013-capture-fixes): iOS's own prompt, once. A refusal
+  // for good (`canAskAgain: false`) is never re-asked -- that is the Open Settings screen.
+  const askedRef = useRef(false);
+  // State, so the render re-runs once the single ask has settled. If the status is still
+  // undetermined after that, the denied screen (Close, Open Settings, Allow) takes over
+  // rather than leaving the person on "Checking" with no way out.
+  const [askSettled, setAskSettled] = useState(false);
+  useEffect(() => {
+    if (askedRef.current) return;
+    if (
+      permission &&
+      !permission.granted &&
+      permission.canAskAgain &&
+      permission.status === 'undetermined'
+    ) {
+      askedRef.current = true;
+      (async () => {
+        try {
+          await requestPermission();
+        } catch (error) {
+          // A failed ask is treated as an unanswered one: the denied screen takes over.
+        }
+        if (mountedRef.current) setAskSettled(true);
+      })();
+    }
+  }, [permission, requestPermission]);
+
+  // Still being asked (or about to be). Nothing is shown that could look like a camera that
+  // works, and the "can't use the camera" message does not flash before the prompt.
+  if (
+    !permission ||
+    (permission.status === 'undetermined' && permission.canAskAgain && !askSettled)
+  ) {
     return (
       <View testID="camera-permission-checking" style={[styles.container, styles.centred, style]}>
         <Text style={styles.checkingText}>Checking camera access…</Text>
+        {/* The overlay covers a fullScreenModal that cannot be swiped away: never a trap. */}
+        <TouchableOpacity
+          testID="camera-close-button"
+          accessibilityRole="button"
+          accessibilityLabel="Close the camera"
+          style={styles.secondaryButton}
+          onPress={onClose}
+        >
+          <Text style={styles.secondaryButtonText}>Close</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -512,6 +625,7 @@ export default function DualShutterCamera({
         // picture-mode camera, and this is set the render before recording starts.
         mode={isRecording ? 'video' : 'picture'}
         videoQuality={videoQuality}
+        onCameraReady={() => setCameraReady(true)}
       />
 
       {/* CameraView renders no children in expo-camera 16+, so the controls sit over it. */}
@@ -577,7 +691,7 @@ export default function DualShutterCamera({
 
                 ⚠ It says **close the camera** rather than "stop the voice note", because this
                 overlay fills the screen (`CaptureScreen`'s `cameraOverlay`: an opaque
-                `absoluteFillObject` at `zIndex: 10`), so the recording bar is mounted but
+                `absoluteFill` at `zIndex: 10`), so the recording bar is mounted but
                 covered and its Stop control cannot be reached from here. The first wording sent
                 somebody to a control they could not get at (fix round 2, item 2). The sequence
                 it names is the one that works: Done, then Stop, then back in for the video. */}
@@ -697,11 +811,30 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 32,
   },
+  checkingText: { color: '#FFFFFF', fontSize: 16 },
+  deniedText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: 'center',
+    marginTop: 16,
+    marginBottom: 24,
+  },
+  primaryButton: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    marginBottom: 12,
+  },
+  primaryButtonText: { color: '#000000', fontSize: 16, fontWeight: '600' },
+  secondaryButton: { paddingVertical: 10, paddingHorizontal: 24 },
+  secondaryButtonText: { color: '#FFFFFF', fontSize: 16 },
   preview: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'space-between',
   },
   topRow: {

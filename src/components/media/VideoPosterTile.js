@@ -144,7 +144,7 @@ export function VideoPosterTile({
           </View>
         </View>
       ) : null}
-      {showDuration && duration && shownUri ? (
+      {showDuration && !!duration && shownUri ? (
         <View style={styles.durationBadge}>
           <Text style={styles.durationText}>{formatDuration(duration)}</Text>
         </View>
@@ -170,7 +170,7 @@ const styles = StyleSheet.create({
   thumbnail: { borderRadius: 8 },
   plate: { backgroundColor: '#E0E0E0', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   plateText: { color: '#666', fontSize: 12, textAlign: 'center', paddingHorizontal: 8 },
-  playIconContainer: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center' },
+  playIconContainer: { ...StyleSheet.absoluteFill, justifyContent: 'center', alignItems: 'center' },
   playIcon: {
     width: 40,
     height: 40,

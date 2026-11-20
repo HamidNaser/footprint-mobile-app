@@ -1731,10 +1731,11 @@ export default function JournalScreen({ navigation }) {
    * screen as a route parameter. `QuickCaptureBar` wraps all three of its controls so that does
    * not happen today; this is what stops it mattering if one is ever unwrapped.
    */
-  const openCapture = useCallback((visibility) => {
+  const openCapture = useCallback((visibility, open) => {
     navigation.navigate('Capture', {
       mode: 'new',
       ...(typeof visibility === 'string' ? { audience: visibility } : null),
+      ...(open === 'camera' ? { open: 'camera' } : null),
     });
   }, [navigation]);
 
@@ -2607,7 +2608,7 @@ export default function JournalScreen({ navigation }) {
         )}
         <QuickCaptureBar
           onSend={handleSendMessage}
-          onCameraPress={openCapture}
+          onCameraPress={(visibility) => openCapture(visibility, 'camera')}
           onMicPress={openCapture}
           placeholder="Message..."
           primaryColor={PRIMARY_COLOR}

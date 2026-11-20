@@ -332,7 +332,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   heroOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.35)',
   },
   heroTop: {
