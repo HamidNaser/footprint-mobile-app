@@ -66,6 +66,16 @@ jest.mock('../../services/SocialService', () => ({
   getJournalBook: jest.fn(async () => ({ days: [], household: [], hasMore: false })),
 }));
 
+/**
+ * `PersonJournalScreen` reads the server's calendar look-ups now, not `getUserEntries` (019
+ * T009). Its day is `getDay`; `getCalendar` decides which day the book opens on.
+ */
+jest.mock('../../services/JournalCalendarService', () => ({
+  getCalendar: jest.fn(async () => ({ authorIds: [], days: [] })),
+  getPeriod: jest.fn(async () => []),
+  getDay: jest.fn(async () => []),
+}));
+
 jest.mock('../../components/journal', () => {
   const ReactLib = require('react');
   const { View } = require('react-native');
@@ -78,14 +88,24 @@ jest.mock('../../components/journal', () => {
     FullScreenMediaViewer: Nothing,
     CalendarPickerModal: Nothing,
     QuickCaptureBar: Nothing,
+    // 019: the two the rewired screens draw above their lists. Neither has anything to do with
+    // whether a card mounts its map, which is all this file is about.
+    JournalDateBar: Nothing,
+    FacesRow: Nothing,
   };
 });
+
+// Neither is exported from the barrel above, so neither is covered by its mock -- and both reach
+// real components (a `Modal`, a measured heading) that this file has no reason to mount.
+jest.mock('../../components/journal/CalendarSheet');
+jest.mock('../../components/journal/CalendarListHeading');
 
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { FlatList, SectionList } from 'react-native';
 
-import { getUserEntries, getJournalBook } from '../../services/SocialService';
+import { getJournalBook } from '../../services/SocialService';
+import { getCalendar, getDay } from '../../services/JournalCalendarService';
 import PersonJournalScreen from '../PersonJournalScreen';
 import FamilySummaryScreen from '../FamilySummaryScreen';
 
@@ -130,14 +150,20 @@ const mount = async (element) => {
 
 describe('PersonJournalScreen gates each card on viewability', () => {
   const render = async () => {
-    getUserEntries.mockResolvedValue([entry('a'), entry('b'), entry('c')]);
+    // The calendar index says the book's newest day with memories is `DAY`, and that day holds
+    // the three memories below -- which is how the screen opens with all three on screen.
+    getCalendar.mockResolvedValue({
+      authorIds: ['them'],
+      days: [{ date: DAY, precision: 'day', count: 3 }],
+    });
+    getDay.mockResolvedValue([entry('a'), entry('b'), entry('c')]);
     const tree = await mount(
       <PersonJournalScreen
         route={{ params: { person: { id: 'them', name: 'Ada' } } }}
         navigation={{ goBack: jest.fn(), navigate: jest.fn() }}
       />,
     );
-    // The screen opens on the latest day that holds entries, so all three are on screen.
+    // The screen opens on the book's newest day with memories, so all three are on screen.
     expect(Object.keys(visibilityByCard(tree)).sort()).toEqual(['a', 'b', 'c']);
     return tree;
   };
