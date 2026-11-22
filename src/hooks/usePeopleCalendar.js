@@ -489,6 +489,13 @@ export function usePeopleCalendar({
     return { kind: 'year', year: period.year };
   }, [period]);
 
+  /**
+   * What the date bar calls the period, worked out once per period rather than on every render,
+   * for the same reason as the two ends below: `formatPeriodDate` and `daysInMonth` are not free
+   * and the answer cannot change while somebody scrolls.
+   */
+  const label = useMemo(() => (picked ? periodWords(picked) : null), [picked]);
+
   const allEntries = pageNow.status === 'ready' ? (pageNow.entries || EMPTY_ENTRIES) : null;
 
   /**
@@ -582,8 +589,14 @@ export function usePeopleCalendar({
     return neighbourYear(steppingIndex, period, delta);
   }, [period, steppingIndex, dayKeys]);
 
-  const earlier = neighbourOf(-1);
-  const later = neighbourOf(1);
+  /**
+   * Both ends, worked out once per period rather than on every render (016's own fix, fix round
+   * 1 finding B): a screen re-renders on every change to its viewable-key set, which is to say
+   * repeatedly while somebody scrolls, and each of these sorts the index's own keys. The answer
+   * can only change when the period or the index does.
+   */
+  const earlier = useMemo(() => neighbourOf(-1), [neighbourOf]);
+  const later = useMemo(() => neighbourOf(1), [neighbourOf]);
 
   /**
    * Move to the period on screen, opening a freshly picked year on its own first heading again
@@ -735,7 +748,7 @@ export function usePeopleCalendar({
     picked,
     selectedDay: period?.day ?? null,
     periodKind: period?.kind ?? 'day',
-    label: picked ? periodWords(picked) : null,
+    label,
     /** The date bar's count: the shown memories, and null until the page has answered. */
     count: pageNow.status === 'ready' ? shown.length : null,
 
