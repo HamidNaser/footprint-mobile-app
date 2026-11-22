@@ -859,6 +859,22 @@ export function usePeopleCalendar({
     choiceEmpty,
     openFailed,
     emptyMessage,
+    /**
+     * The chosen people's names, joined the way this hook and `FacesRow` both join them --
+     * "Mother", "Mother and Akram", "Mother, Akram and Father" -- and `''` with nobody chosen.
+     *
+     * It exists so a screen can name the choice **somewhere this hook does not word for it**:
+     * 019's review fix round 1 needed the calendar sheet to say whose dots it is drawing, and
+     * the alternative was a fourth copy of `joinNames` in the screens. The hook answers the
+     * names; the screen writes the sentence.
+     *
+     * ⚠ **Empty means "nobody is chosen"**, which is the only way it is empty in practice: the
+     * ids are already filtered to people in the book, and both screens build a `BookPerson`
+     * from a source that carries a name. A chosen person with no name at all would drop out of
+     * the join -- exactly as `emptyMessage` goes silent for them -- so a screen that words a
+     * fallback from this is wording it for the same case that already has one.
+     */
+    chosenNamesText: joinNames(chosenNames),
     refresh,
   };
 }

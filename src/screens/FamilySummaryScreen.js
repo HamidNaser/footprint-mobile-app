@@ -378,6 +378,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
     bookEmpty,
     openFailed,
     emptyMessage,
+    chosenNamesText,
     refresh,
   } = usePeopleCalendar({
     people,
@@ -617,6 +618,25 @@ export default function FamilySummaryScreen({ navigation, route }) {
     : picked?.kind === 'year' ? 'in this year' : 'on this day';
 
   /**
+   * The one line the open calendar carries about the choice (review fix round 1; prototype).
+   *
+   * The sheet draws the marks for the chosen people and nobody else, and until now it said so
+   * nowhere: two of four faces chosen opened on to a sparse grid that reads as "the family
+   * recorded almost nothing" rather than "you narrowed this to two people" -- a claim about
+   * somebody's memories that is not true, and the same failure FR-010 and FR-011 rule out on the
+   * page behind it.
+   *
+   * ⚠ **This screen owns the words, not the sheet.** 016's `CalendarSheet` takes one finished
+   * string and composes nothing; the names come joined from the hook, which is where the faces
+   * row's own caption and the page's named message are joined too, so all three name the same
+   * people in the same book order rather than in three slightly different ways.
+   *
+   * The family book is always a group book, so there is always a line to draw -- which is why
+   * this is unconditional here and `isGroup` on `PersonJournalScreen`.
+   */
+  const dotsNote = `Dots for: ${chosenNamesText || 'everyone in this book'}`;
+
+  /**
    * What stands in place of the list, in the order the fail-closed rule requires.
    *
    * ⚠ **A failed household is read before `bookEmpty`, and `bookEmpty` and `openFailed` before
@@ -783,6 +803,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
         picked={picked || { kind: 'day', date: selectedDay }}
         index={index}
         today={todayKey()}
+        note={dotsNote}
         onPick={handleCalendarPick}
         onClose={closeCalendar}
       />

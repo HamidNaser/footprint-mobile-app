@@ -1699,6 +1699,47 @@ describe('User Story 4: choosing whose memories the family book shows', () => {
     expect(saysSomething(tree, 'Nothing from Karim and Huda')).toBe(false);
   });
 
+  /**
+   * Review fix round 1: **the open calendar says whose dots it is drawing.**
+   *
+   * With two of three chosen, the sheet opens on to a grid narrowed to those two and, until
+   * now, said nothing about it: a sparse November reads as "the family recorded almost
+   * nothing" rather than "you filtered to two people" -- a positive claim about somebody's
+   * memories that is not true, which is the same failure FR-010 and FR-011 rule out on the
+   * page behind it. The approved prototype's third phone carries the line, directly under the
+   * Date / Month / Year switch.
+   *
+   * The sheet is handed one finished string and words nothing itself (`CalendarSheet.test.js`
+   * pins that side of it), so these cases assert the string the screen composed **and** that a
+   * reader really sees it.
+   */
+  describe('the open calendar names whose dots it shows', () => {
+    it('says everyone in this book while nobody is chosen', async () => {
+      const tree = await mount();
+
+      await tapDate(tree);
+
+      expect(sheetIsOpen(tree)).toBe(true);
+      expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
+      expect(saysSomething(tree, 'Dots for: everyone in this book')).toBe(true);
+    });
+
+    it('names the chosen people, in household order whichever order they were tapped', async () => {
+      const tree = await mount();
+      await tapFace(tree, 'u-karim');
+      await tapFace(tree, 'u-huda');
+
+      await tapDate(tree);
+
+      expect(sheet(tree).props.note).toBe('Dots for: Huda and Karim');
+      expect(saysSomething(tree, 'Dots for: Huda and Karim')).toBe(true);
+      expect(saysSomething(tree, 'Dots for: Karim and Huda')).toBe(false);
+      // And it goes back to everyone when the choice does.
+      await showEveryone(tree);
+      expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
+    });
+  });
+
   it('shows everyone again from the row’s own Show everyone (FR-016)', async () => {
     const tree = await mount();
     await pickMonth(tree, '2026-03');

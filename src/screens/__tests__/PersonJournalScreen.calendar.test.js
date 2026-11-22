@@ -2420,4 +2420,57 @@ describe('User Story 4: choosing whose memories a group book shows', () => {
     expect(tree.root.findAllByType(FacesRow)).toHaveLength(0);
     expect(faceIds(tree)).toEqual([]);
   });
+
+  /**
+   * Review fix round 1: **the open calendar says whose dots it is drawing**, on both group
+   * books and on neither single-person one.
+   *
+   * With two of three chosen, the sheet opens on to a grid narrowed to those two and said
+   * nothing about it: a sparse month reads as "these people recorded almost nothing" rather
+   * than "you filtered to two people" -- a positive claim about somebody's memories that is
+   * not true, and the same failure FR-010 and FR-011 rule out on the page behind it. The
+   * approved prototype's third phone carries the line, directly under the Date / Month / Year
+   * switch.
+   *
+   * ⚠ **A single person's journal has no faces row, so it has nothing to narrow and nothing to
+   * say.** It passes no note at all -- not an empty one -- which is the same contract the
+   * Journal tab relies on (`CalendarSheet.test.js` pins the sheet's half of it).
+   */
+  describe('the open calendar names whose dots it shows', () => {
+    it('says everyone in this book while nobody is chosen (household)', async () => {
+      const tree = await mount(HOUSEHOLD_ROUTE);
+
+      await tapDate(tree);
+
+      expect(sheetIsOpen(tree)).toBe(true);
+      expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
+      expect(saysSomething(tree, 'Dots for: everyone in this book')).toBe(true);
+    });
+
+    it('names the chosen people, in book order whichever order they were tapped', async () => {
+      const tree = await mount(FRIEND_GROUP_ROUTE);
+      await tapFace(tree, 'u-karim');
+      await tapFace(tree, 'u-huda');
+
+      await tapDate(tree);
+
+      expect(sheet(tree).props.note).toBe('Dots for: Huda and Karim');
+      expect(saysSomething(tree, 'Dots for: Huda and Karim')).toBe(true);
+      expect(saysSomething(tree, 'Dots for: Karim and Huda')).toBe(false);
+
+      await showEveryone(tree);
+      expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
+    });
+
+    it('says nothing of the kind on one person’s journal, which has no faces row', async () => {
+      serve(BROTHER);
+      const tree = await mount(FAMILY_ROUTE);
+
+      await tapDate(tree);
+
+      expect(sheetIsOpen(tree)).toBe(true);
+      expect(sheet(tree).props.note).toBeUndefined();
+      expect(saysSomething(tree, 'Dots for')).toBe(false);
+    });
+  });
 });

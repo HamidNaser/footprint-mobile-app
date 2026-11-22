@@ -418,6 +418,7 @@ export default function PersonJournalScreen({ route, navigation }) {
     bookEmpty,
     openFailed,
     emptyMessage,
+    chosenNamesText,
     refresh,
   } = usePeopleCalendar({
     people: bookPeople,
@@ -682,6 +683,29 @@ export default function PersonJournalScreen({ route, navigation }) {
     ? 'Nobody here has shared any memories with you yet'
     : `${displayName} hasn't shared any memories with you yet`;
 
+  /**
+   * The one line the open calendar carries about the choice, on a group book (review fix round
+   * 1; prototype).
+   *
+   * The sheet draws the marks for the chosen people and nobody else, and until now it said so
+   * nowhere: two of four faces chosen opened on to a sparse grid that reads as "these people
+   * recorded almost nothing" rather than "you narrowed this to two people" -- a claim about
+   * somebody's memories that is not true, and the same failure FR-010 and FR-011 rule out on the
+   * page behind it.
+   *
+   * ⚠ **This screen owns the words, not the sheet.** 016's `CalendarSheet` takes one finished
+   * string and composes nothing; the names come joined from the hook, which is where the faces
+   * row's own caption and the page's named message are joined too, so all three name the same
+   * people in the same book order rather than in three slightly different ways.
+   *
+   * ⚠ **Null on one person's journal**, which has no faces row, nothing to narrow and so nothing
+   * to say -- and the sheet then renders nothing at all, exactly as it does on the Journal tab.
+   * It is the same condition the faces row itself is drawn under.
+   */
+  const dotsNote = isGroup
+    ? `Dots for: ${chosenNamesText || 'everyone in this book'}`
+    : undefined;
+
   /** How a period with nothing in it is worded, when nobody is chosen to name instead. */
   const periodPhrase = picked?.kind === 'month'
     ? 'in this month'
@@ -865,6 +889,7 @@ export default function PersonJournalScreen({ route, navigation }) {
         picked={picked || { kind: 'day', date: selectedDay }}
         index={index}
         today={todayKey()}
+        note={dotsNote}
         onPick={handleCalendarPick}
         onClose={closeCalendar}
       />
