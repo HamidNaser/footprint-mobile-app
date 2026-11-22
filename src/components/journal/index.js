@@ -65,3 +65,10 @@ export { default as ReactionPickerComponent } from './ReactionPicker';
 
 export { EngagementSection } from './EngagementSection';
 export { default as EngagementSectionComponent } from './EngagementSection';
+
+// 019: the date bar and faces row shared by the Family and Friends calendar screens (T005, T006).
+export { JournalDateBar } from './JournalDateBar';
+export { default as JournalDateBarComponent } from './JournalDateBar';
+
+export { FacesRow } from './FacesRow';
+export { default as FacesRowComponent } from './FacesRow';

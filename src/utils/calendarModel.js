@@ -517,10 +517,35 @@ function place(entry) {
   return key ? { entry, key, precision: precisionOf(entry) } : null;
 }
 
-/** Oldest first: by day, then by created time -- FR-005's order, within a day too. */
-function byDayThenCreated(a, b) {
-  if (a.key !== b.key) return a.key < b.key ? -1 : 1;
-  return compareCreated(a.entry.createdAt, b.entry.createdAt);
+/**
+ * The order of memories **within one heading group** -- a day, or a month's month-only group
+ * -- as `compareInDay` (FR-009, research R6, T003). `undefined` reads as today's `createdAt`
+ * order, so `buildRows`'s default path is byte-for-byte what it was before this argument
+ * existed; the Journal tab passes nothing and is pinned on that by its own tests.
+ *
+ * Reads `a.entry` and `b.entry`, not the `{ entry, key, precision }` wrapper this module sorts
+ * internally: `compareInDay`'s own contract (data-model.md) is written against entry fields --
+ * `userId`, `createdAt` -- and a caller handing the household's own comparator must be able to
+ * read the fields it already knows how to read, not this module's private wrapper.
+ */
+function withinGroup(compareInDay) {
+  if (typeof compareInDay !== 'function') {
+    return (a, b) => compareCreated(a.entry.createdAt, b.entry.createdAt);
+  }
+  return (a, b) => compareInDay(a.entry, b.entry);
+}
+
+/**
+ * Oldest first: by day, then within that day by `withinGroup` -- FR-005's order, within a day
+ * too, widened to take an optional comparator rather than keep a second copy of "by day
+ * first": two copies of that would agree only until one of them drifted.
+ */
+function dayOrder(compareInDay) {
+  const within = withinGroup(compareInDay);
+  return (a, b) => {
+    if (a.key !== b.key) return a.key < b.key ? -1 : 1;
+    return within(a, b);
+  };
 }
 
 const entryRow = (placed) => ({ kind: 'entry', key: placed.entry.localId, entry: placed.entry });
@@ -532,11 +557,16 @@ const entryRow = (placed) => ({ kind: 'entry', key: placed.entry.localId, entry:
  * The same rows in a month list and inside an open month of a year, because FR-005 says the
  * day headings appear in both and a month should not read differently depending on how it
  * was reached.
+ *
+ * `compareInDay` (FR-009, research R6, T003), when given, orders both groups it is asked
+ * about here: a day's own cards, and this month's month-only group under "March 2026" --
+ * **the same group**, in the sense that FR-009 means by it, whether reached from a month list
+ * or from an open month of a year. `undefined` is today's `createdAt` order for both.
  */
-function rowsForMonth(placed, key) {
+function rowsForMonth(placed, key, compareInDay) {
   const rows = [];
 
-  const dated = placed.filter((p) => p.precision === 'day').sort(byDayThenCreated);
+  const dated = placed.filter((p) => p.precision === 'day').sort(dayOrder(compareInDay));
   let heading = null;
   dated.forEach((p) => {
     if (p.key !== heading) {
@@ -546,8 +576,7 @@ function rowsForMonth(placed, key) {
     rows.push(entryRow(p));
   });
 
-  const rough = placed.filter((p) => p.precision === 'month')
-    .sort((a, b) => compareCreated(a.entry.createdAt, b.entry.createdAt));
+  const rough = placed.filter((p) => p.precision === 'month').sort(withinGroup(compareInDay));
   if (rough.length > 0) {
     rows.push({
       kind: 'dayHeading',
@@ -561,7 +590,7 @@ function rowsForMonth(placed, key) {
 }
 
 /** A month list: day headings and cards, and nothing sticky (R8). */
-function monthRows(placed, period) {
+function monthRows(placed, period, compareInDay) {
   const { year, month } = period;
   // The same refusal `neighbourMonth` makes, for the same reason: a year this module cannot
   // compare against its own four-digit keys is refused, not answered. Answering an empty
@@ -579,7 +608,7 @@ function monthRows(placed, period) {
   const mine = placed.filter((p) => p.key.slice(0, 7) === key
     && (p.precision === 'day' || p.precision === 'month'));
 
-  return { rows: rowsForMonth(mine, key), stickyIndices: [] };
+  return { rows: rowsForMonth(mine, key, compareInDay), stickyIndices: [] };
 }
 
 /**
@@ -590,8 +619,14 @@ function monthRows(placed, period) {
  * `stickyIndices` holds the month heading rows **only**, so a day heading never sticks (R8).
  * It also answers "which heading is first": `rows[stickyIndices[0]].key` is the one a year
  * opens with (FR-006).
+ *
+ * `compareInDay` (FR-009, research R6, T003) is handed on to each month's own rows -- a day
+ * inside an open month, and that month's month-only group, read exactly as they would in a
+ * month list. It is **not** asked of the final "YYYY, month not known" rough group below: FR-009
+ * speaks only of memories of the same day or the same month, and a year-only memory is neither,
+ * so that group keeps today's `createdAt` order whether or not a comparator is given.
  */
-function yearRows(placed, period, open) {
+function yearRows(placed, period, open, compareInDay) {
   const { year } = period;
   if (!fourDigitYear(year)) return emptyRows();
 
@@ -634,7 +669,7 @@ function yearRows(placed, period, open) {
       label: monthHeadingLabel(key),
       count: group.length,
       open: open.has(key),
-    }, () => rowsForMonth(group, key));
+    }, () => rowsForMonth(group, key, compareInDay));
   });
 
   if (rough.length > 0) {
@@ -687,16 +722,25 @@ function openSet(openMonths) {
  * `datePrecision`, `createdAt`. Raw database rows do not belong here -- their `date_precision`
  * would read as a missing precision, which is a day, and every rough-dated memory would be
  * listed as one of a day's. `buildIndex` is the one function that takes raw rows.
+ *
+ * **`compareInDay`** (optional, FR-009; research R6, T003): orders memories **within one
+ * heading group** -- a day, and also a month's month-only group ("March 2026") -- in place of
+ * today's `createdAt` order. A year's own "month not known" group is neither of those, so it
+ * always keeps `createdAt` order, comparator or not. Omitted, every group keeps exactly
+ * today's order: the Journal tab (`JournalScreen.js`) passes nothing and must not change. The
+ * family-unit book and a household opened from its top card pass household position, then
+ * `createdAt`, so a day's own order survives into the month and year lists that list it again
+ * (data-model.md's `compareInDay`).
  */
-export function buildRows(entries, picked, openMonths) {
+export function buildRows(entries, picked, openMonths, compareInDay) {
   if (!picked || typeof picked !== 'object') return emptyRows();
 
   const placed = (Array.isArray(entries) ? entries : [])
     .map(place)
     .filter(Boolean);
 
-  if (picked.kind === 'month') return monthRows(placed, picked);
-  if (picked.kind === 'year') return yearRows(placed, picked, openSet(openMonths));
+  if (picked.kind === 'month') return monthRows(placed, picked, compareInDay);
+  if (picked.kind === 'year') return yearRows(placed, picked, openSet(openMonths), compareInDay);
   return emptyRows();
 }
 

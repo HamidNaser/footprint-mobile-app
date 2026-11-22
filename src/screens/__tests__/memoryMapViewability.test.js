@@ -6,19 +6,22 @@
  * defaults to `true` -- deliberately, so a screen that forgets to gate shows the map rather than
  * silently losing it. The cost of that default is that a screen which forgets is invisible:
  * `PersonJournalScreen` and `FamilySummaryScreen` passed nothing, so every card they put on
- * screen mounted a map at once. `FamilySummaryScreen` is the worse of the two, because it
- * paginates with `onEndReached`: the cards, and their maps, accumulate for as long as somebody
- * keeps scrolling.
+ * screen mounted a map at once -- and `FamilySummaryScreen` was the worse of the two, because it
+ * paginated with `onEndReached`, so the cards and their maps accumulated for as long as somebody
+ * kept scrolling.
  *
  * Both screens now do what `JournalScreen` does -- `useViewableKeys`, the list's
  * `onViewableItemsChanged`, and `isVisible` per card. These cases drive the list's viewability
  * callback and read the `isVisible` each card is actually handed, so they fail if either screen
  * stops gating; the card's own rendering of `isVisible` is `JournalEntryCard.map.test.js`'s.
  *
- * `FamilySummaryScreen`'s case uses the **prefixed** keys a real `SectionList` reports
- * (`<section>:<itemKey>`, `VirtualizedSectionList._subExtractor`), not the bare keys a
- * hand-written token would carry: with the bare shape the screen would pass here and gate
- * nothing on a device.
+ * **Both screens are a `FlatList` now** (019 T009, T011). `FamilySummaryScreen`'s case used to
+ * drive a `SectionList` with the **prefixed** keys one really reports
+ * (`<section>:<itemKey>`, `VirtualizedSectionList._subExtractor`); the family book is a page at
+ * a time, over the same single list `PersonJournalScreen` uses, so the keys it reports are the
+ * bare ones its own `keyExtractor` answers. That endless scroll is gone, and with it the reason
+ * this file was the worst case -- but the gating still has to hold, because a month of a large
+ * household is plenty of cards.
  */
 
 jest.mock('react-native-safe-area-context', () => {
@@ -51,11 +54,10 @@ jest.mock('../../components/journal/JournalEntryCard', () => {
   return { __esModule: true, JournalEntryCard: Card, default: Card, isOwnMemory: () => false };
 });
 
-jest.mock('../../components/DayRoster', () => {
-  const ReactLib = require('react');
-  const { View } = require('react-native');
-  return { __esModule: true, default: () => ReactLib.createElement(View, null) };
-});
+// There is no per-day roster mock here any more. Both rewired screens draw `JournalDateBar` and
+// `FacesRow` above their lists instead (019 T011, research R8), and both come from the journal
+// barrel mocked below; the roster went with the day-by-day scroll it sat above. A mock left
+// behind would read as a live reference to a component nothing draws.
 
 jest.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'me' }, accessToken: 'token' }),
@@ -64,6 +66,16 @@ jest.mock('../../context/AuthContext', () => ({
 jest.mock('../../services/SocialService', () => ({
   getUserEntries: jest.fn(async () => []),
   getJournalBook: jest.fn(async () => ({ days: [], household: [], hasMore: false })),
+}));
+
+/**
+ * `PersonJournalScreen` reads the server's calendar look-ups now, not `getUserEntries` (019
+ * T009). Its day is `getDay`; `getCalendar` decides which day the book opens on.
+ */
+jest.mock('../../services/JournalCalendarService', () => ({
+  getCalendar: jest.fn(async () => ({ authorIds: [], days: [] })),
+  getPeriod: jest.fn(async () => []),
+  getDay: jest.fn(async () => []),
 }));
 
 jest.mock('../../components/journal', () => {
@@ -78,14 +90,24 @@ jest.mock('../../components/journal', () => {
     FullScreenMediaViewer: Nothing,
     CalendarPickerModal: Nothing,
     QuickCaptureBar: Nothing,
+    // 019: the two the rewired screens draw above their lists. Neither has anything to do with
+    // whether a card mounts its map, which is all this file is about.
+    JournalDateBar: Nothing,
+    FacesRow: Nothing,
   };
 });
 
+// Neither is exported from the barrel above, so neither is covered by its mock -- and both reach
+// real components (a `Modal`, a measured heading) that this file has no reason to mount.
+jest.mock('../../components/journal/CalendarSheet');
+jest.mock('../../components/journal/CalendarListHeading');
+
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { FlatList, SectionList } from 'react-native';
+import { FlatList } from 'react-native';
 
-import { getUserEntries, getJournalBook } from '../../services/SocialService';
+import { getJournalBook } from '../../services/SocialService';
+import { getCalendar, getDay } from '../../services/JournalCalendarService';
 import PersonJournalScreen from '../PersonJournalScreen';
 import FamilySummaryScreen from '../FamilySummaryScreen';
 
@@ -130,14 +152,20 @@ const mount = async (element) => {
 
 describe('PersonJournalScreen gates each card on viewability', () => {
   const render = async () => {
-    getUserEntries.mockResolvedValue([entry('a'), entry('b'), entry('c')]);
+    // The calendar index says the book's newest day with memories is `DAY`, and that day holds
+    // the three memories below -- which is how the screen opens with all three on screen.
+    getCalendar.mockResolvedValue({
+      authorIds: ['them'],
+      days: [{ date: DAY, precision: 'day', count: 3 }],
+    });
+    getDay.mockResolvedValue([entry('a'), entry('b'), entry('c')]);
     const tree = await mount(
       <PersonJournalScreen
         route={{ params: { person: { id: 'them', name: 'Ada' } } }}
         navigation={{ goBack: jest.fn(), navigate: jest.fn() }}
       />,
     );
-    // The screen opens on the latest day that holds entries, so all three are on screen.
+    // The screen opens on the book's newest day with memories, so all three are on screen.
     expect(Object.keys(visibilityByCard(tree)).sort()).toEqual(['a', 'b', 'c']);
     return tree;
   };
@@ -184,27 +212,35 @@ describe('PersonJournalScreen gates each card on viewability', () => {
 });
 
 describe('FamilySummaryScreen gates each card on viewability', () => {
+  /**
+   * The family book reads in two steps now (019 T011): the household from `/journal/book`, then
+   * the calendar's marks, then the day the marks say is newest -- `/journal/book` again, for that
+   * one day. Each one is a promise, so the mount needs more than a single flush to settle.
+   */
   const render = async () => {
-    getJournalBook.mockResolvedValue({
-      days: [
-        {
-          date: DAY,
-          entries: [
-            { ...entry('a'), memberId: 'them' },
-            { ...entry('b'), memberId: 'them' },
-          ],
-        },
-      ],
-      household: [{ memberId: 'them', name: 'Ada' }],
+    getJournalBook.mockImplementation(async (token, { before } = {}) => ({
+      household: [{ memberId: 'm-them', userId: 'them', name: 'Ada', avatarUrl: null }],
+      // The household read (no cursor) carries no day of its own that this screen uses; the day
+      // call answers `DAY` and its two memories.
+      days: before ? [{ date: DAY, entries: [entry('a'), entry('b')] }] : [],
       hasMore: false,
       oldestDate: DAY,
+    }));
+    getCalendar.mockResolvedValue({
+      authorIds: ['them'],
+      days: [{ date: DAY, precision: 'day', count: 2 }],
     });
+
     const tree = await mount(
       <FamilySummaryScreen
-        route={{ params: {} }}
+        route={{ params: { memberId: 'node-head' } }}
         navigation={{ goBack: jest.fn(), navigate: jest.fn() }}
       />,
     );
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => {});
+    }
     expect(Object.keys(visibilityByCard(tree)).sort()).toEqual(['a', 'b']);
     return tree;
   };
@@ -215,18 +251,39 @@ describe('FamilySummaryScreen gates each card on viewability', () => {
     expect(visibilityByCard(tree)).toEqual({ a: true, b: true });
   });
 
-  it('mounts no map on a card that is off screen — with the prefixed keys a real SectionList sends', async () => {
+  it('mounts no map on a card that is off screen, card by card', async () => {
     const tree = await render();
 
     await act(async () => {
-      tree.root.findByType(SectionList).props.onViewableItemsChanged({
-        // `<section>:<itemKey>`, as VirtualizedSectionList._subExtractor builds it. A bare 'b'
-        // here would let a screen that gates nothing pass this case.
-        viewableItems: [{ key: '0:b', item: { ...entry('b'), memberId: 'them' }, index: 1, isViewable: true }],
+      tree.root.findByType(FlatList).props.onViewableItemsChanged({
+        viewableItems: [{ key: 'b', item: entry('b'), index: 1, isViewable: true }],
         changed: [],
       });
     });
 
     expect(visibilityByCard(tree)).toEqual({ a: false, b: true });
+  });
+
+  it('shows the map again when a card comes back into view', async () => {
+    const tree = await render();
+
+    await act(async () => {
+      tree.root.findByType(FlatList).props.onViewableItemsChanged({
+        viewableItems: [{ key: 'a', item: entry('a'), index: 0, isViewable: true }],
+        changed: [],
+      });
+    });
+    expect(visibilityByCard(tree)).toEqual({ a: true, b: false });
+
+    await act(async () => {
+      tree.root.findByType(FlatList).props.onViewableItemsChanged({
+        viewableItems: [
+          { key: 'a', item: entry('a'), index: 0, isViewable: true },
+          { key: 'b', item: entry('b'), index: 1, isViewable: true },
+        ],
+        changed: [],
+      });
+    });
+    expect(visibilityByCard(tree)).toEqual({ a: true, b: true });
   });
 });

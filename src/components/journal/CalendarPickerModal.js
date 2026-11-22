@@ -9,8 +9,11 @@
  *   - Web     : CalendarPickerModal.web.js is used instead (see metro platform
  *               resolution -- do NOT add web extensions to metro sourceExts).
  *
- * NOTE ON `markedDates`: this prop is still accepted so callers (JournalScreen,
- * PersonJournalScreen) keep working unchanged, but it is intentionally IGNORED.
+ * NOTE ON `markedDates`: this prop is still accepted, but it is intentionally IGNORED.
+ * No caller passes it any more -- `DateTimeField` is the only caller left (016 moved the
+ * Journal tab to `CalendarSheet`, and 019 FR-012 moved `PersonJournalScreen` there too), and
+ * it does not. It stays for parity with `CalendarPickerModal.web.js`, which really does draw
+ * a dot per marked day, so the two platform files keep one prop list.
  * UIDatePicker is a system component and exposes no API for decorating
  * individual dates, so entry dots cannot be rendered here. This was a deliberate
  * trade chosen over keeping the JS calendar.

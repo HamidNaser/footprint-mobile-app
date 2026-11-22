@@ -74,4 +74,30 @@ describe('adaptEntry', () => {
     expect(entry.responsesCount).toBe(3);
     expect(entry.author).toEqual({ id: 'u1', name: 'Reem', avatarUrl: 'a.png' });
   });
+
+  /**
+   * The server always sends `datePrecision`, but `adaptEntry` dropped it, so a month-only
+   * memory would be listed under the 1st and a year-only one would drop out of the "month
+   * not known" group (research R4, 016 FR-016). Nothing reads this field yet -- this just
+   * carries it through, same as every other field.
+   */
+  describe('datePrecision', () => {
+    it('carries a month precision through unchanged', () => {
+      const entry = adaptEntry({ ...base, date: '2026-05-05', datePrecision: 'month' });
+
+      expect(entry.datePrecision).toBe('month');
+    });
+
+    it('carries a year precision through unchanged', () => {
+      const entry = adaptEntry({ ...base, date: '2026-05-05', datePrecision: 'year' });
+
+      expect(entry.datePrecision).toBe('year');
+    });
+
+    it('defaults a missing precision to day', () => {
+      const entry = adaptEntry({ ...base, date: '2026-05-05' });
+
+      expect(entry.datePrecision).toBe('day');
+    });
+  });
 });
