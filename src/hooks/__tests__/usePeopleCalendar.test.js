@@ -203,6 +203,10 @@ describe('opening the book', () => {
 
     expect(result.current.picked).toEqual({ kind: 'year', year: 2025 });
     expect(result.current.label).toBe('2025');
+    // The clause this pins (fix round 1, Minor 2): a book of year-dated memories alone has no
+    // days and no months, so "empty" read off either map would call this book empty. It is
+    // `years.size === 0` and nothing else.
+    expect(result.current.bookEmpty).toBe(false);
   });
 
   it('reports openFailed, and never bookEmpty, when the index fails as the book opens', async () => {
@@ -347,6 +351,63 @@ describe('the index and the choice', () => {
     expect(result.current.picked).toBeNull();
     expect(result.current.selectedDay).toBeNull();
     expect(getPeriod).not.toHaveBeenCalled();
+  });
+
+  it('drops a chosen index that arrives after the choice has changed', async () => {
+    // The choice has an epoch of its own: without it, the first choice's index would land on
+    // top of the second one's and the sheet would fade days for somebody nobody chose.
+    const slow = deferred();
+    getCalendar.mockImplementation(async (token, ids) => {
+      const key = [...ids].sort().join(',');
+      if (key === 'u1,u2') return { authorIds: ids, days: [row('2026-03-05'), row('2026-03-09')] };
+      if (key === 'u1') return slow.promise;
+      return { authorIds: ids, days: [row('2026-03-05')] };
+    });
+    const { result, mount, update, flush } = setup({ people: PEOPLE, chosen: ['u1'] });
+    await mount();
+
+    expect(result.current.indexStatus).toBe('loading');
+
+    await update({ chosen: ['u2'] });
+    expect(result.current.indexStatus).toBe('ready');
+    expect([...result.current.index.days.keys()]).toEqual(['2026-03-05']);
+
+    await act(async () => {
+      slow.resolve({ authorIds: ['u1'], days: [row('2020-01-01')] });
+    });
+    await flush();
+
+    expect([...result.current.index.days.keys()]).toEqual(['2026-03-05']);
+  });
+
+  it('reports both ends unavailable, and not openFailed, when the index fails on a refresh', async () => {
+    // The wider cost of failing closed on a refresh, said out loud (fix round 1, Minor 4): with
+    // no index there is nothing to step over, so ◄ *and* ► are both unavailable at once. The
+    // reader is not moved and is never told the book is empty; Try again is the way out.
+    let calls = 0;
+    getCalendar.mockImplementation(async (token, ids) => {
+      calls += 1;
+      if (calls === 1) {
+        return { authorIds: ids, days: [row('2026-03-05'), row('2026-03-09')] };
+      }
+      throw new Error('offline');
+    });
+    const { result, mount, run } = setup({ people: PEOPLE, chosen: [] });
+    await mount();
+
+    expect(result.current.selectedDay).toBe('2026-03-09');
+    expect(result.current.hasPrevious).toBe(true);
+
+    await run((hook) => hook.refresh());
+
+    expect(result.current.indexStatus).toBe('failed');
+    expect(result.current.index).toBeNull();
+    expect(result.current.hasPrevious).toBe(false);
+    expect(result.current.hasNext).toBe(false);
+    // The period the reader is on is kept, so this is not the opening failure.
+    expect(result.current.selectedDay).toBe('2026-03-09');
+    expect(result.current.openFailed).toBe(false);
+    expect(result.current.bookEmpty).toBe(false);
   });
 
   it('does not call a chosen person with only month-dated memories empty', async () => {
@@ -625,6 +686,39 @@ describe('picking and stepping', () => {
     await run((hook) => hook.toggleMonth('2026-03'));
     expect(entryKeys()).toEqual(['may']);
   });
+
+  it('opens a second picked year on its own first heading, forgetting the first year’s taps', async () => {
+    // The months somebody opened belong to the year they opened them in (016 FR-006). The first
+    // year is left with *everything closed*, which is a real answer and not the null state, so
+    // this also pins that a tapped `openMonths` is let go of on the next pick.
+    calendarReturns({
+      'u1,u2': [row('2026-03-05'), row('2025-07-04'), row('2025-09-09')],
+    });
+    periodReturns(({ precision, from }) => {
+      if (precision !== 'month') return [];
+      if (from.startsWith('2026')) return [entry({ localId: 'march', date: '2026-03-05' })];
+      return [
+        entry({ localId: 'july', date: '2025-07-04' }),
+        entry({ localId: 'september', date: '2025-09-09' }),
+      ];
+    });
+    const { result, mount, run } = setup({ people: PEOPLE, chosen: [] });
+    await mount();
+
+    const entryKeys = () => result.current.rows
+      .filter((r) => r.kind === 'entry')
+      .map((r) => r.key);
+
+    await run((hook) => hook.pick({ kind: 'year', year: 2026 }));
+    expect([...result.current.openMonths]).toEqual(['2026-03']);
+
+    await run((hook) => hook.toggleMonth('2026-03'));
+    expect([...result.current.openMonths]).toEqual([]);
+
+    await run((hook) => hook.pick({ kind: 'year', year: 2025 }));
+    expect([...result.current.openMonths]).toEqual(['2025-07']);
+    expect(entryKeys()).toEqual(['july']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -650,6 +744,90 @@ describe('refresh and changes of people', () => {
     expect(getCalendar.mock.calls.length).toBe(indexes + 2);
     expect(getPeriod.mock.calls.length).toBeGreaterThan(pages);
     expect(result.current.picked).toEqual({ kind: 'month', year: 2026, month: 3 });
+  });
+
+  it('does not report loading while a refresh is in flight on a book that is already open', async () => {
+    // FR-015's own path (fix round 1, Minor 3): a screen that keys its spinner off `loading`
+    // must not blank the list a reader is looking at every time they pull to refresh.
+    const second = deferred();
+    let calls = 0;
+    getCalendar.mockImplementation(async (token, ids) => {
+      calls += 1;
+      if (calls === 1) return { authorIds: ids, days: [row('2026-03-05')] };
+      return second.promise;
+    });
+    const { result, mount, run, flush } = setup({ people: PEOPLE, chosen: [] });
+    await mount();
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.selectedDay).toBe('2026-03-05');
+
+    await run((hook) => hook.refresh());
+
+    // The index really is being read again -- and the page is still the reader's page.
+    expect(result.current.indexStatus).toBe('loading');
+    expect(result.current.loading).toBe(false);
+    expect(result.current.selectedDay).toBe('2026-03-05');
+
+    await act(async () => {
+      second.resolve({ authorIds: ['u1', 'u2'], days: [row('2026-03-05')] });
+    });
+    await flush();
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.selectedDay).toBe('2026-03-05');
+  });
+
+  it('does not report loading while a member who has just joined is being read', async () => {
+    const joined = deferred();
+    getCalendar.mockImplementation(async (token, ids) => {
+      if (ids.length === 3) return joined.promise;
+      return { authorIds: ids, days: [row('2026-03-05')] };
+    });
+    const { result, mount, update, flush } = setup({ people: PEOPLE, chosen: [] });
+    await mount();
+
+    expect(result.current.selectedDay).toBe('2026-03-05');
+
+    await update({ people: [...PEOPLE, { id: 'u3', name: 'Father', position: 2 }] });
+
+    expect(result.current.indexStatus).toBe('loading');
+    expect(result.current.loading).toBe(false);
+    expect(result.current.selectedDay).toBe('2026-03-05');
+
+    await act(async () => {
+      joined.resolve({ authorIds: ['u1', 'u2', 'u3'], days: [row('2026-03-05'), row('2026-04-02')] });
+    });
+    await flush();
+
+    expect(result.current.loading).toBe(false);
+    // Still the reader's own day: a member joining does not move anybody's page (R10).
+    expect(result.current.selectedDay).toBe('2026-03-05');
+  });
+
+  it('rebuilds nothing when a screen hands it a freshly built people array', async () => {
+    // Minor 6: `people` is a prop, and the natural way to write both screens rebuilds it on
+    // every render (`household.map(...)`). Keyed on that array's identity, the chain
+    // `bookIds → chosenIds → shown → built` would run `buildRows` over the whole period on
+    // every render -- SC-005's 300-memory month. Keyed on the ids themselves, the same people
+    // in a new array are the same book, and the rows are the very same rows.
+    // With somebody chosen, so that the filter really builds a new list each time it runs --
+    // which is what makes this case discriminating. (With nobody chosen `shown` hands back the
+    // page's own array, so the rows would survive a rebuilt memo by luck rather than by design.)
+    calendarReturns({}, [row('2026-03-01', 'month', 2)]);
+    periodReturns([entry(), entry({ localId: 'e-2', date: '2026-03-07' })]);
+    const { result, mount, update } = setup({ people: PEOPLE, chosen: ['u1'] });
+    await mount();
+
+    expect(result.current.picked).toEqual({ kind: 'month', year: 2026, month: 3 });
+    const rowsBefore = result.current.rows;
+    expect(rowsBefore.length).toBeGreaterThan(0);
+
+    await update({ people: PEOPLE.map((person) => ({ ...person })) });
+
+    expect(result.current.rows).toBe(rowsBefore);
+    // The same two indexes as before, and no third: the same people are the same book.
+    expect(getCalendar).toHaveBeenCalledTimes(2);
   });
 
   it('re-asks the book index when the set of people changes, and keeps the picked period', async () => {

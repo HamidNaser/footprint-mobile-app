@@ -50,8 +50,16 @@
  *
  * @param {object} options
  * @param {Array<{id: string, name?: string}>} options.people - the book's people, in book order,
- *   already de-duplicated and capped at the look-ups' 50 by the screen (data-model *Book*). A
- *   person without an account is never in this list.
+ *   already de-duplicated and **capped at the look-ups' 50 by the screen** (data-model *Book*;
+ *   spec edge case "A friend group with more than 50 friends", where the calendar covers the
+ *   first 50, as in 015). A person without an account is never in this list.
+ *   ⚠ **The cap is the screen's, and this hook does not impose one**: it hands every id it is
+ *   given to `getCalendar`, which throws `RangeError` above 50 (its own contract). A 51st friend
+ *   therefore reads as a book whose index failed -- `openFailed`, the screen's failure text and
+ *   Try again -- rather than as a book quietly missing somebody's memories. That is the
+ *   fail-closed outcome of the two, and it is deliberate: silently dropping the 51st id here
+ *   would be this hook deciding which of a reader's friends count, and would hide a screen that
+ *   had forgotten to cap. T010 and T011 do the capping, and their own tests pin it.
  * @param {string[]} [options.chosen] - the chosen `BookPerson.id`s; empty means everyone
  *   (FR-016). Held by the screen (T013), because it is the faces row that changes it. Ids that
  *   are not in `people` are ignored, so a member who has left the book is never asked about.
@@ -63,7 +71,13 @@
  * @param {(a: object, b: object) => number} [options.compareInDay] - orders memories within one
  *   day (and a month's month-only group) in a month or year list: household position, then
  *   `createdAt`, on the family book and a head-card household. Omitted elsewhere, so those
- *   lists keep 016's `createdAt` order (R6).
+ *   lists keep 016's `createdAt` order (R6). ⚠ **Memoise it** (`useCallback`, or a module-level
+ *   function): it is a dependency of `buildRows`, which cannot be keyed on anything but the
+ *   comparator's own identity, so an inline arrow rebuilds a whole period's rows on every
+ *   render -- the work SC-005's 300-memory month measures. The same goes for `loadDay`, which
+ *   is held in a ref here and so is safe either way, and for `people` and `chosen`, which are
+ *   keyed on their contents (see `chosenInputKey`) and so are safe too. `compareInDay` is the
+ *   one input whose identity the hook cannot protect the caller from.
  * @param {'newestFirst'|'compareInDay'} [options.dayOrder] - how a *single day* is ordered:
  *   newest first by `createdAt` for a person or a friend group (016 FR-004), or by
  *   `compareInDay` for a head-card household and the family book, whose day the server returns
@@ -267,6 +281,23 @@ export function usePeopleCalendar({
   const bookKey = useMemo(() => keyOf(bookIds), [bookIds]);
 
   /**
+   * ⚠ **Everything below this point is keyed on the two *strings*, never on `bookIds`'s
+   * identity** (fix round 1, Minor 6).
+   *
+   * `people` and `chosen` are props, and the natural way to write the two screens hands them a
+   * fresh array on every render -- `household.map(...)`, `persons.filter(...).map(...)`. Keyed
+   * on those arrays, the chain `bookIds → chosenIds → shown → built` would rebuild on every
+   * render, and the last link of it is `buildRows` over a whole period: exactly the work
+   * SC-005's 300-memory month measures. The keys change when the *contents* change and not when
+   * the array does, so the chain rebuilds when the book or the choice really has.
+   *
+   * The memos below therefore read `people`, `chosen` and `bookIds` out of their closures. When
+   * neither key has changed the closure is a render or two old and holds the same ids, which is
+   * the whole point.
+   */
+  const chosenInputKey = (Array.isArray(chosen) ? chosen : []).join(',');
+
+  /**
    * The chosen ids that are still people in the book. A member who has left is dropped rather
    * than asked about (spec edge case "Someone joins or leaves"), and with nobody left chosen the
    * book reads as everyone again, which is FR-016's own meaning of an empty choice.
@@ -281,12 +312,15 @@ export function usePeopleCalendar({
       ids.push(id);
     });
     return ids;
-  }, [chosen, bookIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chosenInputKey, bookKey]);
+
+  const chosenKey = useMemo(() => keyOf(chosenIds), [chosenIds]);
 
   const hasChoice = chosenIds.length > 0;
   // data-model *Chosen*: the covered ids are the chosen people, or everyone.
   const coveredIds = hasChoice ? chosenIds : bookIds;
-  const coveredKey = useMemo(() => keyOf(coveredIds), [coveredIds]);
+  const coveredKey = hasChoice ? chosenKey : bookKey;
 
   // ---------------------------------------------------------------------
   // State
@@ -511,7 +545,11 @@ export function usePeopleCalendar({
     if (!hasChoice) return allEntries;
     const covered = new Set(chosenIds);
     return allEntries.filter((item) => covered.has(item?.userId));
-  }, [allEntries, hasChoice, chosenIds]);
+    // `chosenKey`, not `chosenIds`: see the note above `chosenInputKey`. This is the link that
+    // feeds `buildRows`, so an identity that moved every render would rebuild a whole period's
+    // rows every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries, hasChoice, chosenKey]);
 
   /** A single day's cards, in the book's own in-day order (FR-009). */
   const entries = useMemo(
@@ -607,6 +645,18 @@ export function usePeopleCalendar({
     setOpenMonths(null);
   }, []);
 
+  /**
+   * ◄ or ► : move one period earlier (`-1`) or later (`+1`), and do nothing at that end of the
+   * book.
+   *
+   * ⚠ **`delta` is ±1, and nothing else** (fix round 1, Minor 7). The two underlying answers do
+   * not agree about a bigger step: `neighbourMonth` and `neighbourYear` honour `|delta| > 1` and
+   * step that many periods, while `adjacentDateKey` reads any direction that is not exactly `1`
+   * as backwards -- so `step(2)` would move a month *forward* and a day *backward*. The date bar
+   * has two arrows and a swipe has two directions, so ±1 is the whole of what the screens need;
+   * this is written down rather than papered over with `Math.sign`, which would quietly throw
+   * away the months a caller asked to step and look like it had worked.
+   */
   const step = useCallback((delta) => {
     const target = neighbourOf(delta);
     // Nothing whatever at either end -- never a wrap, and never a period with no memories.
@@ -712,6 +762,14 @@ export function usePeopleCalendar({
    */
   const openFailed = bookIndexNow.status === 'failed' && period === null;
 
+  /**
+   * The book has not opened yet: there is nothing to show, so the screen shows a spinner in
+   * place of the page. Gated on there being no period, which is what keeps a refresh and a
+   * member joining from blanking the list -- see the note on `loading` in the returned shape.
+   */
+  const loading = (peopleLoading === true || bookIndexNow.status === 'loading')
+    && period === null;
+
   const chosenNames = useMemo(() => {
     const byId = new Map((Array.isArray(people) ? people : [])
       .filter((person) => person?.id)
@@ -744,10 +802,20 @@ export function usePeopleCalendar({
     indexStatus: indexNow.status,
     indexError: indexNow.error,
 
-    // The period on screen, in 016's own shape.
+    // The period on screen, in 016's own shape: `picked` is null in day mode, where
+    // `selectedDay` is the day.
     picked,
     selectedDay: period?.day ?? null,
     periodKind: period?.kind ?? 'day',
+    /**
+     * What the date bar calls a picked month or year -- "March 2026", "2026".
+     *
+     * ⚠ **Null in day mode**, exactly as `JournalScreen`'s own `periodLabel` is: a *day* is
+     * worded by the bar itself, from the `'YYYY-MM-DD'` key in `selectedDay`
+     * (`JournalDateBar` runs it through `parseDateKey`, so it is a local calendar day and never
+     * an instant). So a screen passes `date={selectedDay}` **and** `label={label}`, and null
+     * here is "the bar words the day", not "there are no words".
+     */
     label,
     /** The date bar's count: the shown memories, and null until the page has answered. */
     count: pageNow.status === 'ready' ? shown.length : null,
@@ -765,10 +833,28 @@ export function usePeopleCalendar({
     hasNext: later !== null,
 
     presentIds,
+    /**
+     * ⚠ Read `bookEmpty` and `openFailed` **before** this: a book with nobody in it, and one
+     * whose index failed as it opened, both have no period to read, so the page stays
+     * `'loading'` and nothing will ever resolve it. Those two states are the answer there, and
+     * this one is not.
+     */
     pageStatus: pageNow.status,
     pageError: pageNow.error,
 
-    loading: peopleLoading === true || bookIndexNow.status === 'loading',
+    /**
+     * **The book has not opened yet** -- the screen is still reading its people, or the book's
+     * index has not landed and so there is no period to show. It is the spinner that stands in
+     * place of the whole page.
+     *
+     * ⚠ **It is deliberately false once there is a period**, even while an index is being read
+     * again (fix round 1, Minor 3). A pull to refresh re-reads both indexes and the page, and a
+     * member joining re-reads the book's index; a `loading` that went true for either would
+     * blank the list a reader is looking at on FR-015's own path. What is being re-read shows
+     * through `indexStatus` and `pageStatus`, and the pull-to-refresh spinner belongs to the
+     * screen's own `RefreshControl`, as `FamilySummaryScreen` already holds it.
+     */
+    loading,
     bookEmpty,
     choiceEmpty,
     openFailed,
