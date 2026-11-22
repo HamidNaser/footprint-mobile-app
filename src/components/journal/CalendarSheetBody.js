@@ -3,8 +3,10 @@
  *
  * 016 User Story 1: the book-style calendar the Journal's date bar opens, sliding up from the
  * bottom of the screen (FR-001). It replaces the platform's own white date picker on the
- * Journal tab -- `CalendarPickerModal`, which stays exactly as it is for the two other screens
- * that use it, `PersonJournalScreen` and `DateTimeField` (FR-015).
+ * Journal tab -- `CalendarPickerModal`, which stays exactly as it is for `DateTimeField`
+ * (FR-015). ⚠ **`DateTimeField` is now its only caller.** 016 left it on `PersonJournalScreen`
+ * as well; 019 FR-012 put this sheet on that screen too, so no journal screen opens the
+ * platform picker any more.
  *
  * Date, Month and Year; a month list and a twelve-year list, both reachable from the headers;
  * arrows that move by whatever set is on screen; faded days that cannot be tapped; counts on
