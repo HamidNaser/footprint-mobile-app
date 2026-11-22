@@ -1,18 +1,57 @@
 /**
- * FamilySummaryScreen - The Whole Immediate Family At A Glance
+ * FamilySummaryScreen -- the family-unit book, on the calendar (019 User Story 2).
  *
- * Opened from FamilyScreen when the signed-in user taps their own head card. Shows one
- * family's journal book — a roster of who is in the household and, below it, everyone's
- * entries grouped by day, newest first.
+ * Opened from FamilyScreen when the signed-in user taps their own head card. It shows one
+ * household's journal book: who is in the household, and their memories a **page** at a time --
+ * a day, a month or a year -- read through `usePeopleCalendar`, exactly as the reader's own
+ * Journal tab reads theirs (016) and as `PersonJournalScreen` now does.
  *
- * The journal book endpoint (phase 2 of this feature) already decides both the household's
- * membership and each day's entry order, so this screen renders what it is given rather than
- * re-deriving either: the ordering rule lives in one place, and web and mobile cannot drift
- * into showing the same family in two different orders.
+ * **What this replaced, and why it mattered.** The book used to be one continuous newest-first
+ * scroll of days, paged backwards by `onEndReached` as somebody kept scrolling. March was
+ * therefore reachable only by scrolling through everything recorded since, there was no calendar
+ * to reach it from, and a long-lived family's older memories were in practice unreachable on the
+ * phone (spec FR-008; the owner, 2026-11-21). The scroll and its paging are gone: the date bar
+ * is the page's first row, the household's faces the second, and the calendar reaches any day,
+ * month or year that has memories.
+ *
+ * ## The three rules that are easiest to get wrong here
+ *
+ * - **A day is `/journal/book` asked for one day, and its answer is used only when it is that
+ *   day** (research R5). `before` is exclusive, so the endpoint answers the newest day *before*
+ *   the cursor -- which for a day with nothing on it is an **earlier** day. Taking `days[0]` on
+ *   trust would list one day's memories under another day's heading.
+ * - **The cursor is the day after D, built from calendar parts** -- `parseDateKey`, `setDate(+1)`,
+ *   `toDateKey` -- and never `new Date(D)`, which parses a bare `'YYYY-MM-DD'` as UTC midnight
+ *   and so names the day before anywhere west of Greenwich (FR-013; a civil date is a day, not
+ *   an instant).
+ * - **Every card's author comes from the household**, on a day, a month and a year alike
+ *   (research R6a). `/journal/book`'s entries carry a `memberId` and `/journal/period`'s do not,
+ *   so matching on that would name a memory on its day page and leave it "Unknown" in the month
+ *   list that lists it again. `authorFor` matches on `entry.userId`, which both routes carry.
+ *
+ * ## What a reader must never be shown
+ *
+ * Both are the project's *Sharing fails closed* discipline (`CLAUDE.md`):
+ *
+ * - **A calendar over a household nobody has read.** The household and the memories arrive
+ *   separately; until the household has landed the screen passes `peopleLoading` and shows
+ *   neither calendar, faces nor an empty message -- a household that has not arrived is not a
+ *   household with nobody in it.
+ * - **A failure drawn as emptiness.** The household failing, the calendar's marks failing as the
+ *   book opens (`openFailed`) and a page failing all show this screen's own, unchanged
+ *   "Couldn't load the family summary." with Try again -- never the empty message, and never a
+ *   dimmed face, which would read as "recorded nothing". `bookEmpty` and `openFailed` are
+ *   therefore read **before** `pageStatus`, which stays `'loading'` for ever in both, and the
+ *   pull-to-refresh control is gated the same way.
  *
  * Everything renders in the app's own styling. This feature deliberately does not apply each
- * relative's own journal theme (spec FR-007) — that waits on cross-platform theme
- * persistence, which does not exist on either client yet.
+ * relative's own journal theme (015 FR-007) -- that waits on cross-platform theme persistence,
+ * which does not exist on either client yet.
+ *
+ * **Choosing a face is T013's**, not this screen's yet: the row is drawn with nobody chosen, so
+ * the book shows everyone. The chosen ids are held here already, because a refresh has to drop
+ * anybody who has left the household (spec edge case "Someone joins or leaves"), and that rule
+ * belongs with the household read rather than with the wiring that will set them.
  */
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
@@ -20,7 +59,7 @@ import {
   View,
   Text,
   StyleSheet,
-  SectionList,
+  Alert,
   TouchableOpacity,
   RefreshControl,
   ActivityIndicator,
@@ -29,17 +68,86 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 
 import { JournalEntryCard } from '../components/journal/JournalEntryCard';
-import { ViewportSectionList } from '../components/media/ViewportLists';
+import { ViewportFlatList } from '../components/media/ViewportLists';
 // The same viewability helper the Journal uses, for the same reason: `JournalEntryCard` mounts a
-// native map view for a memory with places, and this screen is a paginating list of those cards
-// -- `onEndReached` keeps adding to it, so the maps accumulate. research R10 *Lazy rendering* and
-// plan.md's risk table treat gating as a requirement, not an optimisation (review fix, Important 3).
+// native map view for a memory with places, and this screen is a list of those cards. Without
+// gating, every card on screen mounts its map at once -- which research R10 *Lazy rendering* and
+// plan.md's risk table treat as a requirement, not an optimisation.
 import { useViewableKeys } from '../hooks/mediaVisibility';
-import { useAuth } from '../context/AuthContext';
-import { getJournalBook } from '../services/SocialService';
-import { journalBookToDays } from '../utils/journalBookDays';
-import DayRoster from '../components/DayRoster';
+// 016 FR-017's measured scroll, shared with `PersonJournalScreen` (T009 fix round 1).
+import { usePinnedHeadingScroll } from '../hooks/usePinnedHeadingScroll';
+import {
+  CalendarCoils,
+  DateSwipeContainer,
+  FacesRow,
+  JournalDateBar,
+} from '../components/journal';
+// Neither is exported from the barrel above, so both are imported by their own path.
+import { CalendarSheet } from '../components/journal/CalendarSheet';
+import CalendarListHeading from '../components/journal/CalendarListHeading';
 
+import { useAuth } from '../context/AuthContext';
+import { usePeopleCalendar } from '../hooks/usePeopleCalendar';
+import { getJournalBook } from '../services/SocialService';
+import { parseDateKey, toDateKey, todayKey } from '../utils/journalDate';
+
+/**
+ * The look-ups take 1-50 people, so a household larger than that is covered to its first 50, as
+ * on `PersonJournalScreen` and as in 015. The cap is the screen's: `usePeopleCalendar` hands
+ * every id it is given straight to `getCalendar`, which refuses more than 50 rather than quietly
+ * deciding which of a family counts.
+ */
+const MAX_BOOK_PEOPLE = 50;
+
+/** Nobody chosen, as one array, so an empty choice never changes identity between renders. */
+const NOBODY_CHOSEN = [];
+
+/**
+ * The civil day after `day`, built from that day's own calendar parts (FR-013).
+ *
+ * ⚠ **Never `new Date(day)`.** A bare `'YYYY-MM-DD'` parses as UTC midnight, so west of
+ * Greenwich it is already the day before, and the cursor would land on the very day being read --
+ * which `/journal/book` answers by handing back the day before it, silently. The parts go
+ * through `Date`'s own month-end arithmetic, so 31 March becomes 1 April and 31 December becomes
+ * 1 January of the next year.
+ */
+export function nextDayKey(day) {
+  const date = parseDateKey(day);
+  if (!date) return null;
+  date.setDate(date.getDate() + 1);
+  return toDateKey(date);
+}
+
+/**
+ * Nothing to read, in whatever words the caller has for it -- the whole book's, or the period's.
+ * Drawn in this screen's own quiet style, as today.
+ */
+const NothingToRead = ({ message }) => (
+  <View style={styles.centered}>
+    <Text style={styles.statusText}>{message}</Text>
+  </View>
+);
+
+/**
+ * This screen's own failure message, with a way to try again -- **unchanged wording** (FR-011).
+ *
+ * It is what all three failures show -- the household, the marks failing as the book opened, and
+ * a page -- because from the reader's side they are one thing: the family's journal did not
+ * arrive. What must never appear in its place is the empty message.
+ */
+const CouldNotLoad = ({ onRetry }) => (
+  <View style={styles.centered}>
+    <Text style={styles.statusText}>Couldn't load the family summary.</Text>
+    <TouchableOpacity
+      onPress={onRetry}
+      style={styles.retry}
+      accessibilityRole="button"
+      accessibilityLabel="Try again"
+    >
+      <Text style={styles.retryText}>Try again</Text>
+    </TouchableOpacity>
+  </View>
+);
 
 export default function FamilySummaryScreen({ navigation, route }) {
   const { user, accessToken } = useAuth();
@@ -47,200 +155,449 @@ export default function FamilySummaryScreen({ navigation, route }) {
   const memberId = route?.params?.memberId;
   const title = route?.params?.title || 'Family Journal';
 
-  // Membership and content are held separately because they arrive separately and change
-  // on different schedules: `household` is set once per household and never touched again
-  // by paging; `days` grows as older pages are fetched.
-  const [household, setHousehold] = useState([]);
-  const [days, setDays] = useState([]);
-  const [oldestDate, setOldestDate] = useState(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [status, setStatus] = useState('loading'); // 'loading' | 'ready' | 'error'
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
+  /**
+   * The household, and the two things that can be said about reading it.
+   *
+   * - `household` is null until the first read lands, and then **stays** -- a refresh that fails
+   *   leaves the family on screen rather than blanking it.
+   * - `householdStatus` is about that first read alone: `'loading'` until it lands, then
+   *   `'ready'` or `'failed'`. It is what the hook's `peopleLoading` is read from.
+   * - `householdReading` is true whenever a read is in flight, the first one or a refresh's, and
+   *   is what keeps the pull-to-refresh control turning until the household has been re-read.
+   */
+  const [household, setHousehold] = useState(null);
+  const [householdStatus, setHouseholdStatus] = useState('loading');
+  const [householdReading, setHouseholdReading] = useState(true);
 
-  const listRef = useRef(null);
+  /**
+   * The chosen faces (FR-016). **Nothing sets them yet** -- choosing is T013's -- but they are
+   * held here because the refresh below has to drop anybody who has left the household, and that
+   * rule belongs beside the household read rather than beside the wiring that will set them.
+   */
+  const [chosenIds, setChosenIds] = useState(NOBODY_CHOSEN);
 
-  // Guards against `onEndReached` firing more than once per page. It fires repeatedly
-  // while the list is mid-scroll, and state updates are async -- two calls in flight would
-  // both read the same stale `hasMore`/`oldestDate` and both append the same page. A ref is
-  // read synchronously, so the second call sees the first one's claim immediately.
-  const loadingRef = useRef(false);
-
-  // Identifies which household's request is current. Bumped once per household (every time
-  // `memberId`/`accessToken` changes), and every in-flight request -- the initial load, a
-  // refresh, or a page -- captures the value that was active when *it* started and compares
-  // again once its await settles. A response for a household the reader has since navigated
-  // away from is discarded rather than being applied or, worse, spliced into the new
-  // household's days.
-  //
-  // A single shared "cancelled" boolean is not enough for this: setting it on cleanup and
-  // clearing it again when the next effect starts means a request that was already in flight
-  // when the household changed would see the flag freshly cleared and wrongly conclude it is
-  // still current. A monotonically increasing epoch does not have that problem -- each
-  // request's own captured value can only ever be behind, never reset out from under it.
+  /**
+   * Which household's read is current. Bumped at the start of every read -- the first one and
+   * every refresh -- and each read compares again once its await settles, so an answer for a
+   * household the reader has since navigated away from, or for a read a refresh has superseded,
+   * is dropped rather than applied.
+   *
+   * A shared "cancelled" boolean cannot do this: cleared again when the next read starts, it
+   * tells an older in-flight read that it is still current. An epoch can only ever be behind.
+   */
   const epochRef = useRef(0);
 
-  useEffect(() => {
+  /**
+   * Read the household: `/journal/book` for one day, whose `household` is the answer (R5). The
+   * day it also returns is ignored -- which day the book opens on is the calendar index's
+   * answer, as on every book (R10).
+   */
+  const readHousehold = useCallback(async () => {
     epochRef.current += 1;
     const myEpoch = epochRef.current;
-    const requestMemberId = memberId;
-    const requestToken = accessToken;
+    setHouseholdReading(true);
 
-    // A new household. Its own load owns the paging guard until it settles; nothing prior
-    // is still allowed to page against household/days state this effect is about to replace.
-    loadingRef.current = true;
-    setStatus('loading');
-    setHousehold([]);
-    setDays([]);
-    setOldestDate(null);
-    setHasMore(false);
-    setLoadingMore(false);
+    try {
+      const result = await getJournalBook(accessToken, { memberId, days: 1 });
+      if (myEpoch !== epochRef.current) return;
+      const members = result?.household || [];
+      setHousehold(members);
+      setHouseholdStatus('ready');
 
-    (async () => {
-      try {
-        const result = await getJournalBook(requestToken, { memberId: requestMemberId });
-        if (myEpoch !== epochRef.current) return; // superseded by a newer household
-        setHousehold(result.household || []);
-        setDays(result.days || []);
-        setOldestDate(result.oldestDate);
-        setHasMore(result.hasMore);
-        setStatus('ready');
-      } catch (err) {
-        if (myEpoch !== epochRef.current) return;
-        console.warn('[FamilySummaryScreen] failed to load journal book:', err.message);
-        setStatus('error');
-      } finally {
-        if (myEpoch === epochRef.current) loadingRef.current = false;
-      }
-    })();
+      // Somebody who has left is no longer somebody to filter to (spec edge case "Someone joins
+      // or leaves"), and with nobody left chosen the book reads as everyone again.
+      const stillHere = new Set(members.map((member) => member.userId).filter(Boolean));
+      setChosenIds((previous) => (previous.length === 0
+        ? previous
+        : previous.filter((id) => stillHere.has(id))));
+    } catch (error) {
+      if (myEpoch !== epochRef.current) return;
+      console.warn('[FamilySummaryScreen] failed to read the household:', error.message);
+      // A refresh that fails leaves the family that is already on screen; only a first read with
+      // nothing to fall back on becomes the failure message.
+      setHouseholdStatus((previous) => (previous === 'ready' ? previous : 'failed'));
+    } finally {
+      if (myEpoch === epochRef.current) setHouseholdReading(false);
+    }
   }, [accessToken, memberId]);
 
-  const handleRefresh = useCallback(async () => {
-    // Re-issues the same request the initial load makes, under the same epoch/ref guards.
-    // A household is allowed to legitimately change on a full reload -- that's not the case
-    // this file's paging guards exist for -- just never mid-page.
-    // Guarded on `refreshing`, not `loadingRef`: a pull-to-refresh supersedes an in-flight
-    // page rather than being blocked by it. Bumping the epoch below already invalidates that
-    // page, and bailing instead would make the gesture silently do nothing -- the spinner
-    // snaps back with no request issued, because `setRefreshing(true)` is never reached.
-    if (refreshing) return;
-    loadingRef.current = true;
-    epochRef.current += 1;
-    const myEpoch = epochRef.current;
-    const requestMemberId = memberId;
-
-    // Bumping the epoch above orphaned any in-flight page: its `finally` is guarded on the
-    // epoch still matching, so it will skip its own `setLoadingMore(false)`. Nothing else
-    // clears the flag, and if this refresh comes back with `hasMore: false` then `loadMore`
-    // can never run again to clear it either -- leaving the footer spinner turning forever
-    // under a list that is complete. Cleared here, the same way a household change does.
-    setLoadingMore(false);
-
-    setRefreshing(true);
-    try {
-      const result = await getJournalBook(accessToken, { memberId: requestMemberId });
-      if (myEpoch !== epochRef.current) return;
-      setHousehold(result.household || []);
-      setDays(result.days || []);
-      setOldestDate(result.oldestDate);
-      setHasMore(result.hasMore);
-      setStatus('ready');
-    } catch (err) {
-      if (myEpoch !== epochRef.current) return;
-      console.warn('[FamilySummaryScreen] failed to refresh journal book:', err.message);
-      // A failed refresh leaves whatever was already on screen rather than blanking it.
-    } finally {
-      if (myEpoch === epochRef.current) {
-        loadingRef.current = false;
-        setRefreshing(false);
-      }
-    }
-  }, [accessToken, memberId, refreshing]);
-
-  const loadMore = useCallback(async () => {
-    if (loadingRef.current || status !== 'ready' || !hasMore || !oldestDate) return;
-    loadingRef.current = true;
-    setLoadingMore(true);
-    const myEpoch = epochRef.current;
-    const requestMemberId = memberId;
-    const before = oldestDate;
-
-    try {
-      const result = await getJournalBook(accessToken, { memberId: requestMemberId, before });
-      if (myEpoch !== epochRef.current) return; // the household changed under us; drop this page
-      // `household` is stable across pages by contract and is never touched here -- only
-      // the initial load and a refresh are allowed to set it.
-      setDays((prev) => [...prev, ...(result.days || [])]);
-      setOldestDate(result.oldestDate);
-      setHasMore(result.hasMore);
-    } catch (err) {
-      console.warn('[FamilySummaryScreen] failed to load an older page:', err.message);
-      // Whatever was already loaded stays exactly as it was, and `hasMore` is untouched, so
-      // the list stays readable and a later scroll can simply try again.
-    } finally {
-      if (myEpoch === epochRef.current) {
-        loadingRef.current = false;
-        setLoadingMore(false);
-      }
-    }
-  }, [accessToken, memberId, oldestDate, hasMore, status]);
-
-  // Grouped by day, not by person. The endpoint answers by household -- that is how it says
-  // who is in this family -- but every other journal surface in the app is read by day, and
-  // this screen alone arriving as separate per-person stacks meant "what happened on Sunday"
-  // had to be assembled by eye. See journalBookDays.
-  //
-  // A member with nothing recorded on a given day still belongs to the day -- there is
-  // nowhere on a day-grouped list to hang a per-member header, so the roster above each
-  // day's entries carries it instead, drawing everyone and dimming whoever recorded nothing.
-  const listSections = useMemo(() => journalBookToDays(days, household), [days, household]);
+  useEffect(() => {
+    setHousehold(null);
+    setHouseholdStatus('loading');
+    readHousehold();
+  }, [readHousehold]);
 
   /**
-   * One key per entry, hoisted out of the list's props so the viewability helper below is asked
-   * by exactly the key the list is keyed on. Two copies of this rule would be two chances for
-   * the lookup to miss, and a miss here reads as "that card has no map".
-   */
-  const keyExtractor = useCallback(
-    (item, index) => item.serverId || item.localId || String(index),
-    [],
-  );
-
-  /**
-   * Which cards are on screen (review fix, Important 3).
+   * The people this book covers (FR-002, data-model *Book*): the household's members with an
+   * account, in household order, de-duplicated by account keeping the first -- two tree nodes can
+   * link to one person -- and capped at the look-ups' 50.
    *
-   * `ViewportSectionList` composes this callback with its own, and React Native forbids changing
-   * `onViewableItemsChanged` on a live list, so both are stable. Until the list has reported
-   * anything every row counts as on screen, which is what makes this agree with the card's own
-   * `isVisible` default of true.
+   * A relative without an account is simply not here, so the server is never asked about them:
+   * their id is a *tree-node* id, and sending it as an account id answers 200 with nothing,
+   * which reads as "they have recorded nothing" (research R2).
+   */
+  const people = useMemo(() => {
+    const seen = new Set();
+    const covered = [];
+
+    (household || []).forEach((member) => {
+      const id = member?.userId;
+      if (typeof id !== 'string' || id === '' || seen.has(id)) return;
+      seen.add(id);
+      covered.push({ id, name: member.name, avatarUrl: member.avatarUrl ?? null });
+    });
+
+    return covered.slice(0, MAX_BOOK_PEOPLE);
+  }, [household]);
+
+  /**
+   * One civil day of the family book: `/journal/book` for that day alone (R5).
+   *
+   * ⚠ **The answer is used only when it is the day that was asked for.** `before` is exclusive
+   * and the endpoint answers the newest day before it, so a day with nothing on it comes back as
+   * an *earlier* day's memories. Anything but `days[0].date === day` is an empty day.
+   */
+  const loadDay = useCallback(async (day) => {
+    const before = nextDayKey(day);
+    if (!before) return [];
+
+    const result = await getJournalBook(accessToken, { memberId, before, days: 1 });
+    const answered = result?.days?.[0];
+    if (!answered || answered.date !== day) return [];
+    return answered.entries || [];
+  }, [accessToken, memberId]);
+
+  /** Where each person stands in the household, which is the order the server listed them in. */
+  const positionInHousehold = useMemo(() => {
+    const at = new Map();
+    people.forEach((person, position) => at.set(person.id, position));
+    return at;
+  }, [people]);
+
+  /**
+   * Household order for the memories of one day (FR-009, research R6): position in the household
+   * first, then created time between one person's own memories.
+   *
+   * It orders a **single day** (through the hook's `dayOrder`, because `/journal/book` returns a
+   * day in household position with no tie-break) and each day of a month or year list (through
+   * `buildRows`) -- which is what makes the two agree, and the reason it is one function rather
+   * than a sort in each place.
+   *
+   * ⚠ **Memoised deliberately.** `buildRows` cannot key on anything but this function's own
+   * identity, so an inline arrow would rebuild every row of a 300-memory month on every render
+   * (the hook's JSDoc calls it the one input it cannot protect a caller from).
+   *
+   * A memory whose author is not in the household sorts last rather than first: nothing should
+   * normally be there at all, and last is the answer that cannot push a member's memory down.
+   */
+  const compareInHousehold = useCallback((a, b) => {
+    // One past the last member, so anybody unplaced sorts after all of them.
+    const unplaced = positionInHousehold.size;
+    const first = positionInHousehold.has(a?.userId) ? positionInHousehold.get(a.userId) : unplaced;
+    const second = positionInHousehold.has(b?.userId) ? positionInHousehold.get(b.userId) : unplaced;
+
+    if (first !== second) return first - second;
+    return (a?.createdAt ?? 0) - (b?.createdAt ?? 0);
+  }, [positionInHousehold]);
+
+  const {
+    index,
+    indexStatus,
+    picked,
+    selectedDay,
+    periodKind,
+    label,
+    count,
+    entries,
+    rows,
+    stickyIndices,
+    toggleMonth,
+    pick,
+    step,
+    hasPrevious,
+    hasNext,
+    presentIds,
+    pageStatus,
+    loading,
+    bookEmpty,
+    openFailed,
+    emptyMessage,
+    refresh,
+  } = usePeopleCalendar({
+    people,
+    chosen: chosenIds,
+    loadDay,
+    // Both halves go together: `dayOrder` orders the day, `compareInDay` the days of a month or
+    // year list. A book given one without the other would read two ways (FR-009).
+    dayOrder: 'compareInDay',
+    compareInDay: compareInHousehold,
+    // A household that has not arrived is not a household with nothing in it.
+    peopleLoading: householdStatus === 'loading',
+  });
+
+  /** Whether there is a period to name at all. With none, there is no calendar to offer. */
+  const hasPeriod = picked !== null || selectedDay !== null;
+
+  /** Lookup of account id -> household member, for the author shown on a card. */
+  const personById = useMemo(() => {
+    const byId = new Map();
+    people.forEach((person) => byId.set(person.id, person));
+    return byId;
+  }, [people]);
+
+  /**
+   * Who a memory is by, on a day, a month and a year alike (research R6a, SC-004).
+   *
+   * The household member whose account wrote it, named and pictured exactly as
+   * `journalBookToDays` named them; failing that, whatever author the server itself sent. The
+   * fallback is reached: `/journal/book` answers a **day** for the whole household, while the
+   * book's own people stop at the look-ups' 50 -- so a memory by the 56th cousin is on screen
+   * with nobody in the book to name it, and keeps the server's name rather than becoming
+   * "Unknown".
+   *
+   * ⚠ **Matched on `entry.userId`, never on `memberId`.** Only `/journal/book` sends a
+   * `memberId`, so matching on it would name a memory on its day page and leave the very same
+   * memory unnamed in the month list that lists it again -- the difference SC-004 rules out.
+   */
+  const authorFor = useCallback((entry) => {
+    const member = personById.get(entry?.userId);
+    if (member) return { name: member.name, avatarUrl: member.avatarUrl };
+
+    const author = entry?.author;
+    if (author?.name) return { name: author.name, avatarUrl: author.avatarUrl ?? null };
+    return { name: 'Unknown', avatarUrl: null };
+  }, [personById]);
+
+  /**
+   * Pull to refresh: the household first, then the calendar's marks and the shown page (FR-015),
+   * keeping the reader on the period they were reading.
+   *
+   * The household leads because everything else is read **for** it: a member who joined since the
+   * book was opened has to be in the book before the marks and the page are asked for, or their
+   * memories are fetched for a household they are not yet in and the next read throws them away
+   * again (spec edge case "Someone joins or leaves").
+   *
+   * ⚠ **`pageStatus` is honoured only when there is a period** -- the same ordering rule the
+   * empty and failure states below follow, and the one the hook's own JSDoc states. A book with
+   * nothing in it, and one whose marks failed as it opened, have no period to read: the hook's
+   * page effect answers `'loading'` and **nothing ever resolves it**, so a control read without
+   * that gate spins for ever on the one screen where pulling to refresh is the obvious thing to
+   * try.
+   *
+   * The phases exist because `refresh()` only bumps the hook's reload key: the commit that asks
+   * still reports the *previous* answer, so clearing on "nothing is being read" there would turn
+   * the control off before the re-read had begun. `asked` is given one commit of grace for that
+   * reason; after it, a read that has not started is a read with nothing to do -- which is
+   * exactly a household with nobody in it, where the hook asks the server nothing at all.
+   */
+  const [refreshPhase, setRefreshPhase] = useState('idle');
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshPhase('asked');
+    await readHousehold();
+    refresh();
+  }, [readHousehold, refresh]);
+
+  const reading = householdReading
+    || indexStatus === 'loading'
+    || (hasPeriod && pageStatus === 'loading');
+
+  useEffect(() => {
+    if (refreshPhase === 'idle') return;
+    if (reading) {
+      if (refreshPhase !== 'running') setRefreshPhase('running');
+      return;
+    }
+    setRefreshPhase(refreshPhase === 'asked' ? 'waiting' : 'idle');
+  }, [refreshPhase, reading]);
+
+  // The book-style calendar (016), in place of the continuous scroll.
+  const [showCalendarSheet, setShowCalendarSheet] = useState(false);
+
+  /**
+   * Open the book-style calendar from the date bar (FR-001, FR-011).
+   *
+   * ⚠ **Only ever with an index in hand.** `CalendarSheet`'s count is two-valued -- a tile with
+   * no count is faded and inert -- so a sheet opened on a null index draws every day, month and
+   * year faded: a wholly dead calendar, indistinguishable from "nobody has recorded anything",
+   * with no way forward but closing it again. `usePeopleCalendar` answers `index` only when it is
+   * ready, never partly read, so this is the whole of the gate.
+   *
+   * A failed index says so and offers Try again. An index still being read says nothing: the tap
+   * landed on a screen that has not arrived, which is self-evident, rather than on a control that
+   * refused.
+   */
+  const openCalendar = useCallback(() => {
+    if (index) {
+      setShowCalendarSheet(true);
+      return;
+    }
+    if (indexStatus !== 'failed') return;
+
+    Alert.alert(
+      "Couldn't load the calendar",
+      'The phone could not read which days hold memories, so the calendar has not been opened. '
+        + 'Nothing has changed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Try again', onPress: handleRefresh },
+      ],
+    );
+  }, [index, indexStatus, handleRefresh]);
+
+  /**
+   * A day, a month or a year really chosen in the calendar.
+   *
+   * **This screen closes the sheet**, and the sheet does not close itself: a pick calls `onPick`
+   * alone. A pick the hook cannot read changes nothing whatever, rather than clearing what is on
+   * screen.
+   */
+  const handleCalendarPick = useCallback((period) => {
+    setShowCalendarSheet(false);
+    pick(period);
+  }, [pick]);
+
+  /** Dismissed with nothing chosen (016 FR-003): the page is left exactly as it was. */
+  const closeCalendar = useCallback(() => setShowCalendarSheet(false), []);
+
+  const goToNextDate = useCallback(() => step(1), [step]);
+  const goToPreviousDate = useCallback(() => step(-1), [step]);
+
+  /**
+   * Key extractor -- for a day's entry, and for a month or year list's rows (research R8).
+   *
+   * An entry row keeps keying by its own `localId`, which is what a day has always keyed by, so
+   * `useViewableKeys` and the `isVisible` it answers see the same keys in a day and in a month.
+   * A heading row keys as `heading:<period>`, which no `localId` can collide with.
+   */
+  const keyExtractor = useCallback((item) => {
+    if (item?.kind === 'entry') return item.key;
+    if (item?.kind) return `heading:${item.key}`;
+    return item.localId;
+  }, []);
+
+  /**
+   * Which cards are on screen.
+   *
+   * Declared before `renderEntry`, which closes over `isViewable`. `ViewportFlatList` composes
+   * this callback with its own, and React Native forbids changing `onViewableItemsChanged` on a
+   * live list, so both are stable. Until the list has reported anything every row counts as on
+   * screen, which is what makes this agree with the card's own `isVisible` default of true.
    */
   const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
 
-  // Carry the reader to the entry a face is about. Only ever called for somebody who
-  // recorded that day, so the entry is present in the list by construction; the guard is
-  // for a list that has since been refreshed out from under the press.
-  //
-  // Declared after `listSections`, which it closes over: a `useCallback` declared before a
-  // value it depends on would capture that value's not-yet-initialized first render forever
-  // (babel-preset-expo transpiles `const` to `var`, so this does not throw -- it just quietly
-  // never invalidates).
-  const handleJumpToEntry = useCallback((entryId) => {
-    if (!entryId) return;
+  /**
+   * 016 FR-017: a pressed map pin's piece, brought into view clear of the month heading a year
+   * list pins above it.
+   *
+   * ⚠ `headingsPinned` is asked of the **period on screen** -- a year pins its month headings and
+   * nothing else does -- rather than of the rows or of what has been measured, so a height left
+   * over from a year somebody was reading a moment ago cannot push a month's pressed pin a
+   * heading too far.
+   */
+  const { listRef, measureHeading, scrollPieceIntoView, onScrollToIndexFailed } =
+    usePinnedHeadingScroll({
+      rows,
+      headingsPinned: picked?.kind === 'year',
+      screenName: 'FamilySummaryScreen',
+    });
 
-    for (let s = 0; s < listSections.length; s += 1) {
-      const index = listSections[s].data.findIndex(
-        (item) => (item.serverId || item.localId) === entryId
+  const renderEntry = useCallback(({ item, index: rowIndex }) => (
+    <JournalEntryCard
+      entry={item}
+      // Who the card draws in its header. The household names every memory, on a day and in a
+      // month alike (R6a) -- without it, a book whose API sends no author per entry draws a '?'
+      // avatar and the name 'Unknown' on every card.
+      user={authorFor(item)}
+      currentUserId={user?.id}
+      showAuthor
+      // Off screen, the card holds its map's height open instead of mounting one.
+      isVisible={isViewable(item.localId)}
+      onRequestScrollTo={(offset) => scrollPieceIntoView(rowIndex, offset)}
+    />
+  ), [authorFor, user?.id, isViewable, scrollPieceIntoView]);
+
+  /**
+   * One row of the one list: a heading, or a memory drawn by the card above (research R8).
+   *
+   * ⚠ **A memory is rendered by `renderEntry` and by nothing else**, in a day and in a month
+   * alike -- FR-006: a memory is drawn exactly as today. The row index it hands
+   * `scrollPieceIntoView` counts **rows**, so a pressed pin clears the day headings above it.
+   */
+  const renderRow = useCallback(({ item, index: rowIndex }) => {
+    if (item?.kind === 'dayHeading' || item?.kind === 'monthHeading') {
+      const isMonth = item.kind === 'monthHeading';
+      return (
+        <CalendarListHeading
+          kind={item.kind}
+          label={item.label}
+          count={item.count}
+          open={item.open}
+          // A month heading of a year, and only that, opens and closes (016 FR-006) and is the
+          // row that gets pinned -- so it is the one measured. A grey day heading is neither.
+          onPress={isMonth ? () => toggleMonth(item.key) : undefined}
+          onLayout={isMonth ? (event) => measureHeading(item.key, event) : undefined}
+        />
       );
-      if (index >= 0) {
-        listRef.current?.scrollToLocation({
-          sectionIndex: s,
-          itemIndex: index,
-          viewPosition: 0.2,
-          animated: true,
-        });
-        return;
-      }
     }
-  }, [listSections]);
+
+    return renderEntry({ item: item?.kind === 'entry' ? item.entry : item, index: rowIndex });
+  }, [renderEntry, toggleMonth, measureHeading]);
+
+  /**
+   * The whole-book message, in today's own words (spec edge case).
+   *
+   * A household with nobody in it keeps today's guidance, because the answer is to add somebody
+   * rather than to wait; a household that has people but nothing recorded says so about the
+   * family.
+   */
+  const wholeBookMessage = (household || []).length === 0
+    ? 'No family recorded yet — add a spouse or child to your family tree to see their entries here.'
+    : 'Nobody in your family has recorded anything yet.';
+
+  /** How a period with nothing in it is worded, when nobody is chosen to name instead. */
+  const periodPhrase = picked?.kind === 'month'
+    ? 'in this month'
+    : picked?.kind === 'year' ? 'in this year' : 'on this day';
+
+  /**
+   * What stands in place of the list, in the order the fail-closed rule requires.
+   *
+   * ⚠ **A failed household is read before `bookEmpty`, and `bookEmpty` and `openFailed` before
+   * `pageStatus`.** A household that could not be read has no people, which the hook reports as a
+   * book with nothing in it -- so asking emptiness first would tell a reader their family has
+   * recorded nothing when the truth is that the phone could not ask. And neither an empty book
+   * nor a failed index has a period to read, so the page stays `'loading'` for ever in both.
+   */
+  const listEmpty = () => {
+    if (loading) {
+      return (
+        <View style={styles.centered}>
+          <ActivityIndicator />
+          <Text style={styles.statusText}>Loading your family&apos;s journals…</Text>
+        </View>
+      );
+    }
+    if (householdStatus === 'failed') return <CouldNotLoad onRetry={handleRefresh} />;
+    if (openFailed) return <CouldNotLoad onRetry={handleRefresh} />;
+    if (bookEmpty) return <NothingToRead message={wholeBookMessage} />;
+    if (pageStatus === 'failed') return <CouldNotLoad onRetry={handleRefresh} />;
+    if (pageStatus === 'loading') {
+      return (
+        <View style={styles.centered}>
+          <ActivityIndicator />
+        </View>
+      );
+    }
+    /*
+     * The period on screen. `emptyMessage` names the chosen people once some are chosen
+     * ("Nothing from Karim on this day", T013); with nobody chosen a period is normally never
+     * empty, because ◄ ► and the sheet's faded days only ever land on periods that have
+     * memories -- so this last line is for a period emptied since the marks were read, and it
+     * says only what is true of the period rather than of the family.
+     */
+    return <NothingToRead message={emptyMessage || `No memories ${periodPhrase}`} />;
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -252,90 +609,109 @@ export default function FamilySummaryScreen({ navigation, route }) {
         >
           <Ionicons name="chevron-back" size={24} color="#4a453f" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+          {/* How many people this book is of, as the approved prototype's header shows it. Said
+              only once the household is known: a count of nobody would be a claim. */}
+          {householdStatus === 'ready' && household.length > 0 ? (
+            <Text style={styles.headerSubtitle}>
+              {`${household.length} member${household.length === 1 ? '' : 's'}`}
+            </Text>
+          ) : null}
+        </View>
         <View style={styles.backButton} />
       </View>
 
-      {status === 'loading' && (
-        <View style={styles.centered}>
-          <ActivityIndicator />
-          <Text style={styles.statusText}>Loading your family's journals…</Text>
-        </View>
-      )}
+      <CalendarCoils coilCount={7} />
 
-      {status === 'error' && (
-        <View style={styles.centered}>
-          <Text style={styles.statusText}>Couldn't load the family summary.</Text>
-          <TouchableOpacity onPress={handleRefresh} style={styles.retry}>
-            <Text style={styles.retryText}>Try again</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {status === 'ready' && listSections.length === 0 && (
-        <View style={styles.centered}>
-          <Text style={styles.statusText}>
-            {household.length === 0
-              ? "No family recorded yet — add a spouse or child to your family tree to see their entries here."
-              : 'Nobody in your family has recorded anything yet.'}
-          </Text>
-        </View>
-      )}
-
-      {status === 'ready' && listSections.length > 0 && (
-        <ViewportSectionList
-          ref={listRef}
-          sections={listSections}
-          onScrollToIndexFailed={() => {}}
-          keyExtractor={keyExtractor}
-          onViewableItemsChanged={onViewableItemsChanged}
-          renderSectionHeader={({ section }) => (
-            <View style={styles.dayBlock}>
-              <Text style={styles.dayHeading}>{section.title}</Text>
-              {/* Per day, not per screen: a roster drawn once at the top would describe
-                  whichever day happened to be first and be wrong for every other. */}
-              <DayRoster
-                household={household}
-                dayEntries={section.data}
-                dateText={section.title}
-                onJumpToEntry={handleJumpToEntry}
-              />
-            </View>
-          )}
-          renderItem={({ item, index }) => (
-            // `user` is who the card draws in its header. journalBookToDays attributes each
-            // entry from the household roster rather than from the entry's own author field,
-            // precisely so a member the API returns without an author is not labelled
-            // 'Unknown' -- but that attribution only reaches the reader if it is handed to the
-            // card here. Without it every entry in the book renders a '?' avatar and the name
-            // 'Unknown', which is the exact outcome the attribution exists to prevent.
-            <JournalEntryCard
-              entry={item}
-              user={item.author}
-              currentUserId={user?.id}
-              showAuthor
-              // Off screen, the card holds its map's height open instead of mounting one.
-              isVisible={isViewable(keyExtractor(item, index))}
-            />
-          )}
-          onEndReached={loadMore}
-          // Generous enough that the next page usually lands before the reader scrolls
-          // into the gap, without refetching on every frame of a fast scroll.
-          onEndReachedThreshold={0.6}
-          ListFooterComponent={
-            loadingMore ? (
-              <View style={styles.footer}>
-                <ActivityIndicator />
-              </View>
-            ) : null
-          }
-          contentContainerStyle={styles.listContent}
-          stickySectionHeadersEnabled={false}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-          }
+      {/*
+        The date bar is the page's **first row** (the approved prototype), and it is drawn only
+        when there is a period for it to name: a book that is empty, still opening, or whose
+        household or marks could not be read has no day, month or year -- and no calendar to
+        offer either.
+      */}
+      {hasPeriod && (
+        <JournalDateBar
+          // The `'YYYY-MM-DD'` key itself, never a `Date` built from it: the bar words it through
+          // `parseDateKey`, which is a local calendar day (FR-013).
+          date={selectedDay}
+          label={label}
+          count={count}
+          periodKind={periodKind}
+          hasPrevious={hasPrevious}
+          hasNext={hasNext}
+          onPrevious={goToPreviousDate}
+          onNext={goToNextDate}
+          onDatePress={openCalendar}
         />
       )}
+
+      {/*
+        The page's **second row** (FR-010): every person the book covers, once, in household
+        order, on a day, a month and a year alike -- it is outside the list, so it stays put
+        whatever the list is showing.
+
+        It is drawn under the same condition as the bar above it, and for the same reason: with no
+        period there is no book to read people out of. That covers the household still being read,
+        the book with nothing in it (no calendar and no faces), and the household or marks that
+        could not be read, where the whole page is a failure message.
+
+        Nobody is chosen yet, so the book shows everyone and a tap does nothing; `onToggle` and
+        `onShowEveryone` arrive with T013. `presentIds` comes straight from the hook -- it is null
+        while the period is being read and after it failed, which is what dims nobody then.
+      */}
+      {hasPeriod && (
+        <FacesRow people={people} presentIds={presentIds} chosenIds={chosenIds} />
+      )}
+
+      <DateSwipeContainer
+        enabled
+        onNextDate={goToNextDate}
+        onPreviousDate={goToPreviousDate}
+        hasNext={hasNext}
+        hasPrevious={hasPrevious}
+      >
+        <ViewportFlatList
+          ref={listRef}
+          /*
+            A day's memories, or a month's or year's rows -- **the same list either way**
+            (research R8). A card's map pin scrolls by row index and only a `FlatList` has
+            `scrollToIndex` at all, so a month drawn as a `SectionList` -- which is what this
+            screen used to be -- would call a function that does not exist the moment somebody
+            pressed a pin.
+          */
+          data={picked ? rows : entries}
+          renderItem={renderRow}
+          keyExtractor={keyExtractor}
+          /*
+            016 FR-006: an open month heading stays pinned while its month scrolls. `buildRows`
+            fills `stickyIndices` with the month heading rows and nothing else, so a grey day
+            heading never sticks -- two labels piling up would cover the memory being read.
+          */
+          stickyHeaderIndices={picked ? stickyIndices : undefined}
+          onViewableItemsChanged={onViewableItemsChanged}
+          onScrollToIndexFailed={onScrollToIndexFailed}
+          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshPhase !== 'idle'} onRefresh={handleRefresh} />
+          }
+          ListEmptyComponent={listEmpty()}
+        />
+      </DateSwipeContainer>
+
+      {/*
+        The book-style calendar, in place of the endless scroll (FR-012). `index` cannot be null
+        while `visible` is true: `openCalendar` is the only thing that opens it, and it refuses
+        without one.
+      */}
+      <CalendarSheet
+        visible={showCalendarSheet}
+        picked={picked || { kind: 'day', date: selectedDay }}
+        index={index}
+        today={todayKey()}
+        onPick={handleCalendarPick}
+        onClose={closeCalendar}
+      />
     </SafeAreaView>
   );
 }
@@ -352,23 +728,14 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e6e1d8',
   },
   backButton: { width: 32, alignItems: 'flex-start' },
+  headerCenter: { flex: 1, alignItems: 'center' },
   headerTitle: { fontSize: 16, fontWeight: '600', color: '#4a453f' },
+  headerSubtitle: { fontSize: 12, color: '#948e86', marginTop: 2 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 10 },
   statusText: { fontSize: 14, color: '#948e86', textAlign: 'center', lineHeight: 20 },
   retry: { paddingHorizontal: 16, paddingVertical: 8 },
   retryText: { fontSize: 14, fontWeight: '600', color: '#4a453f' },
-  listContent: { paddingBottom: 32 },
-  footer: { paddingVertical: 20 },
-  dayHeading: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#6b635a',
-    letterSpacing: 0.3,
-    paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 8,
-  },
-  dayBlock: {
-    backgroundColor: '#fbf8f4',
-  },
+  // `flexGrow` so an empty page's message sits in the middle of the screen rather than at the
+  // top of a list with nothing in it.
+  listContent: { paddingBottom: 32, flexGrow: 1 },
 });
