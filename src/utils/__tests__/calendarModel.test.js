@@ -1111,8 +1111,9 @@ describe('filterRange', () => {
 
 describe('the civil-date guard: no date string parsed as an instant', () => {
   /**
-   * 016's own files, and the two existing files it edits. Both of those are free of the
-   * spelling today, so listing them is a real guard rather than a standing failure.
+   * Every file on the calendar's path: 016's own files and the two existing files it edits,
+   * then 019's (the same calendar on the Family and Friends journals). All of them are free
+   * of the spelling today, so listing them is a real guard rather than a standing failure.
    *
    * Named one file at a time, never as a folder: a folder scan cannot tell a file that is
    * clean from a file that was never written. A file a later task has not written yet is
@@ -1120,6 +1121,7 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
    * --strict` sets, so the feature's final run proves every listed file was really read.
    */
   const GUARDED_FILES = [
+    // --- 016: the Journal tab's calendar ---
     'src/utils/calendarModel.js',
     'src/utils/__tests__/calendarModel.test.js',
     'src/components/journal/CalendarSheet.js',
@@ -1135,6 +1137,33 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
     'src/screens/JournalScreen.js',
     'src/services/DatabaseService.js',
     'scripts/test-tz.mjs',
+
+    // --- 019 (T014): the same calendar on the Family and Friends journals ---
+    // The point of 019 is that two more screens now word days, months and years, so the rule
+    // that was guarded on the Journal tab alone has to reach them too. Analyze round 4 (H1)
+    // caught the exact defect this is for before any code was written: the date bar copied
+    // from `JournalScreen.js` ran `new Date(date)` on a `'YYYY-MM-DD'` day key, which would
+    // have labelled the day before for everyone west of Greenwich. `JournalDateBar.js` words
+    // its key through `parseDateKey` instead, and this list is what keeps it that way.
+    //
+    // Source files, in the order the tasks wrote them.
+    'src/services/JournalCalendarService.js',
+    'src/components/journal/JournalDateBar.js',
+    'src/components/journal/FacesRow.js',
+    'src/hooks/usePeopleCalendar.js',
+    // T009's fix round extracted the two new screens' measured-scroll rule into one shared
+    // module. It does no date arithmetic itself, but it reads `buildRows`' rows and keys the
+    // heights it keeps by month key -- so it is on the calendar's path, and a day or month
+    // derived here rather than taken from the row would be as wrong as anywhere else. The
+    // grep costs nothing, which is the same reason 016 kept the two `CalendarSheet` wrappers.
+    'src/hooks/usePinnedHeadingScroll.js',
+    // The existing screens 019 rewires.
+    'src/screens/PersonJournalScreen.js',
+    'src/screens/FamilySummaryScreen.js',
+    // `adaptEntry` lives here, and it is where a memory's civil day enters the phone: 019 (T002)
+    // added `datePrecision` beside the `date` its own comment says must be carried verbatim and
+    // never re-parsed. Re-parsing it is precisely the spelling below, so the file belongs here.
+    'src/services/SocialService.js',
   ];
 
   const ROOT = path.resolve(__dirname, '../../..');

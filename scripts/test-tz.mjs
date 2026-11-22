@@ -46,11 +46,16 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ZONES = ['America/Los_Angeles', 'UTC', 'Pacific/Auckland'];
 
 /**
- * The test files 016 adds or rewrites, which are the ones whose answers a time zone could
- * move. Listed in the order the tasks write them, so what is missing reads as how far the
- * feature has got.
+ * The test files 016 and 019 add or rewrite, which are the ones whose answers a time zone
+ * could move. Listed in the order the tasks write them, so what is missing reads as how far
+ * the feature has got.
+ *
+ * 019 put the same Date / Month / Year calendar on the Family and Friends journals, so the
+ * suites that read those screens, their hook and their service belong here too (019 T014):
+ * a day shown on the wrong day is the one defect three zones catch and one zone cannot.
  */
 const TEST_TARGETS = [
+  // --- 016: the Journal tab's calendar ---
   'src/utils/__tests__/calendarModel.test.js',                        // T002
   'src/services/__tests__/DatabaseService.calendar.test.js',          // T003
   'src/components/journal/__tests__/CalendarSheet.test.js',           // T004
@@ -58,6 +63,14 @@ const TEST_TARGETS = [
   'src/components/journal/__tests__/CalendarListHeading.test.js',     // T006
   'src/components/journal/__tests__/CalendarSheet.a11y.test.js',      // T009
   'src/components/journal/__tests__/CalendarListHeading.a11y.test.js', // T009
+  // --- 019: the same calendar on the Family and Friends journals ---
+  'src/services/__tests__/adaptEntry.test.js',                        // 019 T002
+  'src/services/__tests__/JournalCalendarService.test.js',            // 019 T004
+  'src/components/journal/__tests__/JournalDateBar.test.js',          // 019 T005
+  'src/components/journal/__tests__/FacesRow.test.js',                // 019 T006
+  'src/hooks/__tests__/usePeopleCalendar.test.js',                    // 019 T007
+  'src/screens/__tests__/PersonJournalScreen.calendar.test.js',       // 019 T009-T013
+  'src/screens/__tests__/FamilySummaryScreen.calendar.test.js',       // 019 T011-T013
 ];
 
 /**
