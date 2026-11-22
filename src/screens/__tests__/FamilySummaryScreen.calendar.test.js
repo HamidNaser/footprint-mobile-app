@@ -1658,6 +1658,33 @@ describe('User Story 4: choosing whose memories the family book shows', () => {
     expect(getCalendar.mock.calls.length).toBe(asked);
   });
 
+  /**
+   * The row and the page name the chosen people in **household order**, whichever order they
+   * were tapped in -- so "Showing Huda and Karim" above the list and "Nothing from Huda and
+   * Karim in this month" in it can never be the same two people the other way round on one
+   * screen.
+   *
+   * ⚠ **Tapped out of household order on purpose.** The row draws Huda, Karim, Lina; tapping
+   * Huda then Karim is tap order and household order at once, and would pass whichever rule the
+   * screen followed. Karim then Huda is the one order that tells them apart -- and the page's
+   * message is where the difference shows, because the row words its caption from the people it
+   * draws and so reads the same either way.
+   */
+  it('names the chosen people in household order, whichever order they were tapped (FR-016)', async () => {
+    const tree = await mount();
+    // January 2026 is Lina's alone, so the pair of them have nothing in it and the page has to
+    // name them both.
+    await pickMonth(tree, '2026-01');
+
+    await tapFace(tree, 'u-karim');
+    await tapFace(tree, 'u-huda');
+
+    expect(saysSomething(tree, 'Showing Huda and Karim')).toBe(true);
+    expect(saysSomething(tree, 'Nothing from Huda and Karim in this month')).toBe(true);
+    expect(saysSomething(tree, 'Showing Karim and Huda')).toBe(false);
+    expect(saysSomething(tree, 'Nothing from Karim and Huda')).toBe(false);
+  });
+
   it('shows everyone again from the row’s own Show everyone (FR-016)', async () => {
     const tree = await mount();
     await pickMonth(tree, '2026-03');
@@ -1695,6 +1722,34 @@ describe('User Story 4: choosing whose memories the family book shows', () => {
     expect(faceIsChosen(tree, 'u-huda')).toBe(true);
     expect(saysSomething(tree, 'Showing Huda')).toBe(true);
     expect(monthHeadingCounts(tree)).toEqual({ 'February 2026': 1, 'March 2026': 1 });
+  });
+
+  /**
+   * The way back, which is the way a reader goes most: pick a year, narrow to a month, then tap
+   * into one of its days. FR-018 binds the switch in both directions, and the case above only
+   * ever widens the period.
+   */
+  it('keeps the choice switching back from a year to a month to a day (scenario 6, FR-018)', async () => {
+    const tree = await mount();
+    await tapFace(tree, 'u-huda');
+
+    await pickYear(tree, 2026);
+    expect(faceIsChosen(tree, 'u-huda')).toBe(true);
+
+    await pickMonth(tree, '2026-03');
+    expect(faceIsChosen(tree, 'u-huda')).toBe(true);
+    expect(barWords(tree)).toEqual(['March 2026', '1 memory']);
+    expect(cardIds(tree)).toEqual(['huda-10']);
+
+    // And into a single day, from the sheet's own Date view.
+    await tapDate(tree);
+    await tap(tree, 'calendar-view-date');
+    await tap(tree, 'calendar-day-2026-03-10');
+
+    expect(barWords(tree)).toEqual(['Tue, Mar 10']);
+    expect(faceIsChosen(tree, 'u-huda')).toBe(true);
+    expect(saysSomething(tree, 'Showing Huda')).toBe(true);
+    expect(cardIds(tree)).toEqual(['huda-10']);
   });
 
   it('steps only to the chosen person’s days, months and years (scenario 6, FR-017)', async () => {

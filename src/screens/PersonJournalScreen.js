@@ -317,6 +317,17 @@ export default function PersonJournalScreen({ route, navigation }) {
    * Plain screen state, which is the whole of FR-018: it lives exactly as long as the book is
    * open. Going back out of this screen unmounts it and forgets the choice; a memory or a photo
    * opened on top, and a pull to refresh, leave the screen mounted and so keep it.
+   *
+   * ⚠ **Nothing here resets the choice when the *book* changes** (data-model *Chosen* > Reset),
+   * and that is deliberate rather than missed (T013 review, finding C). This screen's book comes
+   * from its route params, and there is no route to a second group book without a remount: the
+   * screen never navigates anywhere itself (it has no `navigation.navigate` or `.push` call at
+   * all), so a different book is a different mount, and the spec's own edge case says a group
+   * book follows its members on being reopened. If params for another book were ever swapped in
+   * place while this screen stayed mounted, a member the two books share would stay chosen --
+   * `usePeopleCalendar` drops only the ids that are not in the new book. Whoever adds that
+   * navigation adds the reset with it. `FamilySummaryScreen` has the matching rule already,
+   * because its household really can change under it on a refresh.
    */
   const [chosenIds, setChosenIds] = useState(NOBODY_CHOSEN);
 
