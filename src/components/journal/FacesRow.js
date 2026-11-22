@@ -128,13 +128,13 @@ export const FacesRow = ({
         contentContainerStyle={styles.row}
       >
         {people.map((person, index) => {
-          const chosen = chosenSet.has(person.id);
+          const isChosen = chosenSet.has(person.id);
           // `presentIds === null` means "not known yet" (loading or failed) -- never dimmed.
           const dimmed = presentIds !== null && !presentIds.has(person.id);
 
           const faceLabel = [
             person.name,
-            chosen ? 'chosen' : null,
+            isChosen ? 'chosen' : null,
             dimmed ? 'nothing in this period' : null,
           ]
             .filter(Boolean)
@@ -152,24 +152,24 @@ export const FacesRow = ({
               style={styles.face}
               onPress={() => onToggle?.(person.id)}
               accessibilityRole="button"
-              accessibilityState={{ selected: chosen }}
+              accessibilityState={{ selected: isChosen }}
               accessibilityLabel={faceLabel}
             >
               <View
                 style={[
                   styles.avatarWrap,
-                  chosen && styles.avatarWrapChosen,
+                  isChosen && styles.avatarWrapChosen,
                   dimmed && styles.avatarWrapDimmed,
                 ]}
               >
                 <Avatar src={person.avatarUrl} name={person.name} size={46} />
-                {chosen ? (
+                {isChosen ? (
                   <View style={styles.tick}>
                     <Ionicons name="checkmark" size={11} color="#fff" />
                   </View>
                 ) : null}
               </View>
-              <Text style={[styles.name, chosen && styles.nameChosen, dimmed && styles.nameDimmed]}>
+              <Text style={[styles.name, isChosen && styles.nameChosen, dimmed && styles.nameDimmed]}>
                 {person.name}
               </Text>
             </TouchableOpacity>
