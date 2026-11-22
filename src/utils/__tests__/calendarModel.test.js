@@ -751,6 +751,122 @@ describe('buildRows: a year', () => {
 });
 
 // ---------------------------------------------------------------------------
+// buildRows, the optional fourth argument (FR-009; research R6, T003)
+// ---------------------------------------------------------------------------
+
+/**
+ * `compareInDay` is the household's own rule (data-model.md): `(a, b) => position(a.userId) -
+ * position(b.userId) || a.createdAt - b.createdAt`. These tests use a stand-in with the same
+ * shape -- a fixed household position per `userId`, a `createdAt` tie-break -- so a household
+ * reading dad-then-mum is visibly different from the `createdAt` order the entries are seeded
+ * in (mum's memory is created first), and the two cannot be mistaken for one another.
+ *
+ * `entry()` has no `userId` of its own, so these build on it rather than widen it: a fourth
+ * field nothing else in this file needs is not worth adding to the shared helper.
+ */
+const withUser = (base, userId) => ({ ...base, userId });
+
+const HOUSEHOLD_POSITION = { dad: 0, kid: 1, mum: 2 };
+
+const compareInDay = (a, b) => {
+  const byPosition = HOUSEHOLD_POSITION[a.userId] - HOUSEHOLD_POSITION[b.userId];
+  if (byPosition !== 0) return byPosition;
+  return a.createdAt < b.createdAt ? -1 : (a.createdAt > b.createdAt ? 1 : 0);
+};
+
+describe('buildRows: compareInDay, the optional fourth argument', () => {
+  const march = { kind: 'month', year: 2026, month: 3 };
+  const year2026 = { kind: 'year', year: 2026 };
+
+  it('FR-009/R6: in a month list, a day\'s memories follow it, not createdAt', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+
+    // createdAt would read mum then dad; household position reads dad (0) before mum (2).
+    expect(entryIds(buildRows(entries, march).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a month list, the month-only group ("March 2026") follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-01', '2026-03-05T06:00:00.000Z', 'month'), 'mum'),
+      withUser(entry('e-dad', '2026-03-01', '2026-03-05T09:00:00.000Z', 'month'), 'dad'),
+    ];
+
+    expect(entryIds(buildRows(entries, march).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a year list, an open month\'s day group follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+    const open = new Set(['2026-03']);
+
+    expect(entryIds(buildRows(entries, year2026, open).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a year list, an open month\'s month-only group follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-01', '2026-03-05T06:00:00.000Z', 'month'), 'mum'),
+      withUser(entry('e-dad', '2026-03-01', '2026-03-05T09:00:00.000Z', 'month'), 'dad'),
+    ];
+    const open = new Set(['2026-03']);
+
+    expect(entryIds(buildRows(entries, year2026, open).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  /**
+   * FR-009 speaks only of memories of the same day or the same month (research R6, analyze
+   * round 5 L3): a year's own "month not known" group -- the memories whose precision is
+   * `'year'` -- is neither, so it keeps today's `createdAt` order whether or not a comparator
+   * is passed.
+   */
+  it('FR-009/R6: a year\'s own "month not known" group keeps createdAt order regardless', () => {
+    const entries = [
+      withUser(entry('e-dad', '2026-01-01', '2026-03-05T06:00:00.000Z', 'year'), 'dad'),
+      withUser(entry('e-mum', '2026-01-01', '2026-03-05T09:00:00.000Z', 'year'), 'mum'),
+    ];
+    const open = new Set(['2026:rough']);
+
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('two memories by the same person on the same day keep the comparator\'s own tie-break', () => {
+    const entries = [
+      withUser(entry('e-late', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'mum'),
+      withUser(entry('e-early', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+    ];
+
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-early', 'e-late']);
+  });
+
+  it('omitted, every existing buildRows test above is unaffected -- a sanity check here too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+
+    const withNoFourthArg = buildRows(entries, march);
+    const withExplicitUndefined = buildRows(entries, march, undefined, undefined);
+
+    expect(withExplicitUndefined).toEqual(withNoFourthArg);
+    expect(entryIds(withNoFourthArg.rows)).toEqual(['e-mum', 'e-dad']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SC-004 in the model: a stored instant still lands on the day it names
 // ---------------------------------------------------------------------------
 
