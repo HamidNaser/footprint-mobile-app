@@ -124,6 +124,20 @@ jest.mock('../../components/journal/JournalEntryCard', () => {
   return { __esModule: true, JournalEntryCard: Card, default: Card, isOwnMemory: () => false };
 });
 
+/**
+ * `calendarModel`, **unchanged**, with `buildRows` counted (T010 fix round, finding B).
+ *
+ * Every other export is the real one and `buildRows` itself runs the real implementation -- this
+ * is a tally, not a stand-in, so no case below is testing a mock. It exists because building a
+ * period's rows is the expensive work this screen does (SC-005's 300-memory month), and the one
+ * thing that makes it happen needlessly -- a `compareInDay` whose identity moves between renders --
+ * is invisible in every other assertion.
+ */
+jest.mock('../../utils/calendarModel', () => {
+  const actual = jest.requireActual('../../utils/calendarModel');
+  return { __esModule: true, ...actual, buildRows: jest.fn(actual.buildRows) };
+});
+
 jest.mock('../../services/JournalCalendarService', () => ({
   getCalendar: jest.fn(),
   getPeriod: jest.fn(),
@@ -156,6 +170,8 @@ import { JournalDateBar } from '../../components/journal/JournalDateBar';
 import { FacesRow } from '../../components/journal/FacesRow';
 import { getCalendar, getDay, getPeriod } from '../../services/JournalCalendarService';
 import { getUserEntries } from '../../services/SocialService';
+// The real row builder, counted rather than replaced (see the mock above).
+import { buildRows } from '../../utils/calendarModel';
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1308,6 +1324,52 @@ describe('User Story 2: a group book’s faces and its order', () => {
     await settle();
   });
 
+  /**
+   * FR-010 binds the row "on a day, a month and a year alike", and dimming with it. The two cases
+   * below are that half of it: the day cases above cannot tell a row that dims by the period on
+   * screen from one that only ever looks at a day.
+   */
+  it('dims a face with nothing in the picked month, and leaves it choosable (FR-010)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    await tapDate(tree);
+    await pickMonthInSheet(tree, '2026-01');
+
+    // January 2026 is Lina's alone.
+    expect(barWords(tree)).toEqual(['January 2026', '1 memory']);
+    expect(faceSays(tree, 'u-lina')).toBe('Lina');
+    expect(faceSays(tree, 'u-huda')).toBe('Huda, nothing in this period');
+    expect(faceSays(tree, 'u-karim')).toBe('Karim, nothing in this period');
+
+    expect(typeof faceControl(tree, 'u-karim').props.onPress).toBe('function');
+    expect(faceControl(tree, 'u-karim').props.disabled).not.toBe(true);
+
+    // And March, where all three recorded something, dims nobody -- so the month case above is
+    // about who is in the month rather than about the row having gone dim everywhere.
+    await pickMarch(tree);
+    expect(faceSays(tree, 'u-huda')).toBe('Huda');
+    expect(faceSays(tree, 'u-karim')).toBe('Karim');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina');
+  });
+
+  it('dims a face with nothing in the picked year, and leaves it choosable (FR-010)', async () => {
+    // A year of Karim's own, before the one the others recorded in.
+    serve([...THE_FAMILY, memory('karim-2025', '2025-07-04', 500, { userId: 'u-karim' })]);
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    await tapDate(tree);
+    await tap(tree, 'calendar-view-year');
+    await tap(tree, 'calendar-year-tile-2025');
+
+    expect(barWords(tree)).toEqual(['2025', '1 memory']);
+    expect(faceSays(tree, 'u-karim')).toBe('Karim');
+    expect(faceSays(tree, 'u-huda')).toBe('Huda, nothing in this period');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina, nothing in this period');
+
+    expect(typeof faceControl(tree, 'u-huda').props.onPress).toBe('function');
+    expect(faceControl(tree, 'u-huda').props.disabled).not.toBe(true);
+  });
+
   /** "Could not load" must never be drawn as "recorded nothing" (FR-010, fails closed). */
   it('dims nobody after the day’s memories fail to load (FR-010)', async () => {
     getDay.mockRejectedValue(new Error('no network'));
@@ -1399,6 +1461,40 @@ describe('User Story 2: a group book’s faces and its order', () => {
       'card:karim-10',
       'card:lina-10',
     ]);
+  });
+
+  /**
+   * The comparator's **identity** has to hold still between renders, and nothing else here would
+   * notice if it stopped (T010 fix round, finding B).
+   *
+   * `buildRows` can be keyed on nothing but the comparator's own identity, so an inlined arrow --
+   * which every other case in this file would pass -- rebuilds every row of the period on every
+   * render: SC-005's 300-memory month, rebuilt for nothing. This asserts the work rather than the
+   * identity, because the hook here is the real one and there is no honest way to read the
+   * argument it was handed without standing in for it.
+   *
+   * The re-render hands back the **same** route params object, which is what a screen sitting on
+   * the navigation stack gets: nothing about the book has changed, so nothing should be rebuilt.
+   */
+  it('rebuilds no rows when nothing has changed, on a book with a comparator (SC-005)', async () => {
+    const navigation = { goBack: jest.fn(), navigate: jest.fn() };
+    const tree = await mount(HOUSEHOLD_ROUTE);
+    await pickMarch(tree);
+
+    // The month really was built, so an unchanged count below is not a count of nothing.
+    const built = buildRows.mock.calls.length;
+    expect(built).toBeGreaterThan(0);
+
+    await act(async () => {
+      tree.update(
+        <PersonJournalScreen route={{ params: HOUSEHOLD_ROUTE }} navigation={navigation} />,
+      );
+    });
+    await settle();
+
+    expect(buildRows.mock.calls.length).toBe(built);
+    // And the re-render really happened -- the month is still on screen, drawn from the same rows.
+    expect(rowsOnScreen(tree)).toContain('card:huda-10');
   });
 
   /**
