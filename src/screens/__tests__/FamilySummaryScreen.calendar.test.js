@@ -970,8 +970,11 @@ describe('the day cursor is a calendar day, not an instant (FR-013)', () => {
    * for now lives where it belongs: `scripts/test-tz.mjs` runs this file in
    * `America/Los_Angeles`, `UTC` and `Pacific/Auckland`, so the two tests below are always
    * run from west of Greenwich as well as from the other side of it. **Run them with
-   * `node scripts/test-tz.mjs`** -- a single-zone `npm test` on a machine at or east of
-   * Greenwich cannot fail them, whatever the production code does.
+   * `node scripts/test-tz.mjs`** -- **on this hazard**, a single-zone `npm test` on a machine
+   * at or east of Greenwich cannot fail them, because the zone is what decides whether a cursor
+   * built from an instant lands on the wrong day at all. The scope matters: any *other* wrong
+   * cursor -- an off-by-two, one that never advances past the day on screen -- fails both tests
+   * in every zone, so the pair is worth running on its own as well.
    */
 
   it('asks for 1 April when the day on screen is 31 March', async () => {
