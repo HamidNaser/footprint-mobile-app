@@ -44,4 +44,59 @@ export function summaryMemberId(head) {
   return head?.id ?? undefined;
 }
 
+/**
+ * Today's one-person route params, plus a top-level `userId`.
+ *
+ * `person.id` keeps today's exact fallback (`linkedUserId || id`) — the tree-node id still
+ * reaches `person.id`, because callers elsewhere (avatars, display) rely on a non-empty id.
+ * `userId` is the new, honest field: the member's real account id, or `null` when there is
+ * none. It sits beside `person`, never inside it, and it is never a `??`-style fallback onto
+ * `id` — that fallback is exactly the bug 019 research R2 closes, because it would re-send a
+ * tree-node id to the server as though it were an account.
+ *
+ * @param {object} member - a family-tree member (spouse, child, or similar)
+ * @returns {{person: {id: string, name: string, avatar: *}, isGroup: false, userId: (string|null)}}
+ */
+export function personRouteParams(member) {
+  return {
+    person: {
+      id: member.linkedUserId || member.id,
+      name: member.name,
+      avatar: member.avatar,
+    },
+    isGroup: false,
+    userId: member.linkedUserId ?? null,
+  };
+}
+
+/**
+ * Today's group-mode route params for a head card with no family-book id (research R2's
+ * "head card's household"), now with a `userId` (or `null`) on every person and
+ * `bookKind: 'household'` so the receiving screen can give it household order.
+ *
+ * `head` and `members` (spouse and children, in today's order) are combined into one
+ * `persons` list, each shaped exactly as today — `{id, name, avatar}`, `id` falling back to
+ * the tree-node id — plus `userId`. Dropping a person with no `userId` is the consuming
+ * screen's job (research R2), not this helper's: every person is sent, honestly labelled.
+ *
+ * @param {object} head - the tapped head card
+ * @param {object[]} members - the head's spouse and/or children, in display order
+ * @returns {{persons: object[], isGroup: true, groupName: (string|undefined), bookKind: 'household'}}
+ */
+export function householdRouteParams(head, members) {
+  const persons = [head, ...members].map((person) => ({
+    id: person.linkedUserId || person.id,
+    name: person.name,
+    avatar: person.avatar,
+    userId: person.linkedUserId ?? null,
+  }));
+
+  return {
+    persons,
+    isGroup: true,
+    groupName: `${head.name.split(' ')[0]}'s Family`,
+    bookKind: 'household',
+  };
+}
+
 export default routeForHeadTap;

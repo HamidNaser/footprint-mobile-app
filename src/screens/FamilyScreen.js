@@ -21,7 +21,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
-import { routeForHeadTap, summaryMemberId } from './familyTapRouting';
+import {
+  routeForHeadTap,
+  summaryMemberId,
+  personRouteParams,
+  householdRouteParams,
+} from './familyTapRouting';
 import { useFamilyTree } from '../hooks/useFamilyTree';
 import Avatar from '../components/Avatar';
 
@@ -398,41 +403,30 @@ export default function FamilyScreen({ navigation }) {
       return;
     }
     
-    // Collect all family members for this family unit. `id` is the linked user
-    // account (falls back to the tree-node id) so PersonJournal can fetch their
-    // live entries.
-    const familyMembers = [
-      { id: head.linkedUserId || head.id, name: head.name, avatar: head.avatar },
-    ];
+    // Collect this family unit's other members (spouse, children), in today's order.
+    // householdRouteParams combines them with the head and adds a real `userId` (or null)
+    // to every person, so PersonJournal can tell an account from a tree-only relative.
+    const otherMembers = [];
     if (head.spouse) {
-      familyMembers.push({ id: head.spouse.linkedUserId || head.spouse.id, name: head.spouse.name, avatar: head.spouse.avatar });
+      otherMembers.push(head.spouse);
     }
     if (head.children) {
       head.children.forEach(child => {
-        familyMembers.push({ id: child.linkedUserId || child.id, name: child.name, avatar: child.avatar });
+        otherMembers.push(child);
       });
     }
-    
+
     // Navigate to PersonJournalScreen in group mode
-    navigation.navigate('PersonJournal', {
-      persons: familyMembers,
-      isGroup: true,
-      groupName: `${head.name.split(' ')[0]}'s Family`,
-    });
+    navigation.navigate('PersonJournal', householdRouteParams(head, otherMembers));
   }, [navigation, user?.id]);
 
   // Handle tapping spouse/children - opens individual journal
   const handleMemberPress = useCallback((member) => {
     console.log('Selected member:', member.name);
-    // Navigate to PersonJournalScreen to view their individual journal
-    navigation.navigate('PersonJournal', {
-      person: {
-        id: member.linkedUserId || member.id,
-        name: member.name,
-        avatar: member.avatar,
-      },
-      isGroup: false,
-    });
+    // Navigate to PersonJournalScreen to view their individual journal. personRouteParams
+    // adds a top-level `userId` (the real account id, or null) beside today's unchanged
+    // `person`, so the screen can tell "no account" from "no memories".
+    navigation.navigate('PersonJournal', personRouteParams(member));
   }, [navigation]);
 
   const handleLocationPress = useCallback(() => {
