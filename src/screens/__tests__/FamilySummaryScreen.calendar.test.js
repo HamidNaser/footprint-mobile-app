@@ -957,11 +957,22 @@ describe('a day the book answers with an older one (R5)', () => {
 // ===========================================================================
 
 describe('the day cursor is a calendar day, not an instant (FR-013)', () => {
-  it('runs west of Greenwich, so the arithmetic below is really at risk', () => {
-    // `new Date('2026-03-31')` is UTC midnight, which is 30 March here -- and `before` would
-    // then be 31 March, asking for the day that is already on screen.
-    expect(new Date(2026, 2, 31).getTimezoneOffset()).toBeGreaterThan(0);
-  });
+  /**
+   * The hazard these two tests rule out: `new Date('2026-03-31')` is **UTC midnight**, so read
+   * back as local calendar parts it is 30 March anywhere west of Greenwich -- and `before`
+   * built from that instant would be 31 March, asking for the day already on screen, so ◄
+   * would never move.
+   *
+   * That hazard is only visible west of Greenwich, which is why there was an `it` here
+   * asserting `getTimezoneOffset() > 0`. It asserted a property of the machine, not of the
+   * product, and it necessarily failed in two of the three zones the runner exists to test
+   * (the offset is 0 in UTC and negative in `Pacific/Auckland`). The guarantee it was reaching
+   * for now lives where it belongs: `scripts/test-tz.mjs` runs this file in
+   * `America/Los_Angeles`, `UTC` and `Pacific/Auckland`, so the two tests below are always
+   * run from west of Greenwich as well as from the other side of it. **Run them with
+   * `node scripts/test-tz.mjs`** -- a single-zone `npm test` on a machine at or east of
+   * Greenwich cannot fail them, whatever the production code does.
+   */
 
   it('asks for 1 April when the day on screen is 31 March', async () => {
     serve([memory('mar-31', '2026-03-31', 900, { userId: 'u-huda' })]);
