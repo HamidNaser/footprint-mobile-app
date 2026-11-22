@@ -503,6 +503,14 @@ export default function PersonJournalScreen({ route, navigation }) {
    * A failed index says so and offers Try again. An index still being read says nothing: the tap
    * landed on a screen that has not arrived, which is self-evident, rather than on a control that
    * refused.
+   *
+   * ⚠ **Try again is `handleRefresh`, not `refresh`** (review fix round 1). `refresh` only bumps
+   * the hook's reload key, so the alert would close on to a page with nothing turning and no sign
+   * that a second read had begun -- which invites a reader to press it again. `handleRefresh` is
+   * the same call with `refreshPhase` set, so the pull-to-refresh control spins for it, and it is
+   * what `FamilySummaryScreen` has always passed here. On this screen the two differ by that and
+   * nothing else: unlike the family screen's, it re-reads no people -- the book's people come
+   * from the route, not the server -- so there is no extra request on this path.
    */
   const openCalendar = useCallback(() => {
     if (index) {
@@ -517,10 +525,10 @@ export default function PersonJournalScreen({ route, navigation }) {
         + 'Nothing has changed.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Try again', onPress: refresh },
+        { text: 'Try again', onPress: handleRefresh },
       ],
     );
-  }, [index, indexStatus, refresh]);
+  }, [index, indexStatus, handleRefresh]);
 
   /**
    * A day, a month or a year really chosen in the calendar.

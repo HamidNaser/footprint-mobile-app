@@ -852,6 +852,51 @@ describe('failures are never drawn as emptiness (FR-011)', () => {
     expect(sheetIsOpen(tree)).toBe(true);
     alert.mockRestore();
   });
+
+  /**
+   * Review fix round 1: **the alert's Try again turns the pull-to-refresh control**, exactly as
+   * `FamilySummaryScreen`'s does.
+   *
+   * The alert dismisses itself on the tap, so unless something on the page behind it moves, a
+   * reader who pressed Try again is looking at the same screen they pressed it on, with no sign
+   * that a second read is even happening -- and the obvious thing to do then is press it again.
+   * This screen wired the button to `refresh` directly, which only bumps the hook's reload key;
+   * `handleRefresh` is the same call with `refreshPhase` set, which is what the control spins
+   * from.
+   *
+   * The deferred marks are what makes this a real check: the re-read is caught in flight, so a
+   * control that never turned at all could not pass by being asserted after everything had
+   * settled.
+   */
+  it('turns the refresh control from the alert’s Try again, as the family screen does', async () => {
+    serve(BROTHER);
+    const tree = await mount(FAMILY_ROUTE);
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+    getCalendar.mockRejectedValue(new Error('no network'));
+    await pullToRefresh(tree);
+    await tapDate(tree);
+    expect(refreshControl(tree).refreshing).toBe(false);
+
+    const [, , buttons] = alert.mock.calls[0];
+    const tryAgain = buttons.find((button) => button.text === 'Try again');
+
+    const marks = deferred();
+    getCalendar.mockReturnValueOnce(marks.promise);
+    await act(async () => {
+      tryAgain.onPress();
+    });
+
+    expect(refreshControl(tree).refreshing).toBe(true);
+
+    await act(async () => {
+      marks.resolve({ authorIds: ['u-sami'], days: calendarRows(BROTHER) });
+    });
+    await settle();
+
+    expect(refreshControl(tree).refreshing).toBe(false);
+    alert.mockRestore();
+  });
 });
 
 // ===========================================================================
