@@ -22,6 +22,7 @@
 import React from 'react';
 import { act, create } from 'react-test-renderer';
 import { Text, TouchableOpacity } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { FacesRow } from '../FacesRow';
 
@@ -92,6 +93,24 @@ describe('every person once, in the given order (FR-010)', () => {
     const tree = render();
     expect(face(tree, 'karim')).toBeDefined();
   });
+
+  // De-duplicating a repeated id (two family-tree nodes linked to one account) is a later
+  // task's job (research R8/data-model, T010/T011), not this component's -- it only has to
+  // honour the count and order it is handed, repeats included.
+  it('renders a repeated id as two separate faces, in the given order', () => {
+    const withRepeat = [PEOPLE[0], PEOPLE[1], PEOPLE[0]]; // Huda, Karim, Huda again
+    const tree = render({ people: withRepeat });
+
+    const allFaces = tree.root
+      .findAllByType(TouchableOpacity)
+      .filter((node) => node.props.testID?.startsWith('faces-row-face-'));
+    expect(allFaces).toHaveLength(3);
+    expect(textsIn(tree.root).filter((t) => t === 'Huda' || t === 'Karim')).toEqual([
+      'Huda',
+      'Karim',
+      'Huda',
+    ]);
+  });
 });
 
 describe('dimming follows presentIds, and a dimmed face stays tappable (FR-010)', () => {
@@ -142,6 +161,19 @@ describe('a chosen face is visibly marked and announced (FR-016)', () => {
 
     expect(onToggle).toHaveBeenCalledWith('sami');
   });
+
+  // FR-016 double-barrels this requirement: visibly marked *and* announced. The case above
+  // covers the announcement (`accessibilityState.selected`); this one is the visible half --
+  // the checkmark badge is the one visual marking that cannot be mistaken for anything else
+  // already on screen (unlike the ring, which is a style on a container a snapshot-free
+  // assertion can't easily read), so it is the one asserted on directly.
+  it('draws the checkmark badge only on the chosen face, never on the rest', () => {
+    const tree = render({ chosenIds: ['sami'] });
+
+    expect(face(tree, 'sami').findAllByType(Ionicons)).toHaveLength(1);
+    expect(face(tree, 'sami').findAllByType(Ionicons)[0].props.name).toBe('checkmark');
+    expect(face(tree, 'huda').findAllByType(Ionicons)).toHaveLength(0);
+  });
 });
 
 describe('the row label (prototype, task brief)', () => {
@@ -157,6 +189,14 @@ describe('the row label (prototype, task brief)', () => {
 
     expect(textsIn(tree.root)).toContain('Showing Huda and Sami');
     expect(showEveryone(tree)).toBeDefined();
+  });
+
+  // The two-name join above is the brief's own pinned wording; three or more is this file's own
+  // reasonable choice (`joinNames`, `FacesRow.js`), left untested until now -- closing that gap.
+  it('reads "Showing Huda, Karim and Sami" with three chosen', () => {
+    const tree = render({ chosenIds: ['huda', 'karim', 'sami'] });
+
+    expect(textsIn(tree.root)).toContain('Showing Huda, Karim and Sami');
   });
 
   it('calls onShowEveryone when that action is pressed', () => {

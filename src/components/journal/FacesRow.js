@@ -92,7 +92,7 @@ export const FacesRow = ({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.row}
       >
-        {people.map((person) => {
+        {people.map((person, index) => {
           const chosen = chosenSet.has(person.id);
           // `presentIds === null` means "not known yet" (loading or failed) -- never dimmed.
           const dimmed = presentIds !== null && !presentIds.has(person.id);
@@ -107,7 +107,12 @@ export const FacesRow = ({
 
           return (
             <TouchableOpacity
-              key={person.id}
+              // De-duplicating a repeated id (two family-tree nodes linked to one account) is a
+              // later task's job (research R8/data-model, T010/T011) -- this component is only
+              // ever handed what it is given, repeats included, so the key cannot assume `id` is
+              // unique. `person.id` alone collided on a repeat (React's own "two children with
+              // the same key" warning, unsupported reconciliation), which the index rules out.
+              key={`${person.id}-${index}`}
               testID={`faces-row-face-${person.id}`}
               style={styles.face}
               onPress={() => onToggle?.(person.id)}
