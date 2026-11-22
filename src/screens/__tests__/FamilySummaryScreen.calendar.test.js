@@ -429,6 +429,33 @@ const barWords = (tree) => byTestID(tree, 'date-bar-period')
   .flatMap((node) => node.findAllByType(Text).map((t) => t.props.children))
   .filter((said) => typeof said === 'string');
 
+/**
+ * What a screen reader hears from the bar's middle: the period and its count as **one** phrase,
+ * rather than two unrelated fragments (T012, FR-014).
+ */
+const barSays = (tree) => {
+  const found = byTestID(tree, 'date-bar-period');
+  if (found.length !== 1) throw new Error(`expected one date bar, found ${found.length}`);
+  return found[0].props.accessibilityLabel;
+};
+
+/**
+ * One arrow as a screen reader meets it: what it is called -- which is what names the period it
+ * would step to -- and whether it is announced as unavailable, which is the whole of FR-014's
+ * end-of-the-book rule.
+ */
+const arrowSays = (tree, which) => {
+  const found = byTestID(tree, `date-bar-${which}`);
+  if (found.length !== 1) throw new Error(`expected one ${which} arrow, found ${found.length}`);
+  return {
+    label: found[0].props.accessibilityLabel,
+    disabled: found[0].props.accessibilityState.disabled,
+  };
+};
+
+/** The swipe container, which carries the other half of ◄ ► (FR-007). */
+const swipe = (tree) => tree.root.findByType(DateSwipeContainer);
+
 const tapDate = (tree) => tap(tree, 'date-bar-period');
 const tapNext = (tree) => tap(tree, 'date-bar-next');
 const tapPrevious = (tree) => tap(tree, 'date-bar-previous');
@@ -673,18 +700,17 @@ describe('User Story 2: the family book is pages, not one long scroll', () => {
 
   it('moves the same way on a swipe, and says when there is nothing later (FR-014)', async () => {
     const tree = await mount();
-    const swipe = () => tree.root.findByType(DateSwipeContainer);
 
-    expect(swipe().props.hasNext).toBe(false);
-    expect(swipe().props.hasPrevious).toBe(true);
+    expect(swipe(tree).props.hasNext).toBe(false);
+    expect(swipe(tree).props.hasPrevious).toBe(true);
 
     await act(async () => {
-      swipe().props.onPreviousDate();
+      swipe(tree).props.onPreviousDate();
     });
     await settle();
 
     expect(barWords(tree)).toContain('Thu, Mar 5');
-    expect(swipe().props.hasNext).toBe(true);
+    expect(swipe(tree).props.hasNext).toBe(true);
   });
 });
 
@@ -1259,5 +1285,151 @@ describe('a year list pins its month headings, and a pressed pin clears them (01
       expect.objectContaining({ index: 7 }),
     );
     warn.mockRestore();
+  });
+});
+
+// ===========================================================================
+// 019 T012 -- User Story 3: the page rules (FR-007, FR-014)
+// ===========================================================================
+
+/**
+ * The reader's own Journal tab's page rules, on the family book: next is always **later**, the
+ * book opens on its newest day, and ◄ ►, the swipe and the date bar move only to a day, a month
+ * or a year that **has** memories -- with each end of the book *announced* as unavailable rather
+ * than silently doing nothing (FR-014).
+ *
+ * Nothing here stands in for the stepping. The index is the real one, built by `calendarModel`
+ * from the very same list of memories every other case in this file is served from, and the hook
+ * is the real hook; what these cases pin is that the screen asks for the step, draws the period
+ * it lands on, and passes **both** ends on -- to the bar, where a screen reader meets them, and
+ * to the swipe container, which is the half of FR-007 a person meets with their thumb.
+ *
+ * ⚠ The step is **±1 and nothing else** (`usePeopleCalendar`'s own contract): the two underlying
+ * answers disagree about a bigger one, so no case here passes anything but the two arrows' own
+ * directions.
+ */
+describe('User Story 3: the page rules on the family book (FR-007, FR-014)', () => {
+  beforeEach(() => serve(THE_FAMILY));
+
+  const pickJanuary = async (tree) => {
+    await tapDate(tree);
+    await pickMonthInSheet(tree, '2026-01');
+  };
+
+  const pickYear = async (tree, year) => {
+    await tapDate(tree);
+    await tap(tree, 'calendar-view-year');
+    await tap(tree, `calendar-year-tile-${year}`);
+  };
+
+  it('opens on the newest day, with nothing later to reach (FR-007, FR-014)', async () => {
+    const tree = await mount();
+
+    expect(barWords(tree)).toEqual(['Tue, Mar 10']);
+
+    // ► is announced as unavailable, and the swipe is told the same thing, so a screen reader
+    // and a thumb cannot disagree about which end of the book this is.
+    expect(arrowSays(tree, 'next')).toEqual({ label: 'Next day', disabled: true });
+    expect(arrowSays(tree, 'previous')).toEqual({ label: 'Previous day', disabled: false });
+    expect(swipe(tree).props.hasNext).toBe(false);
+
+    // And a swipe forward from there does nothing at all -- no wrap, and no empty day.
+    await act(async () => {
+      swipe(tree).props.onNextDate();
+    });
+    await settle();
+
+    expect(barWords(tree)).toEqual(['Tue, Mar 10']);
+    expect(cardIds(tree)).toEqual(['huda-10', 'karim-10', 'lina-10']);
+  });
+
+  it('reaches the oldest day with ◄ and then says there is nothing earlier (FR-014)', async () => {
+    const tree = await mount();
+
+    await tapPrevious(tree);
+    expect(barWords(tree)).toEqual(['Thu, Mar 5']);
+    await tapPrevious(tree);
+
+    // 20 January, Lina's: every day in between holds nothing, and it is the oldest in the book.
+    expect(barWords(tree)).toEqual(['Tue, Jan 20']);
+    expect(cardIds(tree)).toEqual(['lina-jan']);
+    expect(arrowSays(tree, 'previous')).toEqual({ label: 'Previous day', disabled: true });
+    expect(arrowSays(tree, 'next')).toEqual({ label: 'Next day', disabled: false });
+    expect(swipe(tree).props.hasPrevious).toBe(false);
+
+    await act(async () => {
+      swipe(tree).props.onPreviousDate();
+    });
+    await settle();
+
+    expect(barWords(tree)).toEqual(['Tue, Jan 20']);
+    expect(cardIds(tree)).toEqual(['lina-jan']);
+  });
+
+  /** Scenario 2, on the household's own book. */
+  it('► shows the later month with any member’s memory, named and counted (scenario 2)', async () => {
+    const tree = await mount();
+
+    await pickJanuary(tree);
+    expect(barWords(tree)).toEqual(['January 2026', '1 memory']);
+    expect(cardIds(tree)).toEqual(['lina-jan']);
+
+    await tapNext(tree);
+
+    // February holds nothing. March is nobody's month in particular -- Karim's, Huda's and
+    // Lina's together -- and the step finds it from a month that was Lina's alone.
+    expect(barWords(tree)).toEqual(['March 2026', '4 memories']);
+    expect(cardIds(tree)).toEqual(['karim-05', 'huda-10', 'karim-10', 'lina-10']);
+    // The same two words, as one phrase, to a screen reader (FR-014).
+    expect(barSays(tree)).toBe('March 2026, 4 memories');
+    expect(arrowSays(tree, 'next')).toEqual({ label: 'Next month', disabled: true });
+  });
+
+  it('says there is nothing later on the newest month, nor earlier on the oldest (FR-014)', async () => {
+    const tree = await mount();
+
+    await pickMarch(tree);
+
+    expect(arrowSays(tree, 'next')).toEqual({ label: 'Next month', disabled: true });
+    expect(arrowSays(tree, 'previous')).toEqual({ label: 'Previous month', disabled: false });
+    expect(swipe(tree).props.hasNext).toBe(false);
+
+    await act(async () => {
+      swipe(tree).props.onNextDate();
+    });
+    await settle();
+    expect(barWords(tree)).toEqual(['March 2026', '4 memories']);
+
+    await tapPrevious(tree);
+
+    expect(barWords(tree)).toEqual(['January 2026', '1 memory']);
+    expect(arrowSays(tree, 'previous')).toEqual({ label: 'Previous month', disabled: true });
+    expect(swipe(tree).props.hasPrevious).toBe(false);
+
+    await act(async () => {
+      swipe(tree).props.onPreviousDate();
+    });
+    await settle();
+    expect(barWords(tree)).toEqual(['January 2026', '1 memory']);
+  });
+
+  it('names a picked year and its count, and ► skips the years with nothing in them (FR-007)', async () => {
+    // One older memory, two years back, so that a year step has an empty year to skip.
+    serve([...THE_FAMILY, memory('huda-2024', '2024-07-04', 100)]);
+    const tree = await mount();
+
+    await pickYear(tree, 2024);
+    expect(barWords(tree)).toEqual(['2024', '1 memory']);
+    expect(barSays(tree)).toBe('2024, 1 memory');
+    expect(arrowSays(tree, 'previous')).toEqual({ label: 'Previous year', disabled: true });
+    expect(arrowSays(tree, 'next')).toEqual({ label: 'Next year', disabled: false });
+
+    await tapNext(tree);
+
+    // 2025 holds nothing, so 2026 is the next year -- and every member's memories are counted
+    // in it, under their own month headings.
+    expect(barWords(tree)).toEqual(['2026', '5 memories']);
+    expect(monthHeadingCounts(tree)).toEqual({ 'January 2026': 1, 'March 2026': 4 });
+    expect(arrowSays(tree, 'next').disabled).toBe(true);
   });
 });
