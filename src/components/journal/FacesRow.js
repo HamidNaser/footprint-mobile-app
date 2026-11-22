@@ -40,6 +40,11 @@ import Avatar from '../Avatar';
 
 // The app's own established accent (`PRIMARY_COLOR` in FriendsScreen.js, FamilyScreen.js,
 // JournalScreen.js and others) -- reused here, not copied from the prototype's palette.
+//
+// ⚠ That goes for **every** value in this file's stylesheet, and did not at first: `nameDimmed`
+// carried `#b9aa8c`, which is the prototype's own `--paper-faded` and appears nowhere else in
+// this app. It is now the app's `opacity: 0.35` instead (review fix round 1). Nothing visual is
+// copied from the prototype; the prototype decides content, position and behaviour only.
 const PRIMARY_COLOR = '#4361ee';
 
 /** "Huda", "Huda and Sami", "Huda, Sami and Lina" -- the reader's own name joined with "and". */
@@ -213,8 +218,15 @@ const styles = StyleSheet.create({
     color: PRIMARY_COLOR,
     fontWeight: '700',
   },
+  // The same 0.35 the avatar above it is dimmed by, so the two halves of one face fade
+  // together -- the retired `DayRoster`'s own treatment, which dimmed the whole person block
+  // with one `opacity: 0.35` and left the name its ordinary grey. It replaces a hex value
+  // lifted from the prototype's stylesheet (review fix round 1); see the note on
+  // `PRIMARY_COLOR` above. Fading rather than recolouring also keeps a face that is **chosen
+  // and** dimmed blue, where the flat colour used to paint `nameChosen` out and lose the one
+  // mark that says the reader picked this person.
   nameDimmed: {
-    color: '#b9aa8c',
+    opacity: 0.35,
   },
 });
 
