@@ -113,6 +113,62 @@ describe('every person once, in the given order (FR-010)', () => {
   });
 });
 
+/**
+ * Review fix round 2. The caption built its names with `.map((p) => p.name)` and no guard, so a
+ * chosen person who arrived with no name put the literal word **"Showing undefined"** on screen.
+ *
+ * The fix cannot simply drop the nameless from the list, either: that leaves "Showing Huda" over
+ * a row narrowed to Huda *and somebody else*, or -- with one nameless person chosen and nobody
+ * else -- "Showing everyone" over a row narrowed to one. Both are affirmative claims about whose
+ * memories are on screen that are not true, which is the project's *Sharing fails closed* rule
+ * (`CLAUDE.md`): a partial audience is the one failure mode with no safe side, so the names are
+ * all of them or none of them.
+ *
+ * ⚠ **"Show everyone" must survive it.** It is the only way back to the whole book, and it used
+ * to be drawn from the same names -- so a nameless chooser would have taken the way out with it.
+ */
+describe('a chosen person who arrived with no name (review fix round 2)', () => {
+  /** The same book, with Karim's name missing -- everything else about him intact. */
+  const NAMELESS = [PEOPLE[0], { id: 'karim', avatarUrl: null }, PEOPLE[2]];
+
+  /** The row's caption: the one line that starts "Showing", never the "Show everyone" action. */
+  const caption = (tree) => textsIn(tree.root).find((said) => said.startsWith('Showing'));
+
+  it('never renders the word undefined, and never calls a narrowed row everyone', () => {
+    const tree = render({ people: NAMELESS, chosenIds: ['karim'] });
+
+    const said = caption(tree);
+    expect(said).toBeDefined();
+    expect(said).not.toContain('undefined');
+    expect(said).not.toContain('everyone');
+    // The way back to the whole book is still there.
+    expect(showEveryone(tree)).toBeDefined();
+  });
+
+  it('names nobody rather than some of them, when one of two chosen has no name', () => {
+    const tree = render({ people: NAMELESS, chosenIds: ['huda', 'karim'] });
+
+    const said = caption(tree);
+    expect(said).not.toContain('undefined');
+    expect(said).not.toContain('Huda');
+    expect(said).not.toContain('everyone');
+    expect(showEveryone(tree)).toBeDefined();
+  });
+
+  it('still says everyone on that same book while nobody is chosen', () => {
+    const tree = render({ people: NAMELESS, chosenIds: [] });
+
+    expect(caption(tree)).toBe('Showing everyone · tap a face to choose');
+    expect(showEveryone(tree)).toBeUndefined();
+  });
+
+  it('names them all as before when every chosen person has a name', () => {
+    const tree = render({ people: NAMELESS, chosenIds: ['huda', 'sami'] });
+
+    expect(caption(tree)).toBe('Showing Huda and Sami');
+  });
+});
+
 describe('dimming follows presentIds, and a dimmed face stays tappable (FR-010)', () => {
   it('dims a face absent from a present Set, and leaves the rest alone', () => {
     const tree = render({ presentIds: new Set(['huda', 'sami']) });

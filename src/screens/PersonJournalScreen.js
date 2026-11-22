@@ -418,6 +418,7 @@ export default function PersonJournalScreen({ route, navigation }) {
     bookEmpty,
     openFailed,
     emptyMessage,
+    hasChoice,
     chosenNamesText,
     refresh,
   } = usePeopleCalendar({
@@ -698,13 +699,22 @@ export default function PersonJournalScreen({ route, navigation }) {
    * row's own caption and the page's named message are joined too, so all three name the same
    * people in the same book order rather than in three slightly different ways.
    *
-   * ⚠ **Null on one person's journal**, which has no faces row, nothing to narrow and so nothing
-   * to say -- and the sheet then renders nothing at all, exactly as it does on the Journal tab.
-   * It is the same condition the faces row itself is drawn under.
+   * ⚠ **Nothing at all on one person's journal**, which has no faces row, nothing to narrow
+   * and so nothing to say -- and the sheet then renders nothing, exactly as it does on the
+   * Journal tab. It is the same condition the faces row itself is drawn under.
+   *
+   * ⚠ **"Everyone" is gated on `hasChoice`, never on the names being empty** (review fix
+   * round 2). The names come back empty for two different reasons -- nobody chosen, and a chosen
+   * person this book has no name for -- and round 1 read the second as the first, which put
+   * "Dots for: everyone in this book" over a calendar narrowed to one person. With a choice that
+   * cannot be named, the sheet is given **nothing** and draws nothing: silence is never false,
+   * and it is what `emptyMessage` already does for the same person.
    */
-  const dotsNote = isGroup
-    ? `Dots for: ${chosenNamesText || 'everyone in this book'}`
-    : undefined;
+  const dotsNote = !isGroup
+    ? undefined
+    : !hasChoice
+      ? 'Dots for: everyone in this book'
+      : chosenNamesText ? `Dots for: ${chosenNamesText}` : undefined;
 
   /** How a period with nothing in it is worded, when nobody is chosen to name instead. */
   const periodPhrase = picked?.kind === 'month'

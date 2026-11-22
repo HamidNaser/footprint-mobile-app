@@ -860,21 +860,34 @@ export function usePeopleCalendar({
     openFailed,
     emptyMessage,
     /**
+     * **Whether anybody is chosen at all** -- over the book's own people, so a chosen member who
+     * has left is not counted (see `chosenIds`). It is the very predicate that decides what the
+     * calendar marks (`coveredIds`), which is why a screen wording a sentence about *whose* dots
+     * these are must read this and not the length of the text below.
+     */
+    hasChoice,
+    /**
      * The chosen people's names, joined the way this hook and `FacesRow` both join them --
-     * "Mother", "Mother and Akram", "Mother, Akram and Father" -- and `''` with nobody chosen.
+     * "Mother", "Mother and Akram", "Mother, Akram and Father".
      *
      * It exists so a screen can name the choice **somewhere this hook does not word for it**:
      * 019's review fix round 1 needed the calendar sheet to say whose dots it is drawing, and
      * the alternative was a fourth copy of `joinNames` in the screens. The hook answers the
      * names; the screen writes the sentence.
      *
-     * ⚠ **Empty means "nobody is chosen"**, which is the only way it is empty in practice: the
-     * ids are already filtered to people in the book, and both screens build a `BookPerson`
-     * from a source that carries a name. A chosen person with no name at all would drop out of
-     * the join -- exactly as `emptyMessage` goes silent for them -- so a screen that words a
-     * fallback from this is wording it for the same case that already has one.
+     * ⚠ **Empty is not "nobody is chosen" -- read `hasChoice` for that** (review fix round 2).
+     * It is empty in two quite different cases: nobody chosen, and **a chosen person this book
+     * has no name for**, where naming the rest would claim an audience smaller than the one on
+     * screen. All of the names or none of them, which is the project's *Sharing fails closed*
+     * rule applied to a sentence: a partial audience is the one failure mode with no safe side.
+     *
+     * ⚠ A caller must **not** word a fallback from emptiness alone. Round 1 did, by analogy with
+     * `emptyMessage`, and the analogy does not hold: `emptyMessage` answers `null` and goes
+     * *silent* for a nameless chooser, while the sheet's note fell through to a positive
+     * sentence -- "Dots for: everyone in this book" over a calendar narrowed to one person.
+     * `hasChoice` tells the two apart; an empty text with `hasChoice` true means **say nothing**.
      */
-    chosenNamesText: joinNames(chosenNames),
+    chosenNamesText: chosenNames.length === chosenIds.length ? joinNames(chosenNames) : '',
     refresh,
   };
 }

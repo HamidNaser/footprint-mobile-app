@@ -378,6 +378,7 @@ export default function FamilySummaryScreen({ navigation, route }) {
     bookEmpty,
     openFailed,
     emptyMessage,
+    hasChoice,
     chosenNamesText,
     refresh,
   } = usePeopleCalendar({
@@ -633,8 +634,17 @@ export default function FamilySummaryScreen({ navigation, route }) {
    *
    * The family book is always a group book, so there is always a line to draw -- which is why
    * this is unconditional here and `isGroup` on `PersonJournalScreen`.
+   *
+   * ⚠ **"Everyone" is gated on `hasChoice`, never on the names being empty** (review fix
+   * round 2). The names come back empty for two different reasons -- nobody chosen, and a chosen
+   * person this household has no name for -- and round 1 read the second as the first, which put
+   * "Dots for: everyone in this book" over a calendar narrowed to one person. With a choice that
+   * cannot be named, the sheet is given **nothing** and draws nothing: silence is never false,
+   * and it is what `emptyMessage` already does for the same person.
    */
-  const dotsNote = `Dots for: ${chosenNamesText || 'everyone in this book'}`;
+  const dotsNote = !hasChoice
+    ? 'Dots for: everyone in this book'
+    : chosenNamesText ? `Dots for: ${chosenNamesText}` : undefined;
 
   /**
    * What stands in place of the list, in the order the fail-closed rule requires.

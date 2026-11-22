@@ -2462,6 +2462,66 @@ describe('User Story 4: choosing whose memories a group book shows', () => {
       expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
     });
 
+    /**
+     * Review fix round 2: **the fallback is gated on whether a choice exists, not on whether it
+     * has words.**
+     *
+     * The note fell back to "everyone in this book" whenever the joined names came back empty --
+     * and they come back empty for two quite different reasons. Nobody chosen is one. A chosen
+     * person who arrived with no name is the other, and there the sheet would have said "Dots
+     * for: everyone in this book" over a grid narrowed to that one person: the exact affirmative
+     * false claim this note was added to prevent.
+     *
+     * Saying nothing is the answer, not a different sentence. It is `emptyMessage`'s own posture
+     * for the same case (`if (!names) return null`), and the sheet already draws nothing for a
+     * note it is not given, which `CalendarSheet.test.js` pins.
+     */
+    const NAMELESS_GROUP_ROUTE = {
+      persons: [
+        { id: 'u-huda', name: 'Huda', avatar: 'huda.png' },
+        { id: 'u-karim', avatar: 'karim.png' }, // arrived with no name at all
+        { id: 'u-lina', name: 'Lina', avatar: 'lina.png' },
+      ],
+      isGroup: true,
+      groupName: 'Work Friends',
+      sourceType: 'friend',
+    };
+
+    it('says nothing at all when the one chosen person has no name', async () => {
+      const tree = await mount(NAMELESS_GROUP_ROUTE);
+      await tapFace(tree, 'u-karim');
+
+      await tapDate(tree);
+
+      expect(sheetIsOpen(tree)).toBe(true);
+      expect(sheet(tree).props.note).toBeUndefined();
+      expect(saysSomething(tree, 'Dots for')).toBe(false);
+      // The two ways it could have gone wrong, named rather than implied.
+      expect(saysSomething(tree, 'everyone in this book')).toBe(false);
+      expect(saysSomething(tree, 'undefined')).toBe(false);
+    });
+
+    it('names nobody rather than some of them, when one of two chosen has no name', async () => {
+      const tree = await mount(NAMELESS_GROUP_ROUTE);
+      await tapFace(tree, 'u-huda');
+      await tapFace(tree, 'u-karim');
+
+      await tapDate(tree);
+
+      expect(sheet(tree).props.note).toBeUndefined();
+      expect(saysSomething(tree, 'Dots for: Huda')).toBe(false);
+      expect(saysSomething(tree, 'everyone in this book')).toBe(false);
+    });
+
+    it('still says everyone in this book on that same book while nobody is chosen', async () => {
+      const tree = await mount(NAMELESS_GROUP_ROUTE);
+
+      await tapDate(tree);
+
+      // So the two cases above are the gate working, not the note having quietly gone away.
+      expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
+    });
+
     it('says nothing of the kind on one person’s journal, which has no faces row', async () => {
       serve(BROTHER);
       const tree = await mount(FAMILY_ROUTE);

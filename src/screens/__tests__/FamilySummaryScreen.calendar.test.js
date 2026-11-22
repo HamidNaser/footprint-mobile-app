@@ -1738,6 +1738,37 @@ describe('User Story 4: choosing whose memories the family book shows', () => {
       await showEveryone(tree);
       expect(sheet(tree).props.note).toBe('Dots for: everyone in this book');
     });
+
+    /**
+     * Review fix round 2: **the fallback is gated on whether a choice exists, not on whether it
+     * has words.**
+     *
+     * The note fell back to "everyone in this book" whenever the joined names came back empty --
+     * and they come back empty for two quite different reasons. Nobody chosen is one. A relative
+     * the household has no name for is the other, and there the sheet would have said "Dots for:
+     * everyone in this book" over a calendar narrowed to that one person: the exact affirmative
+     * false claim this note was added to prevent.
+     *
+     * Saying nothing is the answer rather than a different sentence -- `emptyMessage`'s own
+     * posture for the same person, and the sheet draws nothing for a note it is not given.
+     */
+    it('says nothing at all when the chosen relative has no name', async () => {
+      serve(THE_BOOK, [
+        { memberId: 'm-huda', userId: 'u-huda', relation: 'self', name: 'Huda', avatarUrl: 'huda.png', hasAccount: true },
+        { memberId: 'm-karim', userId: 'u-karim', relation: 'spouse', avatarUrl: 'karim.png', hasAccount: true },
+        { memberId: 'm-lina', userId: 'u-lina', relation: 'child', name: 'Lina', avatarUrl: 'lina.png', hasAccount: true },
+      ]);
+      const tree = await mount();
+      await tapFace(tree, 'u-karim');
+
+      await tapDate(tree);
+
+      expect(sheetIsOpen(tree)).toBe(true);
+      expect(sheet(tree).props.note).toBeUndefined();
+      expect(saysSomething(tree, 'Dots for')).toBe(false);
+      expect(saysSomething(tree, 'everyone in this book')).toBe(false);
+      expect(saysSomething(tree, 'undefined')).toBe(false);
+    });
   });
 
   it('shows everyone again from the row’s own Show everyone (FR-016)', async () => {

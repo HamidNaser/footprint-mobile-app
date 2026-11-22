@@ -25,6 +25,11 @@
  * three or more names ("A, B and C") is this file's own reasonable choice; the brief only pins
  * the two- and zero-chosen cases.
  *
+ * There is a third wording the brief does not pin, for a state it did not foresee: **"Showing
+ * the faces you chose"**, when somebody is chosen and this row has no name for one of them
+ * (review fix round 2). See the note on `chosen` and `chosenNames` below for why the names are
+ * all of them or none of them.
+ *
  * ## Why this is its own component (R8)
  *
  * FR-010 and FR-016 need a face that **dims rather than disables**, carries a "chosen" state,
@@ -64,23 +69,48 @@ export const FacesRow = ({
 }) => {
   const chosenSet = useMemo(() => new Set(chosenIds), [chosenIds]);
 
-  const chosenNames = useMemo(
-    () => (people || []).filter((p) => chosenSet.has(p.id)).map((p) => p.name),
+  /**
+   * The chosen people themselves, and their names **only when every one of them has one**
+   * (review fix round 2).
+   *
+   * The two are counted separately because they answer different questions, and reading the
+   * second for the first is what the caption used to do. A person can reach this row with no
+   * `name` at all -- neither screen gives `BookPerson.name` a fallback -- and the caption then
+   * read `Showing undefined`, or, once the nameless were dropped from the list, `Showing Huda`
+   * over a row narrowed to Huda *and somebody else*, or `Showing everyone` over a row narrowed
+   * to one person. All three are claims about whose memories are on screen that are not true.
+   *
+   * So: all of the names or none of them, which is the project's *Sharing fails closed* rule
+   * (`CLAUDE.md`) applied to a sentence -- a partial audience is the one failure mode with no
+   * safe side. `chosen.length` still says a choice exists, which is what keeps the caption
+   * honest and, more importantly, keeps "Show everyone" on screen: it is the only way back to
+   * the whole book, and drawing it from the names would have taken it away with them.
+   */
+  const chosen = useMemo(
+    () => (people || []).filter((p) => chosenSet.has(p.id)),
     [people, chosenSet],
   );
+
+  const chosenNames = useMemo(() => {
+    const names = chosen.map((p) => p.name).filter(Boolean);
+    return names.length === chosen.length ? names : [];
+  }, [chosen]);
 
   if (!people || people.length === 0) return null;
 
   const label =
-    chosenNames.length > 0
-      ? `Showing ${joinNames(chosenNames)}`
-      : 'Showing everyone · tap a face to choose';
+    chosen.length === 0
+      ? 'Showing everyone · tap a face to choose'
+      : chosenNames.length > 0
+        ? `Showing ${joinNames(chosenNames)}`
+        // A choice that cannot be named: true, names nobody, and still says the row is narrowed.
+        : 'Showing the faces you chose';
 
   return (
     <View style={styles.container}>
       <View style={styles.labelRow}>
         <Text style={styles.label}>{label}</Text>
-        {chosenNames.length > 0 ? (
+        {chosen.length > 0 ? (
           <TouchableOpacity
             testID="faces-row-show-everyone"
             onPress={onShowEveryone}
