@@ -23,7 +23,8 @@
  *   and reads as "they have recorded nothing" (research R2). The same rule, per person, builds a
  *   group book.
  * - **A page is read for everyone in the book**, never for a subset: `loadDay` is bound to
- *   `bookIds` (research R7). T013's choice of faces filters on the phone.
+ *   `bookIds` (research R7). The chosen faces filter it on the phone, and only the calendar's
+ *   index is asked for again (see *Choosing faces* below).
  *
  * ## What a reader must never be shown
  *
@@ -57,8 +58,28 @@
  * or year list oldest first (016 FR-005) -- which is why `compareInDay` is passed to the hook on
  * one of the two books and not the other.
  *
- * **Choosing a face is T013's**, not this screen's yet: the row is drawn with nobody chosen, so
- * the book shows everyone, and the hook is passed no `chosen`.
+ * ## Choosing faces (FR-016, FR-017, FR-018)
+ *
+ * Tapping a face shows only that person's memories; tapping it again un-chooses it, and with
+ * nobody chosen the book shows everyone. The chosen ids are this screen's own state, and
+ * everything that follows from them is the hook's: the list is filtered on the phone, and only
+ * the **index** is asked for again, so the calendar's marks, faded days, counts, the date bar's
+ * count and where ◄ ► step all cover the chosen people (research R7, FR-017). A page is still
+ * read for everyone in the book, which is what lets a face be dimmed by what its person has in
+ * the period whether or not they are chosen (FR-010).
+ *
+ * - **The choice lasts as long as the book is open** (FR-018). It is plain screen state, so
+ *   going back out of this screen forgets it, while a memory or a photo opened *on top* and a
+ *   pull to refresh -- neither of which unmounts the screen -- keep it.
+ * - **The ids are kept in book order**, not in the order they were tapped, so the row's caption
+ *   ("Showing Huda and Karim") and the page's named message ("Nothing from Huda and Karim on
+ *   this day") name the same people in the same order.
+ * - **Two ways of having nothing to show, which must never be confused.** `bookEmpty` -- nobody
+ *   in the book has anything -- has no calendar and no faces, and speaks of the whole book.
+ *   `choiceEmpty` -- the book has memories but the chosen people have none at all -- keeps the
+ *   faces, opens the sheet with every day faded and says "Nothing from <names> yet", which the
+ *   hook words. Telling a reader the first when the second is true says nobody here has written
+ *   anything when they have only picked a face.
  */
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
@@ -121,6 +142,9 @@ const MAX_BOOK_PEOPLE = 50;
 
 /** Route params that are not there at all, as one object, so `useMemo` is not defeated by `{}`. */
 const NO_PARAMS = {};
+
+/** Nobody chosen, as one array, so an empty choice never changes identity between renders. */
+const NOBODY_CHOSEN = [];
 
 /**
  * The id of one person in a book, by the route's own rule (research R2).
@@ -288,6 +312,36 @@ export default function PersonJournalScreen({ route, navigation }) {
   const bookIds = useMemo(() => bookPeople.map((p) => p.id), [bookPeople]);
 
   /**
+   * The faces the reader has chosen (FR-016), empty meaning everyone.
+   *
+   * Plain screen state, which is the whole of FR-018: it lives exactly as long as the book is
+   * open. Going back out of this screen unmounts it and forgets the choice; a memory or a photo
+   * opened on top, and a pull to refresh, leave the screen mounted and so keep it.
+   */
+  const [chosenIds, setChosenIds] = useState(NOBODY_CHOSEN);
+
+  /**
+   * Choose a face, or un-choose one already chosen (FR-016). A dimmed face toggles like any
+   * other: choosing does not care whether somebody has anything in the period on screen.
+   *
+   * The answer is rebuilt in **book order** rather than appended in tap order, so the row's
+   * caption and the page's named message list the same people the same way round. With nobody
+   * left chosen it is the one shared empty array, so the identity of "everyone" never moves.
+   */
+  const toggleFace = useCallback((id) => {
+    setChosenIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      if (next.size === 0) return NOBODY_CHOSEN;
+      return bookPeople.filter((person) => next.has(person.id)).map((person) => person.id);
+    });
+  }, [bookPeople]);
+
+  /** The row's own "Show everyone": the book shows everyone again (FR-016). */
+  const showEveryone = useCallback(() => setChosenIds(NOBODY_CHOSEN), []);
+
+  /**
    * One civil day of this book, for **everyone** in it (research R7): the month call and the
    * year call for that one day, which is every precision the Journal tab would show there
    * (research R5).
@@ -356,6 +410,9 @@ export default function PersonJournalScreen({ route, navigation }) {
     refresh,
   } = usePeopleCalendar({
     people: bookPeople,
+    // The chosen people (FR-016). Only the index is asked again for them: the page is read for
+    // everyone in the book and the choice filters it on the phone (research R7, FR-017).
+    chosen: chosenIds,
     loadDay,
     // Household order on a head-card household, the Journal tab's own order everywhere else
     // (FR-009). Both halves go together: `dayOrder` orders the day, `compareInDay` the days of a
@@ -640,11 +697,16 @@ export default function PersonJournalScreen({ route, navigation }) {
       );
     }
     /*
-     * The period on screen. `emptyMessage` names the chosen people when some are chosen
-     * ("Nothing from Mother on this day", T013); with nobody chosen a period is normally never
-     * empty, because ◄ ► and the sheet's faded days only ever land on periods that have
-     * memories -- so this last line is for a period emptied since the index was read, and it
-     * says only what is true of the period rather than of the book.
+     * The period on screen. `emptyMessage` names the chosen people when some are chosen --
+     * "Nothing from Huda on this day" for a period of theirs that is empty, and "Nothing from
+     * Huda yet" when they have nothing in the whole book (`choiceEmpty`). That second one is
+     * **not** `bookEmpty` above: the faces stay and the calendar still opens, because the reader
+     * has only picked a face, and telling them nobody here has shared anything would be false.
+     *
+     * With nobody chosen a period is normally never empty, because ◄ ► and the sheet's faded
+     * days only ever land on periods that have memories -- so this last line is then for a
+     * period emptied since the index was read, and it says only what is true of the period
+     * rather than of the book.
      */
     return <NothingToRead message={emptyMessage || `No memories ${periodPhrase}`} />;
   };
@@ -692,13 +754,21 @@ export default function PersonJournalScreen({ route, navigation }) {
         (`bookEmpty` -- no calendar and no faces), the one still opening, and the one whose marks
         could not be read, where the whole page is a failure message.
 
-        Nobody is chosen yet, so the book shows everyone and a tap does nothing; choosing is
-        T013's, and `chosenIds` and `onToggle` arrive with it. `presentIds` comes straight from
-        the hook -- it is null while the period is being read and after it failed, which is what
-        dims nobody then.
+        ⚠ **It stays when the chosen people have nothing** (`choiceEmpty`), which is the one
+        state that looks like an empty book and is not: the row is how the reader changes a
+        choice, and taking it away would leave them with no way back to everyone.
+
+        `presentIds` comes straight from the hook -- it is null while the period is being read
+        and after it failed, which is what dims nobody then.
       */}
       {isGroup && hasPeriod && (
-        <FacesRow people={bookPeople} presentIds={presentIds} />
+        <FacesRow
+          people={bookPeople}
+          presentIds={presentIds}
+          chosenIds={chosenIds}
+          onToggle={toggleFace}
+          onShowEveryone={showEveryone}
+        />
       )}
 
       {/* Content */}

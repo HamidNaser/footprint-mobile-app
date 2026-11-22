@@ -48,10 +48,30 @@
  * relative's own journal theme (015 FR-007) -- that waits on cross-platform theme persistence,
  * which does not exist on either client yet.
  *
- * **Choosing a face is T013's**, not this screen's yet: the row is drawn with nobody chosen, so
- * the book shows everyone. The chosen ids are held here already, because a refresh has to drop
- * anybody who has left the household (spec edge case "Someone joins or leaves"), and that rule
- * belongs with the household read rather than with the wiring that will set them.
+ * ## Choosing faces (FR-016, FR-017, FR-018)
+ *
+ * Tapping a face shows only that person's memories; tapping it again un-chooses it, and with
+ * nobody chosen the book shows everyone. The chosen ids are this screen's own state, and
+ * everything that follows from them is the hook's: the list is filtered on the phone, and only
+ * the **index** is asked for again, so the calendar's marks, faded days, counts, the date bar's
+ * count and where ◄ ► step all cover the chosen people (research R7, FR-017). The page is still
+ * `/journal/book` for the whole household, which is what lets a face be dimmed by what its
+ * person has in the period whether or not they are chosen (FR-010).
+ *
+ * - **The choice lasts as long as the book is open** (FR-018). It is plain screen state, so
+ *   going back out of this screen forgets it, while a pull to refresh -- which does not unmount
+ *   the screen -- keeps it.
+ * - **A chosen member who has left the household is dropped** by the refresh that re-reads it
+ *   (spec edge case "Someone joins or leaves"), so somebody who comes back later is not quietly
+ *   chosen again, and with nobody left chosen the book reads as everyone.
+ * - **The ids are kept in household order**, not in the order they were tapped, so the row's
+ *   caption ("Showing Huda and Karim") and the page's named message name the same people the
+ *   same way round.
+ * - **Two ways of having nothing to show, which must never be confused.** `bookEmpty` -- nobody
+ *   in the family has anything -- has no calendar and no faces, and keeps today's "Nobody in
+ *   your family has recorded anything yet." `choiceEmpty` -- the family has memories but the
+ *   chosen people have none at all -- keeps the faces, opens the sheet with every day faded and
+ *   says "Nothing from <names> yet", which the hook words.
  */
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
@@ -170,9 +190,11 @@ export default function FamilySummaryScreen({ navigation, route }) {
   const [householdReading, setHouseholdReading] = useState(true);
 
   /**
-   * The chosen faces (FR-016). **Nothing sets them yet** -- choosing is T013's -- but they are
-   * held here because the refresh below has to drop anybody who has left the household, and that
-   * rule belongs beside the household read rather than beside the wiring that will set them.
+   * The faces the reader has chosen (FR-016), empty meaning everyone.
+   *
+   * Plain screen state, which is the whole of FR-018: it lives exactly as long as the book is
+   * open. Going back out of this screen unmounts it and forgets the choice; a pull to refresh
+   * leaves the screen mounted and so keeps it.
    */
   const [chosenIds, setChosenIds] = useState(NOBODY_CHOSEN);
 
@@ -204,12 +226,25 @@ export default function FamilySummaryScreen({ navigation, route }) {
       setHousehold(members);
       setHouseholdStatus('ready');
 
-      // Somebody who has left is no longer somebody to filter to (spec edge case "Someone joins
-      // or leaves"), and with nobody left chosen the book reads as everyone again.
+      /*
+       * Somebody who has left is no longer somebody to filter to (spec edge case "Someone joins
+       * or leaves"), and with nobody left chosen the book reads as everyone again.
+       *
+       * ⚠ **It matters when they come back.** While they are gone, a choice that still held
+       * their id looks identical -- `usePeopleCalendar` ignores an id that is not in the book,
+       * and `FacesRow` names only the people it draws. Dropping it is what stops them being
+       * quietly chosen again on rejoining, by no act of the reader's.
+       *
+       * The previous array is kept when nothing has changed, so an ordinary refresh does not
+       * hand the hook and the row a new identity for the same choice.
+       */
       const stillHere = new Set(members.map((member) => member.userId).filter(Boolean));
-      setChosenIds((previous) => (previous.length === 0
-        ? previous
-        : previous.filter((id) => stillHere.has(id))));
+      setChosenIds((previous) => {
+        if (previous.length === 0) return previous;
+        const kept = previous.filter((id) => stillHere.has(id));
+        if (kept.length === previous.length) return previous;
+        return kept.length === 0 ? NOBODY_CHOSEN : kept;
+      });
     } catch (error) {
       if (myEpoch !== epochRef.current) return;
       console.warn('[FamilySummaryScreen] failed to read the household:', error.message);
@@ -249,6 +284,27 @@ export default function FamilySummaryScreen({ navigation, route }) {
 
     return covered.slice(0, MAX_BOOK_PEOPLE);
   }, [household]);
+
+  /**
+   * Choose a face, or un-choose one already chosen (FR-016). A dimmed face toggles like any
+   * other: choosing does not care whether somebody has anything in the period on screen.
+   *
+   * The answer is rebuilt in **household order** rather than appended in tap order, so the row's
+   * caption and the page's named message list the same people the same way round. With nobody
+   * left chosen it is the one shared empty array, so the identity of "everyone" never moves.
+   */
+  const toggleFace = useCallback((id) => {
+    setChosenIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      if (next.size === 0) return NOBODY_CHOSEN;
+      return people.filter((person) => next.has(person.id)).map((person) => person.id);
+    });
+  }, [people]);
+
+  /** The row's own "Show everyone": the book shows everyone again (FR-016). */
+  const showEveryone = useCallback(() => setChosenIds(NOBODY_CHOSEN), []);
 
   /**
    * One civil day of the family book: `/journal/book` for that day alone (R5).
@@ -590,11 +646,16 @@ export default function FamilySummaryScreen({ navigation, route }) {
       );
     }
     /*
-     * The period on screen. `emptyMessage` names the chosen people once some are chosen
-     * ("Nothing from Karim on this day", T013); with nobody chosen a period is normally never
-     * empty, because ◄ ► and the sheet's faded days only ever land on periods that have
-     * memories -- so this last line is for a period emptied since the marks were read, and it
-     * says only what is true of the period rather than of the family.
+     * The period on screen. `emptyMessage` names the chosen people once some are chosen --
+     * "Nothing from Karim on this day" for a period of theirs that is empty, and "Nothing from
+     * Karim yet" when they have nothing in the whole book (`choiceEmpty`). That second one is
+     * **not** `bookEmpty` above: the faces stay and the calendar still opens, because the reader
+     * has only picked a face, and telling them the family has recorded nothing would be false.
+     *
+     * With nobody chosen a period is normally never empty, because ◄ ► and the sheet's faded
+     * days only ever land on periods that have memories -- so this last line is then for a
+     * period emptied since the marks were read, and it says only what is true of the period
+     * rather than of the family.
      */
     return <NothingToRead message={emptyMessage || `No memories ${periodPhrase}`} />;
   };
@@ -660,12 +721,21 @@ export default function FamilySummaryScreen({ navigation, route }) {
         the book with nothing in it (no calendar and no faces), and the household or marks that
         could not be read, where the whole page is a failure message.
 
-        Nobody is chosen yet, so the book shows everyone and a tap does nothing; `onToggle` and
-        `onShowEveryone` arrive with T013. `presentIds` comes straight from the hook -- it is null
-        while the period is being read and after it failed, which is what dims nobody then.
+        ⚠ **It stays when the chosen people have nothing** (`choiceEmpty`), which is the one
+        state that looks like an empty book and is not: the row is how the reader changes a
+        choice, and taking it away would leave them with no way back to everyone.
+
+        `presentIds` comes straight from the hook -- it is null while the period is being read
+        and after it failed, which is what dims nobody then.
       */}
       {hasPeriod && (
-        <FacesRow people={people} presentIds={presentIds} chosenIds={chosenIds} />
+        <FacesRow
+          people={people}
+          presentIds={presentIds}
+          chosenIds={chosenIds}
+          onToggle={toggleFace}
+          onShowEveryone={showEveryone}
+        />
       )}
 
       <DateSwipeContainer
