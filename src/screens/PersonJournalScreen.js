@@ -41,9 +41,24 @@
  *   holds for the **pull-to-refresh control** as much as for the page, which is the one place it
  *   was missed (fix round 1, Important 1): a control that waited on that page spun for ever.
  *
- * The faces row, household order and choosing faces belong to later tasks (T010, T013); this
- * screen passes the hook no `chosen` and no `compareInDay` yet, so every book reads a single day
- * newest first (016 FR-004) and a month or year oldest first (016 FR-005).
+ * ## Group mode (FR-002, FR-009, FR-010)
+ *
+ * A friend group's book and a household opened from the family tree's head card show **every**
+ * person they cover as a row of faces, directly under the date bar -- the bar is the page's first
+ * row and the faces the second -- on a day, a month and a year alike. A face whose person has
+ * nothing in the period on screen is dimmed, and stays tappable; nothing is dimmed while that
+ * period is being read or after it failed, so "could not load" is never drawn as "recorded
+ * nothing" (FR-010).
+ *
+ * A **head-card household reads in household order** (`bookKind: 'household'`): a day, and each
+ * day of a month or year list, runs down the household in the order its members are listed, with
+ * created time breaking a tie between one person's memories (FR-009, research R6). A friend group
+ * has no such order and keeps the Journal tab's own -- a day newest first (016 FR-004), a month
+ * or year list oldest first (016 FR-005) -- which is why `compareInDay` is passed to the hook on
+ * one of the two books and not the other.
+ *
+ * **Choosing a face is T013's**, not this screen's yet: the row is drawn with nobody chosen, so
+ * the book shows everyone, and the hook is passed no `chosen`.
  */
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
@@ -74,6 +89,7 @@ import {
   CalendarCoils,
   DateSwipeContainer,
   EntryGalleryModal,
+  FacesRow,
   FullScreenMediaViewer,
   JournalDateBar,
 } from '../components/journal';
@@ -209,7 +225,19 @@ export default function PersonJournalScreen({ route, navigation }) {
     persons,     // Group: array of persons
     isGroup,     // Boolean: viewing a group?
     groupName,   // Group name if viewing a group
+    bookKind,    // 'household' for a household opened from the family tree's head card (R2)
   } = params;
+
+  /**
+   * A household opened from the family tree's **head card**, as against a friend group.
+   *
+   * It is the one thing that tells the two group books apart here, and the whole of what it
+   * changes is the order: the same family must read the same way whichever card opened it
+   * (owner, 2026-11-21; spec FR-009). The route says so itself -- the screen cannot infer it
+   * from the people, because a friend group's persons and a household's look alike once their
+   * ids are resolved.
+   */
+  const isHousehold = isGroup === true && bookKind === 'household';
 
   // Gallery modal state
   const [showEntryGallery, setShowEntryGallery] = useState(false);
@@ -269,6 +297,39 @@ export default function PersonJournalScreen({ route, navigation }) {
     [accessToken, bookIds],
   );
 
+  /** Where each person stands in the household, which is the order the route listed them in. */
+  const positionInBook = useMemo(() => {
+    const at = new Map();
+    bookPeople.forEach((p, position) => at.set(p.id, position));
+    return at;
+  }, [bookPeople]);
+
+  /**
+   * Household order for the memories of one day (FR-009, research R6): position in the household
+   * first, then created time between one person's own memories.
+   *
+   * It orders a **single day** (through the hook's `dayOrder`) and each day of a month or year
+   * list (through `buildRows`), which is what makes the two agree -- 015 FR-009's rule, and the
+   * reason the comparator is one function rather than a sort in each place.
+   *
+   * ⚠ **Memoised deliberately.** `buildRows` cannot key on anything but this function's own
+   * identity, so an inline arrow would rebuild every row of a 300-memory month on every render
+   * (the hook's JSDoc calls it the one input it cannot protect a caller from).
+   *
+   * A memory whose author is not in the book sorts last rather than first: nothing should
+   * normally be there at all -- the page is fetched for the book's own people -- and last is the
+   * answer that cannot push a real member's memory down the day.
+   */
+  const compareInHousehold = useCallback((a, b) => {
+    // One past the last member, so anybody unplaced sorts after all of them.
+    const unplaced = positionInBook.size;
+    const first = positionInBook.has(a?.userId) ? positionInBook.get(a.userId) : unplaced;
+    const second = positionInBook.has(b?.userId) ? positionInBook.get(b.userId) : unplaced;
+
+    if (first !== second) return first - second;
+    return (a?.createdAt ?? 0) - (b?.createdAt ?? 0);
+  }, [positionInBook]);
+
   const {
     index,
     indexStatus,
@@ -285,6 +346,7 @@ export default function PersonJournalScreen({ route, navigation }) {
     step,
     hasPrevious,
     hasNext,
+    presentIds,
     pageStatus,
     pageError,
     loading,
@@ -292,7 +354,15 @@ export default function PersonJournalScreen({ route, navigation }) {
     openFailed,
     emptyMessage,
     refresh,
-  } = usePeopleCalendar({ people: bookPeople, loadDay, dayOrder: 'newestFirst' });
+  } = usePeopleCalendar({
+    people: bookPeople,
+    loadDay,
+    // Household order on a head-card household, the Journal tab's own order everywhere else
+    // (FR-009). Both halves go together: `dayOrder` orders the day, `compareInDay` the days of a
+    // month or year list, and a book given one without the other would read two ways.
+    dayOrder: isHousehold ? 'compareInDay' : 'newestFirst',
+    compareInDay: isHousehold ? compareInHousehold : undefined,
+  });
 
   /** Whether there is a period to name at all. With none, there is no calendar to offer. */
   const hasPeriod = picked !== null || selectedDay !== null;
@@ -610,6 +680,25 @@ export default function PersonJournalScreen({ route, navigation }) {
           onNext={goToNextDate}
           onDatePress={openCalendar}
         />
+      )}
+
+      {/*
+        The page's **second row** on a group book (FR-010): every person the book covers, once,
+        in book order, on a day, a month and a year alike -- it is outside the list, so it stays
+        put whatever the list is showing.
+
+        It is drawn under the same condition as the bar above it, and for the same reason: with
+        no period there is no book to read people out of. That covers the book with nothing in it
+        (`bookEmpty` -- no calendar and no faces), the one still opening, and the one whose marks
+        could not be read, where the whole page is a failure message.
+
+        Nobody is chosen yet, so the book shows everyone and a tap does nothing; choosing is
+        T013's, and `chosenIds` and `onToggle` arrive with it. `presentIds` comes straight from
+        the hook -- it is null while the period is being read and after it failed, which is what
+        dims nobody then.
+      */}
+      {isGroup && hasPeriod && (
+        <FacesRow people={bookPeople} presentIds={presentIds} />
       )}
 
       {/* Content */}

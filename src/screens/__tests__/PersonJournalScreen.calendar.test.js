@@ -151,6 +151,9 @@ import { CalendarSheet } from '../../components/journal/CalendarSheet';
 import { CalendarPickerModal } from '../../components/journal/CalendarPickerModal';
 import CalendarListHeading from '../../components/journal/CalendarListHeading';
 import { DateSwipeContainer } from '../../components/journal/DateSwipeContainer';
+// The two rows the page opens with on a group book (T010): the bar first, the faces second.
+import { JournalDateBar } from '../../components/journal/JournalDateBar';
+import { FacesRow } from '../../components/journal/FacesRow';
 import { getCalendar, getDay, getPeriod } from '../../services/JournalCalendarService';
 import { getUserEntries } from '../../services/SocialService';
 
@@ -319,6 +322,54 @@ const rowsOnScreen = (tree) => tree.root
     : `heading:${node.props.label}`));
 
 const list = (tree) => tree.root.findByType(FlatList);
+
+/**
+ * The page's rows in the order a person meets them going down the screen (T010, FR-010): the date
+ * bar, the faces, then the one list. `findAll` walks the tree in render order, so this is the
+ * arrangement as it is drawn -- which is the only way the spec's "the date bar is the first row of
+ * the page and the faces the second" can be asserted without measuring pixels.
+ */
+const pageOrder = (tree) => tree.root
+  .findAll((node) => node.type === JournalDateBar
+    || node.type === FacesRow
+    || node.type === FlatList)
+  .map((node) => {
+    if (node.type === JournalDateBar) return 'date bar';
+    if (node.type === FacesRow) return 'faces';
+    return 'list';
+  });
+
+/**
+ * Every face in the row, in the order it is drawn, by the **person** it is of.
+ *
+ * Read from the faces' own test ids rather than from `FacesRow`'s props, so a person drawn twice
+ * (two family-tree nodes linked to one account) is two entries here, which is what the
+ * de-duplication case needs to be able to fail.
+ */
+const FACE_PREFIX = 'faces-row-face-';
+
+const faceIds = (tree) => tree.root
+  .findAllByType(TouchableOpacity)
+  .map((node) => node.props.testID)
+  .filter((testID) => typeof testID === 'string' && testID.startsWith(FACE_PREFIX))
+  .map((testID) => testID.slice(FACE_PREFIX.length));
+
+/**
+ * What a screen reader says of one face: the person's name alone, or "<name>, nothing in this
+ * period" once it is dimmed (FR-010).
+ */
+const faceSays = (tree, id) => {
+  const found = byTestID(tree, `${FACE_PREFIX}${id}`);
+  if (found.length !== 1) throw new Error(`expected one face for ${id}, found ${found.length}`);
+  return found[0].props.accessibilityLabel;
+};
+
+const faceControl = (tree, id) => byTestID(tree, `${FACE_PREFIX}${id}`)[0];
+
+/** Each month heading of a year list, and the number of memories it counts. */
+const monthHeadingCounts = (tree) => Object.fromEntries(
+  monthHeadings(tree).map((heading) => [heading.props.label, heading.props.count]),
+);
 
 /** The pull-to-refresh control's own props -- `refreshing` is what a reader sees spinning. */
 const refreshControl = (tree) => list(tree).props.refreshControl.props;
@@ -1079,5 +1130,315 @@ describe('a pressed map pin brings its piece into view (016 FR-017)', () => {
     expect(() => cardProps(tree, 'y-02-18').onRequestScrollTo(80)).not.toThrow();
     expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
     warn.mockRestore();
+  });
+});
+
+// ===========================================================================
+// 019 T010 -- group mode: the faces row (FR-010), household order (FR-009) and
+// a group's calendar (User Story 2, FR-002, FR-004, SC-004)
+// ===========================================================================
+
+describe('User Story 2: a group book’s faces and its order', () => {
+  /**
+   * A household opened from the family tree's **head card**: every person carries a `userId`
+   * key, the tree-node id lives in `id`, and the route marks the book `bookKind: 'household'`,
+   * which is what gives it household order (research R2, R6; owner, 2026-11-21).
+   */
+  const HOUSEHOLD = [
+    { id: 'node-huda', name: 'Huda', avatar: 'huda.png', userId: 'u-huda' },
+    { id: 'node-karim', name: 'Karim', avatar: 'karim.png', userId: 'u-karim' },
+    { id: 'node-lina', name: 'Lina', avatar: 'lina.png', userId: 'u-lina' },
+  ];
+
+  const HOUSEHOLD_ROUTE = {
+    persons: HOUSEHOLD,
+    isGroup: true,
+    groupName: "Huda's Family",
+    bookKind: 'household',
+  };
+
+  /**
+   * The very same three people as a **friend group**: real user ids, no `userId` key and no
+   * `bookKind`, so the book keeps the Journal tab's own order (FR-009). The order cases below
+   * are run on both routes, which is what makes "household order" an assertion about the book
+   * rather than about the fixture.
+   */
+  const FRIEND_GROUP_ROUTE = {
+    persons: [
+      { id: 'u-huda', name: 'Huda', avatar: 'huda.png' },
+      { id: 'u-karim', name: 'Karim', avatar: 'karim.png' },
+      { id: 'u-lina', name: 'Lina', avatar: 'lina.png' },
+    ],
+    isGroup: true,
+    groupName: 'Work Friends',
+    sourceType: 'friend',
+  };
+
+  /**
+   * One day holding all three people's memories, built so that **three orders differ**:
+   *
+   * - household order (position in the household, then created time): Huda, Karim, Lina
+   * - newest first (a person's or a friend group's day, 016 FR-004): Huda, Lina, Karim
+   * - oldest first by created time (`buildRows`' default in a month list): Karim, Lina, Huda
+   *
+   * A fixture where any two of those agreed would pass whatever the screen did.
+   */
+  const THE_FAMILY = [
+    memory('lina-jan', '2026-01-20', 700, { userId: 'u-lina' }),
+    memory('karim-05', '2026-03-05', 800, { userId: 'u-karim' }),
+    memory('karim-10', '2026-03-10', 900, { userId: 'u-karim' }),
+    memory('lina-10', '2026-03-10', 920, { userId: 'u-lina' }),
+    memory('huda-10', '2026-03-10', 950, { userId: 'u-huda' }),
+  ];
+
+  beforeEach(() => serve(THE_FAMILY));
+
+  const pickMarch = async (tree) => {
+    await tapDate(tree);
+    await pickMonthInSheet(tree, '2026-03');
+  };
+
+  const pick2026 = async (tree) => {
+    await tapDate(tree);
+    await tap(tree, 'calendar-view-year');
+    await tap(tree, 'calendar-year-tile-2026');
+  };
+
+  // -------------------------------------------------------------------------
+  // FR-010 -- the row of faces, and where it sits
+  // -------------------------------------------------------------------------
+
+  it('draws the faces directly under the date bar, on a day, a month and a year (FR-010)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    expect(barWords(tree)).toContain('Tue, Mar 10');
+    expect(pageOrder(tree)).toEqual(['date bar', 'faces', 'list']);
+
+    await pickMarch(tree);
+    expect(pageOrder(tree)).toEqual(['date bar', 'faces', 'list']);
+
+    await pick2026(tree);
+    expect(pageOrder(tree)).toEqual(['date bar', 'faces', 'list']);
+  });
+
+  it('shows every person the book covers, once, in book order (FR-002, FR-010)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    expect(faceIds(tree)).toEqual(['u-huda', 'u-karim', 'u-lina']);
+  });
+
+  /**
+   * The two people who must never reach the row, together: a relative with **no account**
+   * (`userId: null`, whose `id` is a tree node) and a second tree node linked to an account that
+   * is already in the book. `userId ?? id` would draw the first as a face and ask the server
+   * about a node id (research R2); keeping both nodes would draw Huda twice.
+   */
+  it('never draws a relative without an account, and draws a shared account once (R2)', async () => {
+    const tree = await mount({
+      ...HOUSEHOLD_ROUTE,
+      persons: [
+        HOUSEHOLD[0],
+        { id: 'node-lina-step', name: 'Lina (step)', avatar: null, userId: null },
+        HOUSEHOLD[1],
+        { id: 'node-huda-mother', name: 'Huda (mother)', avatar: 'huda.png', userId: 'u-huda' },
+        HOUSEHOLD[2],
+      ],
+    });
+
+    expect(faceIds(tree)).toEqual(['u-huda', 'u-karim', 'u-lina']);
+    expect(getCalendar).toHaveBeenCalledWith('token-1', ['u-huda', 'u-karim', 'u-lina']);
+    expect(
+      getCalendar.mock.calls.every(([, ids]) => ids.every((id) => !id.startsWith('node-'))),
+    ).toBe(true);
+  });
+
+  /** The look-ups take 50 people, so a 51st friend is neither asked about nor drawn. */
+  it('covers the first 50 of a larger group, and never asks about the 51st', async () => {
+    serve([memory('f-0', '2026-03-10', 900, { userId: 'u-0' })]);
+    const tree = await mount({
+      persons: Array.from({ length: 60 }, (_, i) => ({ id: `u-${i}`, name: `Friend ${i}` })),
+      isGroup: true,
+      groupName: 'Everyone',
+      sourceType: 'friend',
+    });
+
+    expect(faceIds(tree)).toHaveLength(50);
+    expect(faceIds(tree)[49]).toBe('u-49');
+    expect(faceIds(tree)).not.toContain('u-50');
+    const [, ids] = getCalendar.mock.calls[0];
+    expect(ids).toHaveLength(50);
+    expect(ids).not.toContain('u-50');
+  });
+
+  it('dims a face with nothing in the shown period, and leaves it choosable (FR-010)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    // 10 March: all three recorded something, so nobody is dimmed.
+    expect(faceSays(tree, 'u-huda')).toBe('Huda');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina');
+
+    await tapPrevious(tree);
+
+    // 5 March: Karim alone.
+    expect(barWords(tree)).toContain('Thu, Mar 5');
+    expect(faceSays(tree, 'u-karim')).toBe('Karim');
+    expect(faceSays(tree, 'u-huda')).toBe('Huda, nothing in this period');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina, nothing in this period');
+
+    // Dimmed is not disabled: FR-016's choosing does not care whether somebody has anything here.
+    expect(typeof faceControl(tree, 'u-huda').props.onPress).toBe('function');
+    expect(faceControl(tree, 'u-huda').props.disabled).not.toBe(true);
+  });
+
+  it('dims nobody while the day’s memories are still being read (FR-010)', async () => {
+    const held = deferred();
+    getDay.mockReturnValueOnce(held.promise);
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    // The book has opened on its newest day; its memories have not landed.
+    expect(barWords(tree)).toContain('Tue, Mar 10');
+    expect(cardIds(tree)).toEqual([]);
+    expect(faceSays(tree, 'u-huda')).toBe('Huda');
+    expect(faceSays(tree, 'u-karim')).toBe('Karim');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina');
+
+    await act(async () => {
+      held.resolve([]);
+    });
+    await settle();
+  });
+
+  /** "Could not load" must never be drawn as "recorded nothing" (FR-010, fails closed). */
+  it('dims nobody after the day’s memories fail to load (FR-010)', async () => {
+    getDay.mockRejectedValue(new Error('no network'));
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    expect(saysSomething(tree, "Couldn't load journal")).toBe(true);
+    expect(faceSays(tree, 'u-huda')).toBe('Huda');
+    expect(faceSays(tree, 'u-karim')).toBe('Karim');
+    expect(faceSays(tree, 'u-lina')).toBe('Lina');
+  });
+
+  it('shows no faces on a group book with nothing in it, and none on one person’s book', async () => {
+    serve([]);
+    const empty = await mount(FRIEND_GROUP_ROUTE);
+
+    expect(saysSomething(empty, 'Nobody here has shared any memories with you yet')).toBe(true);
+    expect(empty.root.findAllByType(FacesRow)).toHaveLength(0);
+
+    // One person's journal is not a group book: there is nobody to choose between.
+    serve(BROTHER);
+    const onePerson = await mount(FAMILY_ROUTE);
+
+    expect(barWords(onePerson)).toContain('Sat, Nov 14');
+    expect(onePerson.root.findAllByType(FacesRow)).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // FR-004 and the counts -- the calendar covers everyone (US2 scenarios 2-3)
+  // -------------------------------------------------------------------------
+
+  /** Scenario 2. */
+  it('fades a day only when nobody in the group has a memory on it (scenario 2, FR-004)', async () => {
+    const tree = await mount(FRIEND_GROUP_ROUTE);
+
+    await tapDate(tree);
+
+    expect(dayIsFaded(tree, '2026-03-10')).toBe(false); // all three
+    expect(dayIsFaded(tree, '2026-03-05')).toBe(false); // Karim alone
+    expect(dayIsFaded(tree, '2026-03-06')).toBe(true); // nobody
+  });
+
+  /** Scenario 3. */
+  it('counts every member’s memories in a year’s month headings (scenario 3, FR-002)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    await pick2026(tree);
+
+    // January is Lina's alone, and March holds all three people's four memories.
+    expect(monthHeadingCounts(tree)).toEqual({ 'January 2026': 1, 'March 2026': 4 });
+  });
+
+  // -------------------------------------------------------------------------
+  // FR-009 -- household order, and the Journal tab's order everywhere else
+  // -------------------------------------------------------------------------
+
+  it('reads a head-card household’s day in household order (FR-009)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    // Position in the household, then created time. Newest first would be Huda, Lina, Karim.
+    expect(cardIds(tree)).toEqual(['huda-10', 'karim-10', 'lina-10']);
+  });
+
+  it('keeps that household order within a day in a month list, days oldest first (FR-009)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    await pickMarch(tree);
+
+    expect(rowsOnScreen(tree)).toEqual([
+      'heading:Thu 5 March',
+      'card:karim-05',
+      'heading:Tue 10 March',
+      // Household order, not `buildRows`' created-time default, which is Karim, Lina, Huda.
+      'card:huda-10',
+      'card:karim-10',
+      'card:lina-10',
+    ]);
+  });
+
+  it('keeps household order within a day in a year list too (FR-009)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    await pick2026(tree);
+    await tapHeading(tree, 'March 2026');
+
+    expect(rowsOnScreen(tree).filter((row) => row.startsWith('card:'))).toEqual([
+      'card:lina-jan',
+      'card:karim-05',
+      'card:huda-10',
+      'card:karim-10',
+      'card:lina-10',
+    ]);
+  });
+
+  /**
+   * The other half of FR-009, and what keeps the cases above honest: a **friend group** has no
+   * household order to keep, and reads exactly as one person's journal does.
+   */
+  it('leaves a friend group on the Journal tab’s own order (FR-009)', async () => {
+    const tree = await mount(FRIEND_GROUP_ROUTE);
+
+    // A day: newest first.
+    expect(cardIds(tree)).toEqual(['huda-10', 'lina-10', 'karim-10']);
+
+    await pickMarch(tree);
+
+    // A month: oldest first, within a day too.
+    expect(rowsOnScreen(tree)).toEqual([
+      'heading:Thu 5 March',
+      'card:karim-05',
+      'heading:Tue 10 March',
+      'card:karim-10',
+      'card:lina-10',
+      'card:huda-10',
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // SC-004 -- a memory is drawn the same way wherever it is read
+  // -------------------------------------------------------------------------
+
+  it('gives a memory the same author name and photo in a month as on its day (SC-004)', async () => {
+    const tree = await mount(HOUSEHOLD_ROUTE);
+
+    const onItsDay = cardProps(tree, 'huda-10').user;
+    expect(onItsDay).toEqual({ name: 'Huda', avatarUrl: 'huda.png' });
+    expect(cardProps(tree, 'huda-10').showAuthor).toBe(true);
+
+    await pickMarch(tree);
+
+    expect(cardProps(tree, 'huda-10').user).toEqual(onItsDay);
+    expect(cardProps(tree, 'karim-10').user).toEqual({ name: 'Karim', avatarUrl: 'karim.png' });
+    expect(cardProps(tree, 'huda-10').showAuthor).toBe(true);
   });
 });
