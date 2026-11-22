@@ -108,9 +108,17 @@ export async function getPeriod(accessToken, { authorIds, from, to, precision })
     items.forEach((item) => entries.push(adaptEntry(item.entry || item)));
 
     cursor = data?.nextCursor ?? null;
-    // `hasMore` with no `nextCursor` to follow would otherwise re-request the same page
-    // forever; treat it as the end rather than loop.
-    hasMore = Boolean(data?.hasMore) && Boolean(cursor);
+    hasMore = Boolean(data?.hasMore);
+
+    // The server said there is more to fetch but gave nothing to fetch it with. Looping would
+    // re-request this same page forever; returning what was collected so far would be exactly
+    // the half-loaded period "sharing fails closed" forbids -- a caller would read it as the
+    // whole period. Fail loudly instead.
+    if (hasMore && !cursor) {
+      throw new Error(
+        'getPeriod: server reported hasMore with no nextCursor; the period is incomplete'
+      );
+    }
   }
 
   return entries;

@@ -168,6 +168,26 @@ describe('getPeriod', () => {
     ).rejects.toMatchObject({ status: 500 });
   });
 
+  it('fails the whole call -- not a silent partial return -- when a page claims hasMore with no nextCursor', async () => {
+    // A malformed response: the server says there is more to fetch but gives nothing to fetch
+    // it with. Looping on it would hang forever; stopping quietly and returning what had been
+    // collected would be exactly the half-loaded period "sharing fails closed" forbids -- a
+    // caller awaiting getPeriod would read a truncated result as the whole period. Neither is
+    // acceptable, so this must reject, and the first page's entry must not resolve as if it
+    // were a complete (if short) answer.
+    respondWith({
+      items: [{ entry: { id: 'e1', createdAt: '2026-01-01T00:00:00.000Z', contentBlocks: [] } }],
+      hasMore: true,
+      // no nextCursor
+    });
+
+    await expect(
+      getPeriod(token, { authorIds: ['u1'], from: '2026-01-01', to: '2026-01-31', precision: 'month' })
+    ).rejects.toThrow();
+    // Exactly one request was made -- it did not loop re-fetching the same page either.
+    expect(global.fetch.mock.calls).toHaveLength(1);
+  });
+
   it('passes every entry through adaptEntry, keeping datePrecision', async () => {
     respondWith({
       items: [
