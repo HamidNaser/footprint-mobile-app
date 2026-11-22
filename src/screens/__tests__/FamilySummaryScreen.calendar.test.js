@@ -165,7 +165,7 @@ jest.mock('../../context/AuthContext', () => ({
 
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Alert, FlatList, Text, TouchableOpacity } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Text, TouchableOpacity } from 'react-native';
 
 import FamilySummaryScreen from '../FamilySummaryScreen';
 import { CalendarSheet } from '../../components/journal/CalendarSheet';
@@ -710,6 +710,12 @@ describe('the book covers the household members with an account (FR-002)', () =>
     // look-ups take account ids.
     expect(getCalendar.mock.calls.every(([, ids]) => ids.every((id) => !id.startsWith('m-'))))
       .toBe(true);
+
+    // And the header counts the **book**, which is what the faces under it are: five tree nodes
+    // here, three people. A number over the faces that disagreed with them would be the one
+    // thing on this screen a reader could catch out by counting.
+    expect(words(tree)).toContain('3 members');
+    expect(words(tree)).not.toContain('5 members');
   });
 
   const many = Array.from({ length: 60 }, (_, i) => ({
@@ -839,6 +845,12 @@ describe('the household’s faces, under the date bar (FR-010)', () => {
     });
     trees.push(tree);
     await act(async () => {});
+
+    // What a reader sees instead: the screen says it is loading, and turns a spinner. Asserted
+    // positively, because every assertion below it is an absence -- and a blank screen would
+    // satisfy those while telling somebody nothing at all.
+    expect(saysSomething(tree, "Loading your family's journals")).toBe(true);
+    expect(tree.root.findAllByType(ActivityIndicator).length).toBeGreaterThan(0);
 
     // A household that has not arrived is not a household with nobody in it (FR-010): no empty
     // message, no failure, and nothing asked of the calendar yet.
@@ -1237,6 +1249,15 @@ describe('a year list pins its month headings, and a pressed pin clears them (01
     // its own data, so this is what proves the row index and the list are one list.
     expect(() => cardProps(tree, 'y-02-18').onRequestScrollTo(80)).not.toThrow();
     expect(typeof list(tree).props.onScrollToIndexFailed).toBe('function');
+
+    // ⚠ The spy above is not a blind one. The refused scroll says so in the log, naming this
+    // screen and the row it could not reach -- and **nothing else is warned**, so a React or
+    // `VirtualizedList` warning on this path would fail here rather than being swallowed.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      '[FamilySummaryScreen] could not scroll to a pressed pin’s piece',
+      expect.objectContaining({ index: 7 }),
+    );
     warn.mockRestore();
   });
 });

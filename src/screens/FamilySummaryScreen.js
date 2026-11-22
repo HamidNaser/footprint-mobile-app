@@ -611,11 +611,15 @@ export default function FamilySummaryScreen({ navigation, route }) {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
-          {/* How many people this book is of, as the approved prototype's header shows it. Said
-              only once the household is known: a count of nobody would be a claim. */}
-          {householdStatus === 'ready' && household.length > 0 ? (
+          {/* How many people this book is of, as the approved prototype's header shows it.
+              ⚠ **`people`, not `household`**: the book's own people are the ones with an
+              account, de-duplicated and capped at 50, and they are exactly the faces drawn
+              below -- so a household holding a relative with no account, or two tree nodes on
+              one account, would otherwise say "5 members" over three faces. Said only once the
+              household has been read: a count of nobody would be a claim. */}
+          {householdStatus === 'ready' && people.length > 0 ? (
             <Text style={styles.headerSubtitle}>
-              {`${household.length} member${household.length === 1 ? '' : 's'}`}
+              {`${people.length} member${people.length === 1 ? '' : 's'}`}
             </Text>
           ) : null}
         </View>
