@@ -13,7 +13,7 @@ import { API_CONFIG } from '../config/api.config';
 
 const BASE = `${API_CONFIG.HUB_BASE_URL}${API_CONFIG.API_VERSION}`;
 
-async function authFetch(endpoint, accessToken, options = {}) {
+export async function authFetch(endpoint, accessToken, options = {}) {
   const response = await fetch(`${BASE}${endpoint}`, {
     ...options,
     headers: {
