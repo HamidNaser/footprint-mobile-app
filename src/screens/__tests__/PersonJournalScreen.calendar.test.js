@@ -150,6 +150,7 @@ import PersonJournalScreen from '../PersonJournalScreen';
 import { CalendarSheet } from '../../components/journal/CalendarSheet';
 import { CalendarPickerModal } from '../../components/journal/CalendarPickerModal';
 import CalendarListHeading from '../../components/journal/CalendarListHeading';
+import { DateSwipeContainer } from '../../components/journal/DateSwipeContainer';
 import { getCalendar, getDay, getPeriod } from '../../services/JournalCalendarService';
 import { getUserEntries } from '../../services/SocialService';
 
@@ -318,6 +319,26 @@ const rowsOnScreen = (tree) => tree.root
     : `heading:${node.props.label}`));
 
 const list = (tree) => tree.root.findByType(FlatList);
+
+/** The pull-to-refresh control's own props -- `refreshing` is what a reader sees spinning. */
+const refreshControl = (tree) => list(tree).props.refreshControl.props;
+
+const pullToRefresh = async (tree) => {
+  await act(async () => {
+    refreshControl(tree).onRefresh();
+  });
+  await settle();
+};
+
+/** The swipe container, which carries the other half of ◄ ► (FR-007). */
+const swipe = (tree) => tree.root.findByType(DateSwipeContainer);
+
+/** A promise a case resolves when it chooses, so a read can be caught mid-flight. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
 const sheet = (tree) => tree.root.findByType(CalendarSheet);
 const sheetIsOpen = (tree) => sheet(tree).props.visible === true;
@@ -510,6 +531,40 @@ describe('User Story 1: the calendar on one person’s journal', () => {
     // April and May hold nothing, so June is the next month with memories.
     expect(barWords(tree)).toEqual(['June 2025', '1 memory']);
     expect(cardIds(tree)).toEqual(['jun-02']);
+  });
+
+  /**
+   * Scenario 3's other half -- "**or swipe** to the next page". The container is handed the very
+   * same move ► is, so what is at risk is the wiring rather than the stepping: a container given
+   * nothing, or given the two directions the wrong way round, would be invisible until somebody
+   * swiped on a phone.
+   */
+  it('moves the same way on a swipe, and refuses one at the end of the book (scenario 3)', async () => {
+    const tree = await mount(FAMILY_ROUTE);
+    await tapDate(tree);
+    await pickMonthInSheet(tree, '2025-03');
+
+    // Both ends are passed on, so the container can refuse a swipe rather than animating out to
+    // an unchanged screen (FR-014). March 2025 is the brother's oldest month, so there is
+    // nothing earlier to swipe back to and plenty later.
+    expect(swipe(tree).props.hasNext).toBe(true);
+    expect(swipe(tree).props.hasPrevious).toBe(false);
+
+    await act(async () => {
+      swipe(tree).props.onNextDate();
+    });
+    await settle();
+
+    expect(barWords(tree)).toEqual(['June 2025', '1 memory']);
+    expect(cardIds(tree)).toEqual(['jun-02']);
+
+    // On the newest period of the book there is nothing later to swipe to.
+    await act(async () => {
+      swipe(tree).props.onNextDate();
+    });
+    await settle();
+    expect(barWords(tree)).toEqual(['November 2026', '4 memories']);
+    expect(swipe(tree).props.hasNext).toBe(false);
   });
 
   /** Scenario 4. */
@@ -705,6 +760,20 @@ describe('a book with nothing in it says so about the whole book', () => {
     expect(byTestID(tree, 'date-bar-period')).toHaveLength(0);
   });
 
+  /**
+   * Fix round 1, Minor 3. A route that arrives without a name used to fall through to the
+   * **group's** wording, telling somebody looking at one person's journal that "nobody here" has
+   * shared anything. It is worded from `displayName`, which is the one fallback this screen has
+   * and the one its header already says.
+   */
+  it('never gives one person the group’s wording, even with no name to use', async () => {
+    serve([]);
+    const tree = await mount({ person: { id: 'u-sami' }, isGroup: false, sourceType: 'friend' });
+
+    expect(saysSomething(tree, 'Nobody here has shared any memories with you yet')).toBe(false);
+    expect(saysSomething(tree, "hasn't shared any memories with you yet")).toBe(true);
+  });
+
   it('speaks of the group, not of a person, on a friend group with nothing in it', async () => {
     serve([]);
     const tree = await mount({
@@ -740,6 +809,68 @@ describe('pull to refresh (FR-015)', () => {
     expect(getDay.mock.calls.length).toBeGreaterThan(daysRead);
     // And the reader is left on the day they were reading.
     expect(barWords(tree)).toContain('Sat, Nov 14');
+  });
+
+  /**
+   * Fix round 1, Important 1 -- and the half that proves the three cases under it are not passing
+   * for the trivial reason that the control never turns at all.
+   */
+  it('turns the control while the re-read is in flight, and stops it when it lands', async () => {
+    serve(BROTHER);
+    const tree = await mount(FAMILY_ROUTE);
+    expect(refreshControl(tree).refreshing).toBe(false);
+
+    const marks = deferred();
+    getCalendar.mockReturnValueOnce(marks.promise);
+    await pullToRefresh(tree);
+    expect(refreshControl(tree).refreshing).toBe(true);
+
+    await act(async () => {
+      marks.resolve({ authorIds: ['u-sami'], days: calendarRows(BROTHER) });
+    });
+    await settle();
+
+    expect(refreshControl(tree).refreshing).toBe(false);
+  });
+
+  /**
+   * ⚠ **A book with no period has no page to wait for.** The hook's page effect answers
+   * `'loading'` and nothing ever resolves it, so a screen that waited on `pageStatus` here left
+   * the control spinning for ever -- on the one screen where pulling to refresh is the obvious
+   * thing to try, because there is nothing else on it.
+   */
+  it('stops the control on a book with nobody in it (userId: null)', async () => {
+    serve(BROTHER);
+    const tree = await mount({ ...FAMILY_ROUTE, userId: null });
+    expect(saysSomething(tree, "hasn't shared any memories with you yet")).toBe(true);
+
+    await pullToRefresh(tree);
+
+    expect(refreshControl(tree).refreshing).toBe(false);
+  });
+
+  it('stops the control on a book whose owner has shared nothing', async () => {
+    serve([]);
+    const tree = await mount(FAMILY_ROUTE);
+    expect(saysSomething(tree, "hasn't shared any memories with you yet")).toBe(true);
+
+    await pullToRefresh(tree);
+
+    expect(refreshControl(tree).refreshing).toBe(false);
+    // The marks really were re-read -- the control stopped because the read finished, not
+    // because nothing was asked.
+    expect(getCalendar).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops the control when the marks are still failing, which is usually offline', async () => {
+    getCalendar.mockRejectedValue(new Error('no network'));
+    const tree = await mount(FAMILY_ROUTE);
+    expect(saysSomething(tree, "Couldn't load journal")).toBe(true);
+
+    await pullToRefresh(tree);
+
+    expect(saysSomething(tree, "Couldn't load journal")).toBe(true);
+    expect(refreshControl(tree).refreshing).toBe(false);
   });
 
   it('shows a memory recorded since, without leaving the day', async () => {

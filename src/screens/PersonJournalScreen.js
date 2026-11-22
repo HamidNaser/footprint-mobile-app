@@ -37,14 +37,16 @@
  *   (`openFailed`) shows this screen's own "Couldn't load journal" with Try again, not the empty
  *   message; a failed page shows the same; and a failed index refuses to open the sheet at all
  *   rather than drawing a half-filled calendar (FR-011). `bookEmpty` and `openFailed` are
- *   therefore read **before** `pageStatus`, which stays `'loading'` for ever in both.
+ *   therefore read **before** `pageStatus`, which stays `'loading'` for ever in both -- and that
+ *   holds for the **pull-to-refresh control** as much as for the page, which is the one place it
+ *   was missed (fix round 1, Important 1): a control that waited on that page spun for ever.
  *
  * The faces row, household order and choosing faces belong to later tasks (T010, T013); this
  * screen passes the hook no `chosen` and no `compareInDay` yet, so every book reads a single day
  * newest first (016 FR-004) and a month or year oldest first (016 FR-005).
  */
 
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -66,6 +68,8 @@ import { ViewportFlatList } from '../components/media/ViewportLists';
 // gating, every card on screen mounts its map at once -- which research R10 *Lazy rendering* and
 // plan.md's risk table treat as a requirement, not an optimisation (review fix, Important 3).
 import { useViewableKeys } from '../hooks/mediaVisibility';
+// 016 FR-017's measured scroll, shared with `FamilySummaryScreen` (T009 fix round 1).
+import { usePinnedHeadingScroll } from '../hooks/usePinnedHeadingScroll';
 import {
   CalendarCoils,
   DateSwipeContainer,
@@ -317,10 +321,19 @@ export default function PersonJournalScreen({ route, navigation }) {
    * Pull to refresh: both the calendar's marks and the shown page (FR-015), keeping the reader on
    * the period they were reading.
    *
-   * The spinner is held in three states rather than cleared as soon as the statuses look settled:
-   * `refresh()` only bumps the hook's reload key, so the render that starts the re-read still
-   * reports the *previous* answer as ready. "Asked" waits for the re-read to begin, "running" for
-   * it to finish; anything simpler flickers the control off before it has turned.
+   * ⚠ **`pageStatus` is honoured only when there is a period** -- the same ordering rule the
+   * empty and failure states below follow, and the one the hook's own JSDoc states (fix round 1,
+   * Important 1). A book with nothing in it, and one whose marks failed as it opened, have no
+   * period to read: the hook's page effect answers `'loading'` and **nothing ever resolves it**.
+   * Read without that gate, a pull to refresh on *"...hasn't shared any memories with you yet"* --
+   * an obvious thing to try -- left the control spinning for ever, and so did a retry that was
+   * still offline.
+   *
+   * The phases exist because `refresh()` only bumps the hook's reload key: the commit that asks
+   * still reports the *previous* answer, so clearing on "nothing is being read" there would turn
+   * the control off before the re-read had begun. `asked` is given one commit of grace for that
+   * reason; after it, a read that has not started is a read with nothing to do -- which is
+   * exactly a book with nobody in it, where the hook asks the server nothing at all.
    */
   const [refreshPhase, setRefreshPhase] = useState('idle');
 
@@ -329,11 +342,15 @@ export default function PersonJournalScreen({ route, navigation }) {
     refresh();
   }, [refresh]);
 
-  const reading = indexStatus === 'loading' || pageStatus === 'loading';
+  const reading = indexStatus === 'loading' || (hasPeriod && pageStatus === 'loading');
 
   useEffect(() => {
-    if (refreshPhase === 'asked' && reading) setRefreshPhase('running');
-    else if (refreshPhase === 'running' && !reading) setRefreshPhase('idle');
+    if (refreshPhase === 'idle') return;
+    if (reading) {
+      if (refreshPhase !== 'running') setRefreshPhase('running');
+      return;
+    }
+    setRefreshPhase(refreshPhase === 'asked' ? 'waiting' : 'idle');
   }, [refreshPhase, reading]);
 
   /**
@@ -437,67 +454,22 @@ export default function PersonJournalScreen({ route, navigation }) {
    * screen, which is what makes this agree with the card's own `isVisible` default of true.
    */
   const { onViewableItemsChanged, isViewable } = useViewableKeys(keyExtractor);
-  const listRef = useRef(null);
 
   /**
-   * How tall each month heading of a year list is, **by heading**, as each one last reported it.
+   * 016 FR-017: a pressed map pin's piece, brought into view clear of the month heading a year
+   * list pins above it.
    *
-   * Refs rather than state, because nothing on screen is drawn from them: they are read at the
-   * one moment a pin is pressed. ⚠ **By heading, and that is not pedantry**: the month headings
-   * are not all the same height ("2026, month not known" wraps at a large text size), so one
-   * shared number would make a pin pressed in January clear whatever February measured.
+   * ⚠ `headingsPinned` is asked of the **period on screen** -- a year pins its month headings and
+   * nothing else does -- rather than of the rows or of what has been measured, so a height left
+   * over from a year somebody was reading a moment ago cannot push a month's pressed pin a
+   * heading too far. The module's own suite pins that rule, and the arithmetic with it.
    */
-  const headingHeightsRef = useRef(new Map());
-  const lastHeadingHeightRef = useRef(0);
-
-  /** One month heading reporting its own height (016 FR-017). Nothing else can measure it. */
-  const measurePinnedHeading = useCallback((key, event) => {
-    const height = event?.nativeEvent?.layout?.height;
-    if (typeof height !== 'number' || height <= 0) return;
-    headingHeightsRef.current.set(key, height);
-    lastHeadingHeightRef.current = height;
-  }, []);
-
-  /**
-   * How tall the heading pinned above row `rowIndex` is -- the nearest month heading at or above
-   * it, which is the one `stickyHeaderIndices` has stuck to the top of the screen. The walk is a
-   * few steps in a year of twelve months, and it happens on a press, never on a render.
-   */
-  const pinnedHeadingHeight = useCallback((rowIndex) => {
-    if (!rows || rows.length === 0) return 0;
-
-    for (let i = Math.min(rowIndex, rows.length - 1); i >= 0; i -= 1) {
-      if (rows[i]?.kind === 'monthHeading') {
-        const measured = headingHeightsRef.current.get(rows[i].key);
-        return measured || lastHeadingHeightRef.current;
-      }
-    }
-    return 0;
-  }, [rows]);
-
-  /**
-   * Bring a piece into view, for a pin pressed on the card in row `index` (016 FR-017).
-   *
-   * ⚠ **A year is the one list with something already at the top of it.** `viewOffset: -offset`
-   * puts the pressed piece at the very top of the list, which in a year is exactly where the
-   * pinned month heading sits -- so the piece would land *under* the words naming its month. That
-   * row's own heading's measured height is added, and it lands just below it. A day and a month
-   * have no pinned heading, so they pass the offset unchanged: asked of the period on screen,
-   * never of the measurement, so a height left over from a year cannot push a month's pin too far.
-   */
-  const scrollPieceIntoView = useCallback((rowIndex, offset) => {
-    const pinned = picked?.kind === 'year' ? pinnedHeadingHeight(rowIndex) : 0;
-    listRef.current?.scrollToIndex({ index: rowIndex, viewOffset: pinned - offset, animated: true });
-  }, [picked, pinnedHeadingHeight]);
-
-  /**
-   * A row the list had not laid out after all: the memory stays where it is, and the person is
-   * not told -- they pressed a pin and the journal did not move, which is self-evident. Without
-   * the handler, `VirtualizedList` throws an invariant and there is no error boundary in `src`.
-   */
-  const handleScrollToIndexFailed = useCallback((info) => {
-    console.warn('[PersonJournalScreen] could not scroll to a pressed pin’s piece', info);
-  }, []);
+  const { listRef, measureHeading, scrollPieceIntoView, onScrollToIndexFailed } =
+    usePinnedHeadingScroll({
+      rows,
+      headingsPinned: picked?.kind === 'year',
+      screenName: 'PersonJournalScreen',
+    });
 
   /**
    * Render entry card
@@ -540,23 +512,29 @@ export default function PersonJournalScreen({ route, navigation }) {
           // A month heading of a year, and only that, opens and closes (016 FR-006) and is the
           // row that gets pinned -- so it is the one measured. A grey day heading is neither.
           onPress={isMonth ? () => toggleMonth(item.key) : undefined}
-          onLayout={isMonth ? (event) => measurePinnedHeading(item.key, event) : undefined}
+          onLayout={isMonth ? (event) => measureHeading(item.key, event) : undefined}
         />
       );
     }
 
     return renderEntry({ item: item?.kind === 'entry' ? item.entry : item, index: rowIndex });
-  }, [renderEntry, toggleMonth, measurePinnedHeading]);
+  }, [renderEntry, toggleMonth, measureHeading]);
 
   /**
    * The whole-book message, worded for the kind of book this is (spec edge case).
    *
    * A group speaks of the group, because naming one of several people would be wrong about the
    * others; one person is named, because that is who the reader opened.
+   *
+   * ⚠ **One person is named from `displayName`, never from `person.name` directly** (fix round 1,
+   * Minor 3). A route arriving without a name used to fall through to the *group's* wording,
+   * which tells somebody looking at one person's journal that "nobody here" has shared anything.
+   * `displayName` already carries this screen's one fallback and the header says those very
+   * words, so there is no second answer to keep in step with it.
    */
-  const wholeBookMessage = isGroup || !person?.name
+  const wholeBookMessage = isGroup
     ? 'Nobody here has shared any memories with you yet'
-    : `${person.name} hasn't shared any memories with you yet`;
+    : `${displayName} hasn't shared any memories with you yet`;
 
   /** How a period with nothing in it is worded, when nobody is chosen to name instead. */
   const periodPhrase = picked?.kind === 'month'
@@ -660,7 +638,7 @@ export default function PersonJournalScreen({ route, navigation }) {
           */
           stickyHeaderIndices={picked ? stickyIndices : undefined}
           onViewableItemsChanged={onViewableItemsChanged}
-          onScrollToIndexFailed={handleScrollToIndexFailed}
+          onScrollToIndexFailed={onScrollToIndexFailed}
           contentContainerStyle={styles.feedContent}
           showsVerticalScrollIndicator={false}
           refreshControl={
