@@ -25,11 +25,11 @@
  * three or more names ("A, B and C") is this file's own reasonable choice; the brief only pins
  * the two- and zero-chosen cases.
  *
- * ## This is a new component, not a change to `DayRoster` (R8)
+ * ## Why this is its own component (R8)
  *
- * `DayRoster` (`src/components/DayRoster.js`) disables a face with nothing that day, has no
- * "chosen" state, includes members without an account, and matches on `memberId` only -- FR-010
- * and FR-016 need the opposite on each point. `DayRoster`'s own fate is a later task's (R11).
+ * FR-010 and FR-016 need a face that **dims rather than disables**, carries a "chosen" state,
+ * covers only people with an account, and is matched on the ids it is handed. The per-day
+ * roster this replaced did the opposite on each point, so it was replaced, not changed (R11).
  */
 
 import React, { useMemo } from 'react';

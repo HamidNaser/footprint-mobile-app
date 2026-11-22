@@ -404,8 +404,8 @@ export default function FamilySummaryScreen({ navigation, route }) {
   /**
    * Who a memory is by, on a day, a month and a year alike (research R6a, SC-004).
    *
-   * The household member whose account wrote it, named and pictured exactly as
-   * `journalBookToDays` named them; failing that, whatever author the server itself sent. The
+   * The household member whose account wrote it, named and pictured from that member's own
+   * entry in `people` above; failing that, whatever author the server itself sent. The
    * fallback is reached: `/journal/book` answers a **day** for the whole household, while the
    * book's own people stop at the look-ups' 50 -- so a memory by the 56th cousin is on screen
    * with nobody in the book to name it, and keeps the server's name rather than becoming

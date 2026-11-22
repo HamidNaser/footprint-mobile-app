@@ -54,10 +54,10 @@ jest.mock('../../components/journal/JournalEntryCard', () => {
   return { __esModule: true, JournalEntryCard: Card, default: Card, isOwnMemory: () => false };
 });
 
-// `DayRoster` was mocked here while `FamilySummaryScreen` drew one above every day of its
-// scroll. The paged family book draws `FacesRow` instead (019 T011, research R8), so neither
-// screen reaches it any more and the mock is gone -- a mock left behind is a reference, and the
-// clean-up that decides `DayRoster`'s own fate (T015) counts references.
+// There is no per-day roster mock here any more. Both rewired screens draw `JournalDateBar` and
+// `FacesRow` above their lists instead (019 T011, research R8), and both come from the journal
+// barrel mocked below; the roster went with the day-by-day scroll it sat above. A mock left
+// behind would read as a live reference to a component nothing draws.
 
 jest.mock('../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'me' }, accessToken: 'token' }),
