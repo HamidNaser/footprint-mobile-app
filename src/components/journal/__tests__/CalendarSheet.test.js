@@ -329,6 +329,70 @@ describe('CalendarSheet', () => {
   });
 
   // -------------------------------------------------------------------------
+  // `note` -- the one line 019 added, and the Journal tab's guarantee about it
+  // -------------------------------------------------------------------------
+
+  /**
+   * 019 review fix round 1. On a group book the Family and Friends screens narrow this calendar
+   * to the faces the reader chose, and the sheet said nothing about it: two of four people chosen
+   * opened on to a sparse grid that reads as "the family recorded almost nothing" rather than
+   * "you filtered to two people". `note` is where that line goes.
+   *
+   * ⚠ **It is one already-composed string, and this component composes nothing.** No names are
+   * joined here, no "everyone" is worded here, and there is no `chosen`, `people` or `isGroup`
+   * prop: the screen that knows who was chosen knows how to say it. That is what keeps the
+   * Journal tab -- which passes no `note` at all -- rendering exactly what it rendered before,
+   * which the second case below is the whole point of.
+   */
+  describe('the note under the view switch (019)', () => {
+    it('draws the line it is given, between the view switch and the arrows', async () => {
+      const tree = await mount(Sheet, { note: 'Dots for: Huda and Sami' });
+
+      expect(textOf(tree, 'calendar-sheet-note')).toBe('Dots for: Huda and Sami');
+
+      // Where it sits is half of what it is for: under the Date / Month / Year switch, above the
+      // month the arrows move. Read off the order the words really render in.
+      const said = textsIn(tree.root);
+      const at = (word) => said.findIndex((line) => line.includes(word));
+      expect(at('Dots for')).toBeGreaterThan(at('Year'));
+      expect(at('Dots for')).toBeLessThan(at('November'));
+    });
+
+    it('renders nothing new when no note is given -- the Journal tab is untouched', async () => {
+      // The same two callbacks for all three, so the trees can be compared whole: a fresh
+      // `jest.fn()` per mount would differ by function identity alone.
+      const handlers = { onPick: jest.fn(), onClose: jest.fn() };
+      const without = await mount(Sheet, { ...handlers });
+      const withNull = await mount(Sheet, { ...handlers, note: null });
+      const withEmpty = await mount(Sheet, { ...handlers, note: '' });
+
+      expect(anyNode(without, 'calendar-sheet-note')).toBeUndefined();
+      expect(anyNode(withNull, 'calendar-sheet-note')).toBeUndefined();
+      expect(anyNode(withEmpty, 'calendar-sheet-note')).toBeUndefined();
+
+      // Not merely "no note": the sheet is the same shape it was, so no empty row, no spacing
+      // and no stray container arrives with the prop unset. An empty string is nothing to say,
+      // and a sheet that drew a blank line for it would push the calendar down for no words.
+      //
+      // Compared by shape rather than by `toJSON()` whole: every render makes its own `onPress`
+      // closures, so two identical trees are never deeply equal -- jest says as much, "serializes
+      // to the same string". The words, the node counts and the rows inside the sheet are the
+      // part a reader would notice, and they are compared exactly.
+      const shape = (tree) => ({
+        words: textsIn(tree.root),
+        views: tree.root.findAllByType(View).length,
+        texts: tree.root.findAllByType(Text).length,
+      });
+
+      expect(shape(withNull)).toEqual(shape(without));
+      expect(shape(withEmpty)).toEqual(shape(without));
+      // And the shape really is sensitive to the note, so the two above are not vacuous.
+      const withNote = await mount(Sheet, { ...handlers, note: 'Dots for: Huda' });
+      expect(shape(withNote)).not.toEqual(shape(without));
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Faded days -- spec scenario 6, FR-002, FR-011
   // -------------------------------------------------------------------------
 

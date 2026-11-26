@@ -3,8 +3,10 @@
  *
  * 016 User Story 1: the book-style calendar the Journal's date bar opens, sliding up from the
  * bottom of the screen (FR-001). It replaces the platform's own white date picker on the
- * Journal tab -- `CalendarPickerModal`, which stays exactly as it is for the two other screens
- * that use it, `PersonJournalScreen` and `DateTimeField` (FR-015).
+ * Journal tab -- `CalendarPickerModal`, which stays exactly as it is for `DateTimeField`
+ * (FR-015). ⚠ **`DateTimeField` is now its only caller.** 016 left it on `PersonJournalScreen`
+ * as well; 019 FR-012 put this sheet on that screen too, so no journal screen opens the
+ * platform picker any more.
  *
  * Date, Month and Year; a month list and a twelve-year list, both reachable from the headers;
  * arrows that move by whatever set is on screen; faded days that cannot be tapped; counts on
@@ -36,6 +38,14 @@
  * stops rendering the sheet, which is what spec scenario 5 ("a day with memories is tapped, then
  * it closes") describes from the outside. Closing here *as well* would be the sheet and the
  * screen both deciding, and the test file pins this side of it so the two cannot disagree.
+ *
+ * ## One optional line from the caller: `note` (019)
+ *
+ * The Family and Friends books let a reader narrow the calendar to chosen faces, and a narrowed
+ * calendar that says nothing about it reads as "these people recorded almost nothing". So those
+ * screens pass one finished string -- "Dots for: Huda and Sami" -- which is drawn under the view
+ * switch. **This component words none of it**, and the Journal tab passes nothing and renders
+ * nothing new. See the prop's own note below.
  *
  * ## Civil dates
  *
@@ -285,6 +295,20 @@ export const CalendarSheetBody = ({
   today,
   onPick,
   onClose,
+  /**
+   * One line under the view switch, saying whose memories this calendar is marking -- or
+   * nothing at all, which is what the Journal tab passes (019 review fix round 1).
+   *
+   * ⚠ **It is an already-composed string, and this component composes nothing.** No names are
+   * joined here and no "everyone" is worded here: the screen that knows who was chosen is the
+   * screen that says it, as it already words its own empty message and its faces row. That is
+   * what keeps 016's sheet 016's -- there is no `chosen`, `people` or `isGroup` prop, and a
+   * caller that passes nothing renders exactly what it rendered before this prop existed.
+   *
+   * Empty or null is "nothing to say", and draws nothing -- not a blank line, which would push
+   * the calendar down for no words.
+   */
+  note = null,
   // The two platform facts, defaulting to a phone's answers -- see this file's header.
   useNativeDriver = true,
   sheetStyle = null,
@@ -708,6 +732,12 @@ export const CalendarSheetBody = ({
             </TouchableOpacity>
           </View>
 
+          {/* Whose dots these are, when the caller has something to say about it -- under the
+              switch, above the month the arrows move, as the approved prototype places it. */}
+          {note ? (
+            <Text testID="calendar-sheet-note" style={styles.note}>{note}</Text>
+          ) : null}
+
           <View style={styles.nav}>
             <TouchableOpacity
               testID="calendar-prev"
@@ -816,6 +846,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 8,
+  },
+
+  // The sheet's own quiet voice, the one the weekday letters are set in: `inkSoft` at 12, from
+  // `CALENDAR_SHEET_COLOURS`. Nothing here comes from the prototype's stylesheet.
+  note: {
+    marginTop: 10,
+    textAlign: 'center',
+    fontSize: 12,
+    color: C.inkSoft,
   },
 
   nav: {

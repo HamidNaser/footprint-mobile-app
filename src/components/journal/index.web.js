@@ -49,3 +49,11 @@ export { default as FullScreenMediaViewerComponent } from './FullScreenMediaView
 // Calendar picker modal
 export { CalendarPickerModal } from './CalendarPickerModal';
 export { default as CalendarPickerModalComponent } from './CalendarPickerModal';
+
+// 019: the date bar and faces row shared by the Family and Friends calendar screens (T005, T006).
+// Neither has a native module in it, so the same file serves both platforms.
+export { JournalDateBar } from './JournalDateBar';
+export { default as JournalDateBarComponent } from './JournalDateBar';
+
+export { FacesRow } from './FacesRow';
+export { default as FacesRowComponent } from './FacesRow';

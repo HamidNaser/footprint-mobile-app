@@ -751,6 +751,122 @@ describe('buildRows: a year', () => {
 });
 
 // ---------------------------------------------------------------------------
+// buildRows, the optional fourth argument (FR-009; research R6, T003)
+// ---------------------------------------------------------------------------
+
+/**
+ * `compareInDay` is the household's own rule (data-model.md): `(a, b) => position(a.userId) -
+ * position(b.userId) || a.createdAt - b.createdAt`. These tests use a stand-in with the same
+ * shape -- a fixed household position per `userId`, a `createdAt` tie-break -- so a household
+ * reading dad-then-mum is visibly different from the `createdAt` order the entries are seeded
+ * in (mum's memory is created first), and the two cannot be mistaken for one another.
+ *
+ * `entry()` has no `userId` of its own, so these build on it rather than widen it: a fourth
+ * field nothing else in this file needs is not worth adding to the shared helper.
+ */
+const withUser = (base, userId) => ({ ...base, userId });
+
+const HOUSEHOLD_POSITION = { dad: 0, kid: 1, mum: 2 };
+
+const compareInDay = (a, b) => {
+  const byPosition = HOUSEHOLD_POSITION[a.userId] - HOUSEHOLD_POSITION[b.userId];
+  if (byPosition !== 0) return byPosition;
+  return a.createdAt < b.createdAt ? -1 : (a.createdAt > b.createdAt ? 1 : 0);
+};
+
+describe('buildRows: compareInDay, the optional fourth argument', () => {
+  const march = { kind: 'month', year: 2026, month: 3 };
+  const year2026 = { kind: 'year', year: 2026 };
+
+  it('FR-009/R6: in a month list, a day\'s memories follow it, not createdAt', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+
+    // createdAt would read mum then dad; household position reads dad (0) before mum (2).
+    expect(entryIds(buildRows(entries, march).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a month list, the month-only group ("March 2026") follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-01', '2026-03-05T06:00:00.000Z', 'month'), 'mum'),
+      withUser(entry('e-dad', '2026-03-01', '2026-03-05T09:00:00.000Z', 'month'), 'dad'),
+    ];
+
+    expect(entryIds(buildRows(entries, march).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a year list, an open month\'s day group follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+    const open = new Set(['2026-03']);
+
+    expect(entryIds(buildRows(entries, year2026, open).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('FR-009/R6: in a year list, an open month\'s month-only group follows it too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-01', '2026-03-05T06:00:00.000Z', 'month'), 'mum'),
+      withUser(entry('e-dad', '2026-03-01', '2026-03-05T09:00:00.000Z', 'month'), 'dad'),
+    ];
+    const open = new Set(['2026-03']);
+
+    expect(entryIds(buildRows(entries, year2026, open).rows)).toEqual(['e-mum', 'e-dad']);
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  /**
+   * FR-009 speaks only of memories of the same day or the same month (research R6, analyze
+   * round 5 L3): a year's own "month not known" group -- the memories whose precision is
+   * `'year'` -- is neither, so it keeps today's `createdAt` order whether or not a comparator
+   * is passed.
+   */
+  it('FR-009/R6: a year\'s own "month not known" group keeps createdAt order regardless', () => {
+    const entries = [
+      withUser(entry('e-dad', '2026-01-01', '2026-03-05T06:00:00.000Z', 'year'), 'dad'),
+      withUser(entry('e-mum', '2026-01-01', '2026-03-05T09:00:00.000Z', 'year'), 'mum'),
+    ];
+    const open = new Set(['2026:rough']);
+
+    expect(entryIds(buildRows(entries, year2026, open, compareInDay).rows))
+      .toEqual(['e-dad', 'e-mum']);
+  });
+
+  it('two memories by the same person on the same day keep the comparator\'s own tie-break', () => {
+    const entries = [
+      withUser(entry('e-late', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'mum'),
+      withUser(entry('e-early', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+    ];
+
+    expect(entryIds(buildRows(entries, march, undefined, compareInDay).rows))
+      .toEqual(['e-early', 'e-late']);
+  });
+
+  it('omitted, every existing buildRows test above is unaffected -- a sanity check here too', () => {
+    const entries = [
+      withUser(entry('e-mum', '2026-03-05', '2026-03-05T06:00:00.000Z'), 'mum'),
+      withUser(entry('e-dad', '2026-03-05', '2026-03-05T09:00:00.000Z'), 'dad'),
+    ];
+
+    const withNoFourthArg = buildRows(entries, march);
+    const withExplicitUndefined = buildRows(entries, march, undefined, undefined);
+
+    expect(withExplicitUndefined).toEqual(withNoFourthArg);
+    expect(entryIds(withNoFourthArg.rows)).toEqual(['e-mum', 'e-dad']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SC-004 in the model: a stored instant still lands on the day it names
 // ---------------------------------------------------------------------------
 
@@ -995,8 +1111,9 @@ describe('filterRange', () => {
 
 describe('the civil-date guard: no date string parsed as an instant', () => {
   /**
-   * 016's own files, and the two existing files it edits. Both of those are free of the
-   * spelling today, so listing them is a real guard rather than a standing failure.
+   * Every file on the calendar's path: 016's own files and the two existing files it edits,
+   * then 019's (the same calendar on the Family and Friends journals). All of them are free
+   * of the spelling today, so listing them is a real guard rather than a standing failure.
    *
    * Named one file at a time, never as a folder: a folder scan cannot tell a file that is
    * clean from a file that was never written. A file a later task has not written yet is
@@ -1004,6 +1121,7 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
    * --strict` sets, so the feature's final run proves every listed file was really read.
    */
   const GUARDED_FILES = [
+    // --- 016: the Journal tab's calendar ---
     'src/utils/calendarModel.js',
     'src/utils/__tests__/calendarModel.test.js',
     'src/components/journal/CalendarSheet.js',
@@ -1019,6 +1137,33 @@ describe('the civil-date guard: no date string parsed as an instant', () => {
     'src/screens/JournalScreen.js',
     'src/services/DatabaseService.js',
     'scripts/test-tz.mjs',
+
+    // --- 019 (T014): the same calendar on the Family and Friends journals ---
+    // The point of 019 is that two more screens now word days, months and years, so the rule
+    // that was guarded on the Journal tab alone has to reach them too. Analyze round 4 (H1)
+    // caught the exact defect this is for before any code was written: the date bar copied
+    // from `JournalScreen.js` ran `new Date(date)` on a `'YYYY-MM-DD'` day key, which would
+    // have labelled the day before for everyone west of Greenwich. `JournalDateBar.js` words
+    // its key through `parseDateKey` instead, and this list is what keeps it that way.
+    //
+    // Source files, in the order the tasks wrote them.
+    'src/services/JournalCalendarService.js',
+    'src/components/journal/JournalDateBar.js',
+    'src/components/journal/FacesRow.js',
+    'src/hooks/usePeopleCalendar.js',
+    // T009's fix round extracted the two new screens' measured-scroll rule into one shared
+    // module. It does no date arithmetic itself, but it reads `buildRows`' rows and keys the
+    // heights it keeps by month key -- so it is on the calendar's path, and a day or month
+    // derived here rather than taken from the row would be as wrong as anywhere else. The
+    // grep costs nothing, which is the same reason 016 kept the two `CalendarSheet` wrappers.
+    'src/hooks/usePinnedHeadingScroll.js',
+    // The existing screens 019 rewires.
+    'src/screens/PersonJournalScreen.js',
+    'src/screens/FamilySummaryScreen.js',
+    // `adaptEntry` lives here, and it is where a memory's civil day enters the phone: 019 (T002)
+    // added `datePrecision` beside the `date` its own comment says must be carried verbatim and
+    // never re-parsed. Re-parsing it is precisely the spelling below, so the file belongs here.
+    'src/services/SocialService.js',
   ];
 
   const ROOT = path.resolve(__dirname, '../../..');
